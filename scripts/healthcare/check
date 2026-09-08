@@ -286,7 +286,9 @@ run_container_package() {
   local source_commit=${SOURCE_SHA:?SOURCE_SHA must identify the public source}
   [ "$source_commit" = "$(git rev-parse HEAD)" ] || return 2
   local image="healthcare-mrf-api:ci-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
-  trap 'docker image rm --force "$image" >/dev/null 2>&1 || true' EXIT
+  local cleanup_command
+  printf -v cleanup_command 'docker image rm --force %q >/dev/null 2>&1 || true' "$image"
+  trap "$cleanup_command" EXIT
   docker build \
     --platform linux/amd64 \
     --build-arg "HLTHPRT_SOURCE_COMMIT=${source_commit}" \
