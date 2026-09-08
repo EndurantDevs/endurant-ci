@@ -27,6 +27,6 @@ jobs:
           python -m unittest discover -s tests -p 'test_*.py'
           python scripts/healthcare/test_measurement.py
       - name: Check shell syntax
-        run: if [ -d scripts ]; then find scripts -type f \( -name check -o -name '*.sh' \) -exec bash -n '{}' +; fi
+        run: if [ -d scripts ]; then find scripts -type f \( -name check -o -name '*.sh' \) -exec bash -n '{}' \;; fi
       - name: Check workflow syntax
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= -pyflakes= .github/workflows/*.yml
