@@ -37,7 +37,7 @@ class RenderWorkflowChecks(unittest.TestCase):
                         self.assertEqual(job["runs-on"], "ubuntu-latest")
                         template = original["jobs"][job_id] if job_id == "smoke" else canonical["jobs"][job_id]
                         expected = json.loads(json.dumps(template).replace("${{ inputs.ci_revision }}", "1" * 40))
-                        expected["name"] = RENDERER.job_name(expected["name"])
+                        expected["name"] = RENDERER.job_name(expected["name"], job_id)
                         condition = expected.get("if", "success()").removeprefix("${{").removesuffix("}}").strip()
                         expected["if"] = "${{ " + RENDERER.GUARD + condition + ") }}"
                         self.assertEqual(job, expected)
@@ -60,6 +60,13 @@ class RenderWorkflowChecks(unittest.TestCase):
         for revision in ("main", "0" * 40, "1" * 39, "${{ github.sha }}"):
             with self.subTest(revision=revision), self.assertRaises(ValueError):
                 RENDERER.render_workflow("healthcare", revision, Path("unused"))
+        with self.assertRaises(ValueError):
+            RENDERER.job_name("${{ matrix.label }}")
+        matrix_names = [RENDERER.job_name("${{ matrix.label }}", name)
+                        for name in ("python-tests", "address-canonical-db-tests")]
+        self.assertEqual(len(set(matrix_names)), 2)
+        for name in matrix_names:
+            self.assertIn("(metadata only)' || matrix.label", name)
 
 
 if __name__ == "__main__":
