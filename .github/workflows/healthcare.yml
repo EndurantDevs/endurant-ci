@@ -131,8 +131,6 @@ jobs:
     needs:
     - public-hygiene
     - readability-preflight
-    env:
-      COVERAGE_FILE: .coverage.main.0
     defaults:
       run:
         shell: bash
@@ -167,9 +165,9 @@ jobs:
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: mrf-python-coverage-main-0-${{ github.run_id }}-${{ github.run_attempt }}
-        path: 'source/.coverage.main.0
+        path: '${{ runner.temp }}/healthcare-artifacts/.coverage.main.0
 
-          source/.coverage-provenance.main.0.json'
+          ${{ runner.temp }}/healthcare-artifacts/.coverage-provenance.main.0.json'
         include-hidden-files: true
         retention-days: 1
         if-no-files-found: error
@@ -183,8 +181,6 @@ jobs:
     needs:
     - public-hygiene
     - readability-preflight
-    env:
-      COVERAGE_FILE: .coverage.main.1
     defaults:
       run:
         shell: bash
@@ -219,9 +215,9 @@ jobs:
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: mrf-python-coverage-main-1-${{ github.run_id }}-${{ github.run_attempt }}
-        path: 'source/.coverage.main.1
+        path: '${{ runner.temp }}/healthcare-artifacts/.coverage.main.1
 
-          source/.coverage-provenance.main.1.json'
+          ${{ runner.temp }}/healthcare-artifacts/.coverage-provenance.main.1.json'
         include-hidden-files: true
         retention-days: 1
         if-no-files-found: error
@@ -235,8 +231,6 @@ jobs:
     needs:
     - public-hygiene
     - readability-preflight
-    env:
-      COVERAGE_FILE: .coverage.main.2
     defaults:
       run:
         shell: bash
@@ -271,9 +265,9 @@ jobs:
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: mrf-python-coverage-main-2-${{ github.run_id }}-${{ github.run_attempt }}
-        path: 'source/.coverage.main.2
+        path: '${{ runner.temp }}/healthcare-artifacts/.coverage.main.2
 
-          source/.coverage-provenance.main.2.json'
+          ${{ runner.temp }}/healthcare-artifacts/.coverage-provenance.main.2.json'
         include-hidden-files: true
         retention-days: 1
         if-no-files-found: error
@@ -287,8 +281,6 @@ jobs:
     needs:
     - public-hygiene
     - readability-preflight
-    env:
-      COVERAGE_FILE: .coverage.main.3
     defaults:
       run:
         shell: bash
@@ -323,9 +315,9 @@ jobs:
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: mrf-python-coverage-main-3-${{ github.run_id }}-${{ github.run_attempt }}
-        path: 'source/.coverage.main.3
+        path: '${{ runner.temp }}/healthcare-artifacts/.coverage.main.3
 
-          source/.coverage-provenance.main.3.json'
+          ${{ runner.temp }}/healthcare-artifacts/.coverage-provenance.main.3.json'
         include-hidden-files: true
         retention-days: 1
         if-no-files-found: error
@@ -338,8 +330,6 @@ jobs:
     timeout-minutes: 20
     needs:
     - readability-preflight
-    env:
-      COVERAGE_FILE: .coverage.capacity
     defaults:
       run:
         shell: bash
@@ -366,9 +356,9 @@ jobs:
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: mrf-python-coverage-capacity-${{ github.run_id }}-${{ github.run_attempt }}
-        path: 'source/.coverage.capacity
+        path: '${{ runner.temp }}/healthcare-artifacts/.coverage.capacity
 
-          source/.coverage-provenance.capacity.json'
+          ${{ runner.temp }}/healthcare-artifacts/.coverage-provenance.capacity.json'
         include-hidden-files: true
         retention-days: 1
         if-no-files-found: error
@@ -437,7 +427,7 @@ jobs:
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: mrf-rust-coverage-${{ github.run_id }}-${{ github.run_attempt }}
-        path: source/coverage-artifacts/rust
+        path: ${{ runner.temp }}/healthcare-artifacts/coverage-artifacts/rust
         if-no-files-found: error
         retention-days: 1
       id: coverage-artifact
@@ -553,7 +543,6 @@ jobs:
         options: --health-cmd "pg_isready -U postgres -d ptg2_v3_lifecycle_test_ci_runner" --health-interval 2s --health-timeout
           5s --health-retries 25
     env:
-      COVERAGE_FILE: .coverage.postgres.core
       PYTEST_ADDOPTS: --cov-config=test-coverage.ini --cov=api --cov=db --cov=process --cov=public_evidence --cov=service
         --cov=main --cov-branch --cov-report= --cov-append
       HLTHPRT_DB_DRIVER: asyncpg
@@ -603,9 +592,9 @@ jobs:
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: mrf-python-coverage-postgres-core-${{ github.run_id }}-${{ github.run_attempt }}
-        path: 'source/.coverage.postgres.core
+        path: '${{ runner.temp }}/healthcare-artifacts/.coverage.postgres.core
 
-          source/.coverage-provenance.postgres.core.json'
+          ${{ runner.temp }}/healthcare-artifacts/.coverage-provenance.postgres.core.json'
         include-hidden-files: true
         retention-days: 1
         if-no-files-found: error
@@ -630,7 +619,6 @@ jobs:
         options: --health-cmd "pg_isready -U postgres -d ptg2_v3_lifecycle_test_ci_runner" --health-interval 2s --health-timeout
           5s --health-retries 25
     env:
-      COVERAGE_FILE: .coverage.postgres.provider-directory
       PYTEST_ADDOPTS: --cov-config=test-coverage.ini --cov=api --cov=db --cov=process --cov=public_evidence --cov=service
         --cov=main --cov-branch --cov-report= --cov-append
       HLTHPRT_DB_DRIVER: asyncpg
@@ -680,9 +668,9 @@ jobs:
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: mrf-python-coverage-postgres-provider-directory-${{ github.run_id }}-${{ github.run_attempt }}
-        path: 'source/.coverage.postgres.provider-directory
+        path: '${{ runner.temp }}/healthcare-artifacts/.coverage.postgres.provider-directory
 
-          source/.coverage-provenance.postgres.provider-directory.json'
+          ${{ runner.temp }}/healthcare-artifacts/.coverage-provenance.postgres.provider-directory.json'
         include-hidden-files: true
         retention-days: 1
         if-no-files-found: error
@@ -707,7 +695,6 @@ jobs:
         options: --health-cmd "pg_isready -U postgres -d ptg2_v3_lifecycle_test_ci_runner" --health-interval 2s --health-timeout
           5s --health-retries 25
     env:
-      COVERAGE_FILE: .coverage.postgres.provider-profile
       PYTEST_ADDOPTS: --cov-config=test-coverage.ini --cov=api --cov=db --cov=process --cov=public_evidence --cov=service
         --cov=main --cov-branch --cov-report= --cov-append
       HLTHPRT_DB_DRIVER: asyncpg
@@ -757,9 +744,9 @@ jobs:
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: mrf-python-coverage-postgres-provider-profile-${{ github.run_id }}-${{ github.run_attempt }}
-        path: 'source/.coverage.postgres.provider-profile
+        path: '${{ runner.temp }}/healthcare-artifacts/.coverage.postgres.provider-profile
 
-          source/.coverage-provenance.postgres.provider-profile.json'
+          ${{ runner.temp }}/healthcare-artifacts/.coverage-provenance.postgres.provider-profile.json'
         include-hidden-files: true
         retention-days: 1
         if-no-files-found: error

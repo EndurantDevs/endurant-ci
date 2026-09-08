@@ -11,7 +11,7 @@ import sqlite3
 
 
 MAX_FILE_BYTES = 32 * 1024 * 1024
-MAX_TOTAL_BYTES = 64 * 1024 * 1024
+MAX_TOTAL_BYTES = 64 * 1024 * 1024 - 64 * 1024  # Reserve ZIP headers below the verifier limit.
 SQL_COLUMNS = {
     "coverage_schema": ("version",), "meta": ("key", "value"),
     "file": ("id", "path"), "context": ("id", "context"),
