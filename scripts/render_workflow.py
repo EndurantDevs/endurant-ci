@@ -15,7 +15,11 @@ METADATA_ONLY = ("github.event_name == 'pull_request' && github.event.action == 
 GUARD = f"!({METADATA_ONLY}) && ("
 
 
-def job_name(label):
+def job_name(label, matrix_job=None):
+    if label == "${{ matrix.label }}":
+        if not matrix_job or not re.fullmatch(r"[a-z0-9_-]+", matrix_job):
+            raise ValueError("matrix metadata labels require a fixed job identifier")
+        return "${{ " + METADATA_ONLY + f" && '{matrix_job} (metadata only)' || matrix.label " + "}}"
     if not re.fullmatch(r"[A-Za-z0-9 ()/._-]+", label):
         raise ValueError("job labels must be fixed public text")
     return "${{ " + METADATA_ONLY + f" && '{label} (metadata only)' || '{label}' " + "}}"
@@ -37,14 +41,24 @@ def render_workflow(kind, revision, caller):
         "cancel-in-progress": "${{ !(" + METADATA_ONLY + ") && github.ref != 'refs/heads/main' }}",
     }
     workflow["jobs"] = {"smoke": workflow["jobs"]["smoke"], **canonical["jobs"]}
-    for job in workflow["jobs"].values():
+    for job_id, job in workflow["jobs"].items():
         label = job["name"]
-        if label.startswith("${{"):
+        if label == "${{ matrix.label }}":
+            matrix = job.get("strategy", {}).get("matrix", {})
+            rows = matrix.get("include", [])
+            if set(matrix) != {"include"} or not isinstance(rows, list) or not rows:
+                raise ValueError("matrix labels must come from fixed include rows")
+            labels = [row.get("label", "") for row in rows]
+            if len(labels) != len(set(labels)):
+                raise ValueError("matrix job labels must be unique")
+            for value in labels:
+                job_name(value)
+        elif label.startswith("${{"):
             match = re.search(r" \|\| '([^']+)' }}$", label)
             if not match or job_name(match[1]) != label:
                 raise ValueError("existing job label is not the fixed metadata expression")
             label = match[1]
-        job["name"] = job_name(label)
+        job["name"] = job_name(label, job_id)
         condition = job.get("if", "success()")
         if condition.startswith("${{") and condition.endswith("}}"):
             condition = condition[3:-2].strip()

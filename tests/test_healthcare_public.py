@@ -15,6 +15,25 @@ CHECK_FUNCTIONS = (ROOT / "scripts/healthcare/check").read_text().rsplit("\ncase
 
 
 class HealthcarePublicChecks(unittest.TestCase):
+    def test_matrix_artifact_outputs_are_unique_and_reject_missing_or_multiline_ids(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for job_id in ("python-tests", "address-canonical-db-tests"):
+                job = workflow["jobs"][job_id]
+                command = job["steps"][-1]["run"]
+                for row in job["strategy"]["matrix"]["include"]:
+                    output = root / row["output"]
+                    env = {**os.environ, "ARTIFACT_OUTPUT": row["output"], "ARTIFACT_ID": "123",
+                           "GITHUB_OUTPUT": str(output)}
+                    subprocess.run(["bash", "-euc", command], env=env, check=True)
+                    self.assertEqual(output.read_text(), row["output"] + "=123\n")
+                    for invalid in ("", "0", "123\nartifact_other=456"):
+                        result = subprocess.run(["bash", "-euc", command], env={**env, "ARTIFACT_ID": invalid},
+                                                capture_output=True)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertEqual(output.read_text(), row["output"] + "=123\n")
+
     def test_measurements_leave_source_frozen_and_match_every_upload(self):
         workflow = yaml.load((ROOT / ".github/workflows/healthcare.yml").read_text(), Loader=yaml.BaseLoader)
         setup = yaml.load((ROOT / "scripts/healthcare/setup/action.yml").read_text(), Loader=yaml.BaseLoader)
@@ -39,13 +58,16 @@ class HealthcarePublicChecks(unittest.TestCase):
             uploads = []
             freezes = []
             for job in workflow["jobs"].values():
+                rows = job.get("strategy", {}).get("matrix", {}).get("include", [{}])
                 for step in job.get("steps", []):
                     if step.get("id") == "coverage-artifact":
                         self.assertNotIn("COVERAGE_FILE", job.get("env", {}))
-                        uploads.extend(line.strip() for line in step["with"]["path"].splitlines() if line.strip())
                         validation = next(item["run"] for item in job["steps"]
                                           if item.get("name") == "Run complete validation stage")
-                        freezes.append(validation[validation.index("git diff --exit-code"):])
+                        for row in rows:
+                            uploads.extend(line.strip().replace("${{ matrix.shard }}", row.get("shard", ""))
+                                           for line in step["with"]["path"].splitlines() if line.strip())
+                            freezes.append(validation[validation.index("git diff --exit-code"):])
             self.assertEqual(len(uploads), 17)  # Eight Python pairs plus the Rust directory.
             script = CHECK_FUNCTIONS
             for upload in uploads:
