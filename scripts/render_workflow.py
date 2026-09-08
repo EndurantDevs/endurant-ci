@@ -64,7 +64,12 @@ def render_workflow(kind, revision, caller):
             condition = condition[3:-2].strip()
         if condition.startswith(GUARD) and condition.endswith(")"):
             condition = condition[len(GUARD):-1]
-        job["if"] = "${{ " + GUARD + condition + ") }}"
+        # Required checks must exist in the latest PR suite, including metadata edits.
+        if job_id == "smoke":
+            job["name"] = label
+            job["if"] = "${{ " + condition + " }}"
+        else:
+            job["if"] = "${{ " + GUARD + condition + ") }}"
     return "# Generated from the pinned Endurance CI workflow; refresh with scripts/render_workflow.py.\n" + yaml.safe_dump(workflow, sort_keys=False, width=120)
 
 

@@ -37,9 +37,10 @@ class RenderWorkflowChecks(unittest.TestCase):
                         self.assertEqual(job["runs-on"], "ubuntu-latest")
                         template = original["jobs"][job_id] if job_id == "smoke" else canonical["jobs"][job_id]
                         expected = json.loads(json.dumps(template).replace("${{ inputs.ci_revision }}", "1" * 40))
-                        expected["name"] = RENDERER.job_name(expected["name"], job_id)
+                        if job_id != "smoke":
+                            expected["name"] = RENDERER.job_name(expected["name"], job_id)
                         condition = expected.get("if", "success()").removeprefix("${{").removesuffix("}}").strip()
-                        expected["if"] = "${{ " + RENDERER.GUARD + condition + ") }}"
+                        expected["if"] = "${{ success() }}" if job_id == "smoke" else "${{ " + RENDERER.GUARD + condition + ") }}"
                         self.assertEqual(job, expected)
                         for step in job.get("steps", []):
                             if step.get("with", {}).get("repository") == "EndurantDevs/endurant-ci":
@@ -52,6 +53,29 @@ class RenderWorkflowChecks(unittest.TestCase):
                     self.assertEqual(RENDERER.render_workflow(kind, "1" * 40, caller), rendered)
                     refreshed = yaml.safe_load(RENDERER.render_workflow(kind, "2" * 40, caller))
                     self.assertEqual(refreshed["jobs"]["smoke"], workflow["jobs"]["smoke"])
+
+    def test_existing_metadata_skipped_smoke_becomes_a_real_static_required_check(self):
+        smoke = {"name": "portable import checks", "runs-on": "ubuntu-latest",
+                 "steps": [{"name": "Run synthetic import checks", "run": "python -m pytest -q tests/test_imports.py"}]}
+        previous = {**smoke, "name": RENDERER.job_name(smoke["name"]),
+                    "if": "${{ " + RENDERER.GUARD + "success()) }}"}
+        with tempfile.TemporaryDirectory() as temporary:
+            caller = Path(temporary) / "ci.yml"
+            for kind in ("healthcare", "drug"):
+                with self.subTest(kind=kind):
+                    caller.write_text(yaml.safe_dump({"name": "CI", "on": {"pull_request": {}},
+                                                     "jobs": {"smoke": previous}}))
+                    rendered = RENDERER.render_workflow(kind, "1" * 40, caller)
+                    workflow = yaml.safe_load(rendered)
+                    self.assertEqual(workflow["jobs"]["smoke"], {**smoke, "if": "${{ success() }}"})
+                    self.assertEqual(workflow["permissions"], {"contents": "read", "pull-requests": "read", "actions": "read"})
+                    self.assertIn("CI metadata update", workflow["run-name"])
+                    for job_id, job in workflow["jobs"].items():
+                        if job_id != "smoke":
+                            self.assertIn(RENDERER.GUARD, job["if"])
+                            self.assertIn("(metadata only)", job["name"])
+                    caller.write_text(rendered)
+                    self.assertEqual(RENDERER.render_workflow(kind, "1" * 40, caller), rendered)
 
     def test_revision_and_job_labels_cannot_inject_expressions(self):
         for label in ("${{ inputs.name }}", "bad' || true || '"):
