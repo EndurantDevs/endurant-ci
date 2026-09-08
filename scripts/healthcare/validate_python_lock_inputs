@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""Fail when the exact Python lock no longer matches its recursive inputs."""
+
+from __future__ import annotations
+
+import hashlib
+import os
+from pathlib import Path
+import re
+import sys
+
+
+repository_root = (
+    Path(sys.argv[1]).resolve()
+    if len(sys.argv) == 2
+    else Path(os.environ["SOURCE_ROOT"]).resolve()
+)
+input_names = ("requirements.txt", "requirements-dev.txt", "requirements-ci.in")
+ci_inputs = Path(__file__).resolve().parent
+lock_text = (ci_inputs / "requirements-ci.lock").read_text(encoding="utf-8")
+recorded = dict(
+    re.findall(r"^# Input: ([^ ]+) \(([0-9a-f]{64})\)$", lock_text, re.MULTILINE)
+)
+expected = {
+    name: hashlib.sha256(((ci_inputs if name == "requirements-ci.in" else repository_root) / name).read_bytes()).hexdigest()
+    for name in input_names
+}
+if recorded != expected:
+    raise SystemExit(
+        "requirements-ci.lock does not match its recursive inputs; "
+        "regenerate it with scripts/healthcare/compile_python_lock"
+    )

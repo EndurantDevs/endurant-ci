@@ -1,0 +1,48 @@
+name: Prepare Healthcare source validation
+description: Resolve the source event and install the exact public Python toolchain
+inputs:
+  rust:
+    description: Install the reviewed Rust toolchain
+    default: 'false'
+    required: false
+runs:
+  using: composite
+  steps:
+  - name: Resolve exact source event
+    id: identity
+    env:
+      GH_TOKEN: ${{ github.token }}
+    run: python3 ci/scripts/source_identity.py
+    working-directory: ${{ github.workspace }}
+    shell: bash
+  - name: Check out exact public source
+    uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    with:
+      repository: EndurantDevs/healthcare-mrf-api
+      ref: ${{ steps.identity.outputs.SOURCE_SHA }}
+      path: source
+      fetch-depth: 0
+      persist-credentials: false
+  - name: Verify checkout identity
+    run: 'test "$SOURCE_REPOSITORY" = EndurantDevs/healthcare-mrf-api
+
+      test "$(git -C "$CI_ROOT" rev-parse HEAD)" = "$CI_REVISION"
+
+      test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+      git merge-base --is-ancestor "$BASE_SHA" HEAD
+
+      printf ''COVERAGE_BASE_SHA=%s\n'' "$BASE_SHA" >> "$GITHUB_ENV"'
+    shell: bash
+    working-directory: source
+  - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+    with:
+      python-version: 3.14.6
+  - name: Install exact Rust toolchain
+    if: inputs.rust == 'true'
+    shell: bash
+    working-directory: source
+    run: 'rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy --component llvm-tools-preview
+      --no-self-update
+
+      rustup default 1.97.1'

@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+input_root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source_root=${SOURCE_ROOT:?SOURCE_ROOT must identify the public source checkout}
+
+case "$#:${1-}" in
+  0:|1:coverage) ;;
+  *) echo "usage: scripts/healthcare/install_python_lock [coverage]" >&2; exit 2 ;;
+esac
+
+python "$input_root/validate_python_lock_inputs" "$source_root"
+
+python - <<'PY'
+import platform
+
+
+actual = (platform.python_version(), platform.system(), platform.machine())
+expected = ("3.14.6", "Linux", "x86_64")
+if actual != expected:
+    raise SystemExit(
+        "requirements-ci.lock targets CPython 3.14.6 on Linux x86_64; "
+        f"found {actual[0]} on {actual[1]} {actual[2]}. "
+        "Install this CI lock only in its native Linux/amd64 CI environment."
+    )
+PY
+
+pip_install_args=(--force-reinstall)
+
+lock_file="$input_root/requirements-ci.lock"
+if [ "${1-}" = coverage ]; then
+  lock_file=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-coverage-lock.XXXXXX")
+  trap 'rm -f -- "$lock_file"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  python - "$lock_file" "$input_root/requirements-ci.lock" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+
+selected = [
+    line for line in Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()
+    if line.startswith(("coverage==", "pip=="))
+]
+if len(selected) != 2 or {line.split("==", 1)[0] for line in selected} != {"coverage", "pip"}:
+    raise SystemExit("coverage profile requires exactly one locked coverage and pip entry")
+if any(not re.fullmatch(r"(?:coverage|pip)==[^ ]+ --hash=sha256:[0-9a-f]{64}", line) for line in selected):
+    raise SystemExit("coverage profile requires exact wheel hashes")
+Path(sys.argv[1]).write_text("\n".join(selected) + "\n", encoding="utf-8")
+PY
+fi
+
+report=${CI_PIP_REPORT:-${RUNNER_TEMP:-/tmp}/healthcare-python-lock-install.json}
+mkdir -p "$(dirname "$report")"
+python -m pip install \
+  "${pip_install_args[@]}" \
+  --no-compile \
+  --only-binary=:all: \
+  --report "$report" \
+  --require-hashes \
+  -r "$lock_file"
+python -m pip check
+test "$(python -m pip --version | awk '{print $2}')" = 26.2.1
+python - "$report" "$lock_file" "${1-}" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+
+normalize = lambda name: re.sub(r"[-_.]+", "-", name).lower()
+lock_versions = {
+    normalize(line.split("==", 1)[0]): line.split("==", 1)[1].split()[0]
+    for line in Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()
+    if line and not line.startswith(("#", "--"))
+}
+lock_names = set(lock_versions)
+report = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+report_names = {
+    normalize(str(item.get("metadata", {}).get("name", "")))
+    for item in report.get("install", [])
+}
+if report_names != lock_names or len(report.get("install", [])) != len(lock_names):
+    if sys.argv[3] == "coverage":
+        raise SystemExit("pip install report does not match the coverage profile")
+    raise SystemExit("pip install report does not match the complete lock")
+if sys.argv[3] == "coverage" and {
+    normalize(str(item.get("metadata", {}).get("name", ""))): item.get("metadata", {}).get("version")
+    for item in report.get("install", [])
+} != lock_versions:
+    raise SystemExit("pip install report versions do not match the coverage profile")
+PY
