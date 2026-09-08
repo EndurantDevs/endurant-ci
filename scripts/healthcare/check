@@ -949,6 +949,7 @@ run_provider_profile_postgres() {
   fi
   local profile_test
   for profile_test in \
+    tests/test_kentucky_profile_acquisition.py \
     tests/test_massachusetts_profile_acquisition.py \
     tests/test_massachusetts_profile_store.py \
     tests/test_massachusetts_profile_completion.py \
