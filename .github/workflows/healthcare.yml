@@ -18,7 +18,7 @@ env:
   PYTHONDONTWRITEBYTECODE: '1'
 jobs:
   public-hygiene:
-    name: public hygiene
+    name: Repository checks
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -79,7 +79,7 @@ jobs:
     outputs:
       rust_artifact_id: ${{ steps.rust-artifact.outputs.artifact-id }}
   readability-preflight:
-    name: readability preflight
+    name: Readability checks
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -99,7 +99,7 @@ jobs:
     - name: Check readability before starting heavy jobs
       run: python scripts/readability_budget.py --base "$BASE_SHA"
   python-quality:
-    name: python quality
+    name: Python lint
     runs-on: ubuntu-latest
     timeout-minutes: 25
     defaults:
@@ -125,7 +125,7 @@ jobs:
 
         test -z "$(git ls-files --others --exclude-standard)"'
   python-tests-0:
-    name: python test suite (0/4)
+    name: Python tests (1/4)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs:
@@ -175,7 +175,7 @@ jobs:
     outputs:
       artifact_id: ${{ steps.coverage-artifact.outputs.artifact-id }}
   python-tests-1:
-    name: python test suite (1/4)
+    name: Python tests (2/4)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs:
@@ -225,7 +225,7 @@ jobs:
     outputs:
       artifact_id: ${{ steps.coverage-artifact.outputs.artifact-id }}
   python-tests-2:
-    name: python test suite (2/4)
+    name: Python tests (3/4)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs:
@@ -275,7 +275,7 @@ jobs:
     outputs:
       artifact_id: ${{ steps.coverage-artifact.outputs.artifact-id }}
   python-tests-3:
-    name: python test suite (3/4)
+    name: Python tests (4/4)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs:
@@ -325,7 +325,7 @@ jobs:
     outputs:
       artifact_id: ${{ steps.coverage-artifact.outputs.artifact-id }}
   capacity-evidence:
-    name: ptg2 capacity evidence
+    name: Capacity tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs:
@@ -366,7 +366,7 @@ jobs:
     outputs:
       artifact_id: ${{ steps.coverage-artifact.outputs.artifact-id }}
   api-contract:
-    name: openapi contract
+    name: API contract
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs:
@@ -394,7 +394,7 @@ jobs:
 
         test -z "$(git ls-files --others --exclude-standard)"'
   rust-scanner:
-    name: rust scanner
+    name: Rust tests
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs:
@@ -434,7 +434,7 @@ jobs:
     outputs:
       artifact_id: ${{ steps.coverage-artifact.outputs.artifact-id }}
   container-package:
-    name: linux container package
+    name: Container build
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs:
@@ -462,7 +462,7 @@ jobs:
 
         test -z "$(git ls-files --others --exclude-standard)"'
   security:
-    name: dependency and semgrep security
+    name: Security scans
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs:
@@ -490,7 +490,7 @@ jobs:
 
         test -z "$(git ls-files --others --exclude-standard)"'
   worker-queue-smoke:
-    name: redis worker queue smoke
+    name: Worker queue tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs:
@@ -526,7 +526,7 @@ jobs:
 
         test -z "$(git ls-files --others --exclude-standard)"'
   address-canonical-db-tests-core:
-    name: postgres18 postgis tests (core)
+    name: Database tests (core)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs:
@@ -602,7 +602,7 @@ jobs:
     outputs:
       artifact_id: ${{ steps.coverage-artifact.outputs.artifact-id }}
   address-canonical-db-tests-provider-directory:
-    name: postgres18 postgis tests (provider-directory)
+    name: Database tests (directory)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs:
@@ -678,7 +678,7 @@ jobs:
     outputs:
       artifact_id: ${{ steps.coverage-artifact.outputs.artifact-id }}
   address-canonical-db-tests-provider-profile:
-    name: postgres18 postgis tests (provider-profile)
+    name: Database tests (profiles)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs:
@@ -754,7 +754,7 @@ jobs:
     outputs:
       artifact_id: ${{ steps.coverage-artifact.outputs.artifact-id }}
   measurement:
-    name: public measurement
+    name: Coverage results
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs:
@@ -815,7 +815,7 @@ jobs:
         if-no-files-found: error
         retention-days: 90
   source-validation:
-    name: source validation
+    name: Validation complete
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: ${{ always() }}

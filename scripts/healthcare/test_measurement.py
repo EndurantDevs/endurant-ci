@@ -8,6 +8,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SPEC = importlib.util.spec_from_file_location("healthcare_measurement", Path(__file__).with_name("measurement.py"))
@@ -70,6 +71,18 @@ class MeasurementChecks(unittest.TestCase):
             manifest = json.loads((output / "measurement.json").read_text())
             self.assertEqual(manifest["run_attempt"], 2)
             self.assertEqual(len(manifest["sha256"]), 18)
+            self.assertEqual(MEASUREMENT.MAX_FILE_BYTES, 32 * 1024 * 1024)
+            self.assertEqual(MEASUREMENT.MAX_TOTAL_BYTES, 128 * 1024 * 1024 - 64 * 1024)
+            payload_size = sum(path.stat().st_size for path in staging.glob("*/*"))
+            with patch.object(MEASUREMENT, "MAX_TOTAL_BYTES", payload_size - 1):
+                with self.assertRaisesRegex(ValueError, "aggregate limit"):
+                    MEASUREMENT.publish(staging, root / "payload-over-limit", identity, "123", "2", "c" * 40)
+            with patch.object(MEASUREMENT, "MAX_TOTAL_BYTES", payload_size):
+                with self.assertRaisesRegex(ValueError, "metadata exceeds aggregate limit"):
+                    MEASUREMENT.publish(staging, root / "metadata-over-limit", identity, "123", "2", "c" * 40)
+            with patch.object(MEASUREMENT, "MAX_FILE_BYTES", 1):
+                with self.assertRaisesRegex(ValueError, "invalid staging artifact member"):
+                    MEASUREMENT.publish(staging, root / "member-over-limit", identity, "123", "2", "c" * 40)
             with self.assertRaises(ValueError):
                 MEASUREMENT.publish(staging, root / "wrong-attempt", identity, "123", "1", "c" * 40)
             next(output.glob(".coverage.main.*")).write_bytes(b"not SQLite")
