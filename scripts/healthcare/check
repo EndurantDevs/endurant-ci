@@ -950,6 +950,9 @@ run_provider_profile_postgres() {
   local profile_test
   for profile_test in \
     tests/test_kentucky_profile_acquisition.py \
+    tests/test_kentucky_profile_store.py \
+    tests/test_kentucky_profile_completion.py \
+    tests/test_provider_profile_kentucky_postgres.py \
     tests/test_massachusetts_profile_acquisition.py \
     tests/test_massachusetts_profile_store.py \
     tests/test_massachusetts_profile_completion.py \
