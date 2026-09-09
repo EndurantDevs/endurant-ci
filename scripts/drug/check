@@ -3,6 +3,7 @@
 set -euo pipefail
 
 cd "${SOURCE_ROOT:?SOURCE_ROOT must name the exact public checkout}"
+: "${CI_ROOT:?CI_ROOT must name the pinned public CI checkout}"
 
 readonly PYTHON_VERSION='3.14.7'
 readonly UV_VERSION='0.12.12'
@@ -228,15 +229,23 @@ runtime_image() {
     source_revision="${HLTHPRT_SOURCE_COMMIT:-$(git rev-parse HEAD)}"
     image_revision="$runtime_tag"
     cleanup_required=1
+    local build_args=(--build-arg "HLTHPRT_SOURCE_COMMIT=$source_revision")
+    if [[ "${PUBLIC_CI_EXPORT_IMAGE:-0}" == 1 ]]; then
+        build_args+=(--label "org.endurantdevs.public-ci.repository=${GITHUB_REPOSITORY:?}"
+                     --label "org.endurantdevs.public-ci.run=${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}")
+    fi
     docker build \
-        --build-arg "HLTHPRT_SOURCE_COMMIT=$source_revision" \
+        "${build_args[@]}" \
         --tag "$image_revision" \
         --file Dockerfile .
-    [[ "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image_revision")" == "$source_revision" ]]
     runtime_image_id="$(docker image inspect --format '{{.Id}}' "$image_revision")"
     [[ "$runtime_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
-    docker run --rm --name "$runtime_name" --entrypoint /opt/venv/bin/python "$image_revision" \
+    [[ "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$runtime_image_id")" == "$source_revision" ]]
+    docker run --rm --name "$runtime_name" --entrypoint /opt/venv/bin/python "$runtime_image_id" \
         -c 'import main, sanic'
+    if [[ "${PUBLIC_CI_EXPORT_IMAGE:-0}" == 1 ]]; then
+        "$python_bin" "$CI_ROOT/scripts/source_image.py" export "$runtime_image_id"
+    fi
 }
 
 local_services() {

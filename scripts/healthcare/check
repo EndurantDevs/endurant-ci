@@ -312,26 +312,34 @@ run_container_package() {
   local cleanup_command
   printf -v cleanup_command 'cleanup_container_image $? %q' "$image"
   trap "$cleanup_command" EXIT
+  local build_args=(--build-arg "HLTHPRT_SOURCE_COMMIT=${source_commit}")
+  if [[ "${PUBLIC_CI_EXPORT_IMAGE:-0}" == 1 ]]; then
+    build_args+=(--label "org.endurantdevs.public-ci.repository=${GITHUB_REPOSITORY:?}"
+                 --label "org.endurantdevs.public-ci.run=${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}")
+  fi
   docker build \
+    "${build_args[@]}" \
     --platform linux/amd64 \
-    --build-arg "HLTHPRT_SOURCE_COMMIT=${source_commit}" \
     --tag "$image" \
     .
+  local tested_image
+  tested_image=$(docker image inspect --format '{{.Id}}' "$image")
+  [[ "$tested_image" =~ ^sha256:[0-9a-f]{64}$ ]]
   if docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
-    "$image" \
+    "$tested_image" \
     | grep -q '^HLTHPRT_SOURCE_COMMIT='; then
     exit 1
   fi
   docker run --rm --platform linux/amd64 \
     --entrypoint /bin/sh \
-    "$image" \
+    "$tested_image" \
     -ec '
       test "$(cat /opt/healthporta/build-identity/healthcare-source-commit)" = "$1"
       test "$(stat -c "%u:%g:%a:%h:%s" /opt/healthporta/build-identity/healthcare-source-commit)" = "0:0:444:1:41"
     ' sh "$source_commit"
   docker run --rm --platform linux/amd64 \
     --entrypoint /bin/sh \
-    "$image" \
+    "$tested_image" \
     -ec '
       test -x /opt/support/ptg2_scanner/target/release/ptg2_scanner
       test -x /opt/support/ptg2_scanner/target/release/ptg2_provider_graph_v4
@@ -340,7 +348,7 @@ run_container_package() {
     '
   docker run --rm --platform linux/amd64 \
     --entrypoint /bin/sh \
-    "$image" \
+    "$tested_image" \
     -ec '
       set +e
       operation_output=$(env \
@@ -357,7 +365,7 @@ run_container_package() {
     '
   docker run --rm --platform linux/amd64 \
     --entrypoint /bin/sh \
-    "$image" \
+    "$tested_image" \
     -ec '
       set +e
       operation_output=$(env \
@@ -377,7 +385,7 @@ run_container_package() {
     '
   docker run --rm --platform linux/amd64 \
     --entrypoint /bin/sh \
-    "$image" \
+    "$tested_image" \
     -ec '
       set +e
       operation_output=$(env \
@@ -399,7 +407,7 @@ run_container_package() {
     '
   docker run --rm --platform linux/amd64 \
     --entrypoint /bin/sh \
-    "$image" \
+    "$tested_image" \
     -ec '
       set +e
       operation_output=$(env \
@@ -418,7 +426,7 @@ run_container_package() {
     '
   docker run --rm --platform linux/amd64 \
     --entrypoint /bin/sh \
-    "$image" \
+    "$tested_image" \
     -ec '
       for operation in \
         sync-verified-state \
@@ -444,7 +452,7 @@ run_container_package() {
     '
   docker run --rm --platform linux/amd64 \
     --entrypoint /bin/sh \
-    "$image" \
+    "$tested_image" \
     -ec '
       set +e
       operation_output=$(env \
@@ -457,6 +465,34 @@ run_container_package() {
       test "$operation_status" -eq 1
       test "$operation_output" = '\''{"code":"disabled","status":"error"}'\''
     '
+  local validation_path
+  for validation_path in \
+    scripts/smoke/provider_directory_runtime_contract.py \
+    scripts/research/provider_directory_coverage_audit.py \
+    scripts/research/provider_directory_fhir_harness.py \
+    scripts/devops/ptg2_strict_v3_cutover_ready.py; do
+    [ -f "$repository_root/$validation_path" ] || { printf 'Missing image validator: %s\n' "$validation_path" >&2; return 1; }
+  done
+  # Validators excluded from the image use exact-source read-only mounts; all
+  # production modules and packaged operator commands come from the tested image.
+  docker run --rm --platform linux/amd64 --network none --workdir /opt --entrypoint /opt/venv/bin/python \
+    --mount "type=bind,source=$repository_root/scripts/smoke/provider_directory_runtime_contract.py,target=/opt/scripts/smoke/provider_directory_runtime_contract.py,readonly" \
+    --mount "type=bind,source=$repository_root/scripts/research/provider_directory_coverage_audit.py,target=/opt/scripts/research/provider_directory_coverage_audit.py,readonly" \
+    --mount "type=bind,source=$repository_root/scripts/research/provider_directory_fhir_harness.py,target=/opt/scripts/research/provider_directory_fhir_harness.py,readonly" \
+    "$tested_image" scripts/smoke/provider_directory_runtime_contract.py
+  docker run --rm --platform linux/amd64 --network none --entrypoint /bin/sh "$tested_image" -ec '
+    test -f /opt/alembic/versions/20260712120000_ptg2_v3_shared_schema.py
+    test -s /opt/healthporta/build-identity/healthcare-source-commit
+    test -f /opt/alembic/versions/20260810110000_ptg_wave_receipt_authority.py
+    test -f /opt/process/ptg_wave_receipt_process_authority.py
+    grep -Fq RECEIPT_AUTHORITY_ROLE_ENV /opt/process/ptg_wave_receipt_process_authority.py
+  '
+  docker run --rm --platform linux/amd64 --network none --workdir /opt --entrypoint /opt/venv/bin/python \
+    --mount "type=bind,source=$repository_root/scripts/devops/ptg2_strict_v3_cutover_ready.py,target=/run/healthporta-validation/cutover-ready.py,readonly" \
+    "$tested_image" /run/healthporta-validation/cutover-ready.py --help >/dev/null
+  if [ "${PUBLIC_CI_EXPORT_IMAGE:-0}" = 1 ]; then
+    python3 "$CI_ROOT/scripts/source_image.py" export "$tested_image"
+  fi
 }
 
 run_security() {

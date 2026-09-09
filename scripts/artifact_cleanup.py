@@ -48,14 +48,15 @@ def completed_consumers(repository, run):
 
 def temporary_names(kind, run):
     suffix = f"{run['id']}-{run['run_attempt']}"
+    image = {f"{kind}-public-image-staging-{suffix}"} if run["event"] == "push" and run["head_branch"] == "dev" else set()
     if kind == "drug":
-        return {f"drug-public-staging-{suffix}"}
+        return image | {f"drug-public-staging-{suffix}"}
     return {f"{name}-{suffix}" for name in (
         "healthcare-rust-debug", "mrf-rust-coverage", "mrf-python-coverage-capacity",
         *(f"mrf-python-coverage-main-{shard}" for shard in range(4)),
         *(f"mrf-python-coverage-postgres-{shard}" for shard in
           ("core", "provider-directory", "provider-profile")),
-    )}
+    )} | image
 
 
 def timestamp(value):
@@ -109,17 +110,24 @@ def cleanup(repository, expected):
     if len(finals) != 1 or not durable(finals[0], expected):
         raise ValueError("retained intermediates: exact durable public measurement is missing or invalid")
     final = finals[0]
+    proofs = [final]
+    if any(item["name"] == f"{kind}-public-image-staging-{expected['id']}-{expected['run_attempt']}" for item in candidates):
+        receipts = [item for item in artifacts if item.get("name") == f"{kind}-public-image-{expected['id']}-{expected['run_attempt']}"]
+        if len(receipts) != 1 or not durable(receipts[0], expected):
+            raise ValueError("retained image archive: durable publication receipt is missing or invalid")
+        proofs.append(receipts[0])
     deleted = 0
     for artifact in candidates:
         # Refresh consumer completion, immutable artifacts, and run before each delete.
         if completed_consumers(repository, expected) != consumers:
             raise ValueError("retained intermediates: validation job inventory changed")
         current = github.api(repository, f"actions/artifacts/{artifact['id']}")
-        measurement = github.api(repository, f"actions/artifacts/{final['id']}")
-        if (not available(current, expected) or not durable(measurement, expected)
-                or any(current.get(key) != artifact.get(key) or measurement.get(key) != final.get(key)
-                       for key in ARTIFACT_FIELDS)):
-            raise ValueError("retained intermediates: artifact identity or durable measurement changed")
+        if not available(current, expected) or any(current.get(key) != artifact.get(key) for key in ARTIFACT_FIELDS):
+            raise ValueError("retained intermediates: artifact identity changed")
+        for proof in proofs:
+            measurement = github.api(repository, f"actions/artifacts/{proof['id']}")
+            if not durable(measurement, expected) or any(measurement.get(key) != proof.get(key) for key in ARTIFACT_FIELDS):
+                raise ValueError("retained intermediates: durable measurement or publication changed")
         if not current_run(github.api(repository, run_path), expected, repository):
             raise ValueError(f"stopped after {deleted} deletions: producing run changed")
         github.api(repository, f"actions/artifacts/{artifact['id']}", "DELETE")

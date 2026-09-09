@@ -30,12 +30,12 @@ class RenderWorkflowChecks(unittest.TestCase):
                     rendered = RENDERER.render_workflow(kind, "1" * 40, caller)
                     workflow = yaml.safe_load(rendered)
                     self.assertEqual(workflow["on"], original["on"])
-                    self.assertEqual(set(workflow["jobs"]), {"smoke", "artifact-cleanup", *canonical["jobs"]})
+                    self.assertEqual(set(workflow["jobs"]), {"smoke", "dev-image-publication", "artifact-cleanup", *canonical["jobs"]})
                     self.assertNotIn("${{ inputs.ci_revision }}", rendered)
                     for job_id, job in workflow["jobs"].items():
                         self.assertNotIn("uses", job)
                         self.assertEqual(job["runs-on"], "ubuntu-latest")
-                        if job_id == "artifact-cleanup":
+                        if job_id in {"artifact-cleanup", "dev-image-publication"}:
                             continue  # Its complete privilege and execution contract is checked below.
                         template = original["jobs"][job_id] if job_id == "smoke" else canonical["jobs"][job_id]
                         expected = json.loads(json.dumps(template).replace("${{ inputs.ci_revision }}", "1" * 40))
@@ -50,13 +50,17 @@ class RenderWorkflowChecks(unittest.TestCase):
                     self.assertIn(RENDERER.METADATA_ONLY, workflow["run-name"])
                     self.assertIn("format('ci-metadata-{0}', github.run_id)", workflow["concurrency"]["group"])
                     self.assertIn("format('ci-{0}', github.ref)", workflow["concurrency"]["group"])
+                    self.assertIn("github.event_name == 'push' && format('ci-push-{0}', github.run_id)",
+                                  workflow["concurrency"]["group"])
+                    self.assertEqual(workflow["concurrency"]["cancel-in-progress"],
+                                     "${{ github.event_name == 'pull_request' && !(" + RENDERER.METADATA_ONLY + ") }}")
                     self.assertIn(RENDERER.METADATA_ONLY, workflow["concurrency"]["cancel-in-progress"])
                     caller.write_text(rendered)
                     self.assertEqual(RENDERER.render_workflow(kind, "1" * 40, caller), rendered)
                     refreshed = yaml.safe_load(RENDERER.render_workflow(kind, "2" * 40, caller))
                     self.assertEqual(refreshed["jobs"]["smoke"], workflow["jobs"]["smoke"])
 
-    def test_only_final_cleanup_gets_write_access_and_executes_pinned_helpers(self):
+    def test_only_trusted_publication_and_final_cleanup_get_write_access(self):
         with tempfile.TemporaryDirectory() as directory:
             caller = Path(directory) / "ci.yml"
             for kind in ("healthcare", "drug"):
@@ -68,7 +72,7 @@ class RenderWorkflowChecks(unittest.TestCase):
                 cleanup_job = workflow["jobs"]["artifact-cleanup"]
                 self.assertEqual(cleanup_job, {
                     "name": RENDERER.job_name("CI artifact cleanup"), "runs-on": "ubuntu-latest", "timeout-minutes": 10,
-                    "needs": ["smoke", "source-validation" if kind == "healthcare" else "publish"],
+                    "needs": ["dev-image-publication"],
                     "if": "${{ " + RENDERER.GUARD + "success()) }}",
                     "permissions": {"contents": "read", "actions": "write"},
                     "steps": [{"name": "Check out trusted cleanup helper",
@@ -90,7 +94,40 @@ class RenderWorkflowChecks(unittest.TestCase):
                     pending.extend([needs] if isinstance(needs, str) else needs)
                 self.assertEqual(ancestors, set(workflow["jobs"]) - {"artifact-cleanup"})
                 for identifier in ancestors:
-                    self.assertTrue(all(value == "read" for value in workflow["jobs"][identifier].get("permissions", {}).values()))
+                    if identifier != "dev-image-publication":
+                        self.assertTrue(all(value == "read" for value in workflow["jobs"][identifier].get("permissions", {}).values()))
+                publisher = workflow["jobs"]["dev-image-publication"]
+                self.assertEqual(publisher["permissions"], {"contents": "read", "pull-requests": "read", "actions": "read", "packages": "write"})
+                self.assertEqual(publisher["needs"], ["smoke", "source-validation" if kind == "healthcare" else "publish"])
+                self.assertEqual(publisher["env"], {"CI_REVISION": "1" * 40, "PYTHONDONTWRITEBYTECODE": "1"})
+                self.assertEqual(publisher["steps"][0]["with"], {"repository": "EndurantDevs/endurant-ci", "ref": "1" * 40,
+                                 "path": "ci", "persist-credentials": False})
+                self.assertNotIn("if", publisher["steps"][1])
+                self.assertEqual(publisher["steps"][1]["run"], "python3 ci/scripts/source_image.py prepare")
+                steps = {step["name"]: step for step in publisher["steps"]}
+                self.assertEqual(len(steps), len(publisher["steps"]))
+                self.assertEqual(steps["Stage DEV image publication intent"]["run"], "python3 ci/scripts/source_image.py stage")
+                self.assertEqual(steps["Publish validated DEV image"]["run"], "python3 ci/scripts/source_image.py publish")
+                for step in publisher["steps"][2:-1]:
+                    self.assertEqual(step["if"], "steps.image.outputs.publish == 'true'")
+                self.assertEqual(publisher["steps"][2]["with"], {"artifact-ids": "${{ steps.image.outputs.artifact_id }}",
+                    "digest-mismatch": "error", "path": "${{ runner.temp }}/public-image-download", "merge-multiple": True})
+                self.assertEqual(steps["Upload DEV image receipt"]["with"], {
+                    "name": kind + "-public-image-${{ github.run_id }}-${{ github.run_attempt }}",
+                    "path": "${{ runner.temp }}/public-image-receipt/image.json",
+                    "if-no-files-found": "error", "retention-days": 90})
+                self.assertEqual(publisher["if"], "${{ " + RENDERER.GUARD + "success()) }}")
+                self.assertEqual(steps["Upload DEV image publication intent"]["with"], {
+                    "name": kind + "-public-image-intent-${{ github.run_id }}-${{ github.run_attempt }}",
+                    "path": "${{ runner.temp }}/public-image-intent/intent.json",
+                    "if-no-files-found": "error", "retention-days": 90})
+                self.assertLess(list(steps).index("Upload DEV image publication intent"),
+                                list(steps).index("Publish validated DEV image"))
+                self.assertEqual(publisher["steps"][-1], {
+                    "name": "Reconcile DEV image publication",
+                    "if": "always() && steps.image.outputs.publish == 'true'",
+                    "env": {"GH_TOKEN": "${{ github.token }}"},
+                    "run": "python3 ci/scripts/source_image.py reconcile"})
 
     def test_existing_metadata_skipped_smoke_becomes_a_real_static_required_check(self):
         smoke = {"name": "portable import checks", "runs-on": "ubuntu-latest",

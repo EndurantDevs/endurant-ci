@@ -158,6 +158,20 @@ class ArtifactCleanupChecks(unittest.TestCase):
             item = {**artifact(1, "mrf-rust-coverage-123-2"), "workflow_run": producer}
             self.assertEqual(self.exercise([item])[0], [])
 
+    def test_dev_archive_requires_durable_publication_and_preserves_both_final_receipts(self):
+        expected = {**run("EndurantDevs/drug-api"), "event": "push", "head_branch": "dev"}
+        archive = artifact(1, "drug-public-image-staging-123-2")
+        measurement = artifact(2, "drug-public-measurement-123-2", 90)
+        publication = artifact(3, "drug-public-image-123-2", 90)
+        for receipts in ([], [artifact(3, publication["name"], 1)], [{**publication, "expired": True}]):
+            with self.subTest(receipts=receipts), self.assertRaisesRegex(ValueError, "durable publication"):
+                self.exercise([archive, measurement, *receipts], expected)
+        deleted, _ = self.exercise([archive, measurement, publication], expected)
+        self.assertEqual(deleted, [1])
+        with self.assertRaisesRegex(ValueError, "publication changed"):
+            self.exercise([archive, measurement, publication], expected, changed_artifact=(3, {"digest": "sha256:" + "c" * 64}))
+        self.assertEqual(self.exercise([archive, measurement, publication], run("EndurantDevs/drug-api"))[0], [])
+
     def test_delete_api_requires_confirmed_204_and_propagates_errors(self):
         with patch.dict("os.environ", {"GH_TOKEN": "synthetic"}), patch.object(
                 cleanup.github.urllib.request, "urlopen") as request:
@@ -262,7 +276,7 @@ class ArtifactCleanupChecks(unittest.TestCase):
                         names.add(upload["name"].replace("${{ github.run_id }}", "123")
                                   .replace("${{ github.run_attempt }}", "2")
                                   .replace("${{ matrix.shard }}", row.get("shard", "")))
-            self.assertEqual(names, cleanup.temporary_names(kind, run(repository)))
+            self.assertEqual(names, cleanup.temporary_names(kind, {**run(repository), "event": "push", "head_branch": "dev"}))
 
 
 if __name__ == "__main__":
