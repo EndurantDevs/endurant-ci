@@ -42,8 +42,9 @@ runs:
       printf 'CI_ARTIFACT_ROOT=%s\n' "$artifact_directory" >> "$GITHUB_ENV"
     shell: bash
     working-directory: source
-  - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+  - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
     with:
+      version: 0.12.11
       python-version: 3.14.7
   - name: Install exact Rust toolchain
     if: inputs.rust == 'true'

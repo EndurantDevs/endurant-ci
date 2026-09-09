@@ -5,7 +5,7 @@ set -euo pipefail
 cd "${SOURCE_ROOT:?SOURCE_ROOT must name the exact public checkout}"
 
 readonly PYTHON_VERSION='3.14.7'
-readonly PIP_VERSION='26.2.1'
+readonly UV_VERSION='0.12.11'
 readonly POSTGRES_IMAGE='postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280'
 readonly REDIS_IMAGE='redis:7@sha256:71da9275c5f3fcb97d0fa0c8c5b36cc995327265420f17a04bfd544f458059f7'
 readonly RUNTIME_BASE_IMAGE='python:3.14.7-slim-trixie@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6'
@@ -14,10 +14,8 @@ readonly SEMGREP_IMAGE='returntocorp/semgrep@sha256:51c9f53a4fce0d55e9abd08d7b96
 mode="${1:-measure}"
 if [[ -n "${PYTHON_BIN:-}" ]]; then
     python_bin="$PYTHON_BIN"
-elif command -v python3.14 >/dev/null; then
-    python_bin=python3.14
 else
-    python_bin=python3
+    python_bin="$(uv python find "$PYTHON_VERSION")"
 fi
 candidate_sha=''
 runtime_image_id=''
@@ -122,19 +120,13 @@ PY
 
 require_python() {
     require_python_version
-    "$python_bin" - "$PIP_VERSION" <<'PY'
-from importlib.metadata import version
-import sys
-
-expected_pip = sys.argv[1]
-if version("pip") != expected_pip:
-    raise SystemExit(f"pip {expected_pip} is required, got {version('pip')}")
-PY
+    test "$(uv --version | awk '{print $2}')" = "$UV_VERSION"
 }
 
 install() {
-    "$python_bin" -m pip install "pip==$PIP_VERSION"
-    "$python_bin" -m pip install -r requirements-dev.txt
+    test "$(uv --version | awk '{print $2}')" = "$UV_VERSION"
+    uv sync --locked --all-groups --python "$python_bin" --no-python-downloads
+    python_bin="$SOURCE_ROOT/.venv/bin/python"
 }
 
 public_hygiene() {
@@ -188,8 +180,15 @@ coverage_measurement() {
 }
 
 security() {
-    "$python_bin" -m pip_audit -r requirements.txt
-    "$python_bin" -m pip_audit -r requirements-dev.txt
+    (
+        local audit_lock
+        audit_lock=$(mktemp "${RUNNER_TEMP:-/tmp}/drug-audit-lock.XXXXXX")
+        trap 'rm -f -- "$audit_lock"' EXIT
+        uv export --quiet --locked --all-groups --no-emit-project --output-file "$audit_lock"
+        "$python_bin" -m pip_audit \
+            --strict --progress-spinner=off --require-hashes --disable-pip \
+            -r "$audit_lock"
+    )
     cleanup_required=1
     docker run --rm --name "$semgrep_name" --network none --volume "$PWD:/src:ro" --workdir /src \
         "$SEMGREP_IMAGE" \
@@ -281,14 +280,14 @@ write_receipt() {
         printf 'candidate_sha=%s\n' "$candidate_sha"
         printf 'base_sha=%s\n' "$resolved_base_sha"
         printf 'python_version=%s\n' "$PYTHON_VERSION"
-        printf 'pip_version=%s\n' "$PIP_VERSION"
+        printf 'uv_version=%s\n' "$UV_VERSION"
         printf 'runtime_base_image=%s\n' "$RUNTIME_BASE_IMAGE"
         printf 'runtime_image_id=%s\n' "$runtime_image_id"
         printf 'postgres_image=%s\n' "$POSTGRES_IMAGE"
         printf 'redis_image=%s\n' "$REDIS_IMAGE"
         printf 'semgrep_image=%s\n' "$SEMGREP_IMAGE"
-        printf 'requirements_sha256=%s\n' "$("$python_bin" -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' requirements.txt)"
-        printf 'requirements_dev_sha256=%s\n' "$("$python_bin" -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' requirements-dev.txt)"
+        printf 'pyproject_sha256=%s\n' "$("$python_bin" -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' pyproject.toml)"
+        printf 'uv_lock_sha256=%s\n' "$("$python_bin" -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' uv.lock)"
         printf '%s\n' 'command=scripts/drug/check measure'
         printf 'coverage_protocol=%s\n' "$coverage_protocol"
         printf 'coverage_policy_sha256=%s\n' "$("$python_bin" -c 'import hashlib; print(hashlib.sha256(open("test-coverage-baseline.json", "rb").read()).hexdigest())')"

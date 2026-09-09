@@ -15,6 +15,19 @@ CHECK_FUNCTIONS = (ROOT / "scripts/healthcare/check").read_text().rsplit("\ncase
 
 
 class HealthcarePublicChecks(unittest.TestCase):
+    def test_validation_uses_pinned_uv(self):
+        setup = (ROOT / "scripts/healthcare/setup/action.yml").read_text()
+        check = (ROOT / "scripts/healthcare/check").read_text()
+        installer = (ROOT / "scripts/healthcare/install_python_lock").read_text()
+        self.assertIn(
+            "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d",
+            setup,
+        )
+        self.assertIn("version: 0.12.11", setup)
+        self.assertIn("uv venv --python 3.14.7", check)
+        self.assertIn("uv pip sync", installer)
+        self.assertNotIn("python -m pip install", check + installer)
+
     def test_matrix_artifact_outputs_are_unique_and_reject_missing_or_multiline_ids(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         with tempfile.TemporaryDirectory() as temporary:
@@ -104,7 +117,7 @@ class HealthcarePublicChecks(unittest.TestCase):
                        "CI_DEPS_READY": "0", "CI_PYTHON_ENV_READY": "0",
                        "PREPUSH_DEPS_READY": "0", "PREPUSH_PYTHON_ENV_READY": "0"}
                 result = subprocess.run(
-                    ["bash", "-euc", 'python() { return "$VENV_STATUS"; };\n'
+                    ["bash", "-euc", 'uv() { [ "$1" = --version ] && { echo "uv 0.12.11"; return; }; return "$VENV_STATUS"; };\n'
                      'rm() { [ "$REMOVE_STATUS" = 0 ] || return "$REMOVE_STATUS"; command rm "$@"; };\n' + function +
                      "\nprepare_python_environment\n"], env=env, capture_output=True, text=True,
                 )
