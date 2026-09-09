@@ -3,110 +3,97 @@ input_root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source_root=${SOURCE_ROOT:?SOURCE_ROOT must identify the public source checkout}
 cd "$input_root"
 set -euo pipefail
-test "$(python -c 'import platform; print(platform.python_version())')" = 3.14.6
-test "$(python -c 'import platform; print(platform.machine())')" = x86_64
-test "$(python -c 'import platform; print(platform.system())')" = Linux
-test "$(python -m pip --version | awk '{print $2}')" = 26.1.2
+
+readonly UV_VERSION=0.12.12
+readonly PYTHON_VERSION=3.14.7
+test "$(uv --no-config --version | awk '{print $2}')" = "$UV_VERSION"
+python_bin=$(uv --no-config python find "$PYTHON_VERSION")
+test "$("$python_bin" -c 'import platform; print(platform.python_version())')" = "$PYTHON_VERSION"
+
 temporary_directory=$(mktemp -d)
-candidate_lock=$(mktemp requirements-ci.lock.candidate.XXXXXX)
+candidate_lock=$(mktemp "$input_root/requirements-ci.lock.candidate.XXXXXX")
 trap 'rm -rf -- "$temporary_directory"; rm -f -- "$candidate_lock"' EXIT
 input_names=(requirements.txt requirements-dev.txt requirements-ci.in)
 mkdir "$temporary_directory/inputs"
-input_hashes() {
-  (cd "$source_root" && sha256sum requirements.txt requirements-dev.txt)
-  sha256sum requirements-ci.in
+
+hash_files() {
+  local directory=$1
+  shift
+  (cd "$directory" && "$python_bin" - "$@" <<'PY'
+import hashlib
+from pathlib import Path
+import sys
+
+for name in sys.argv[1:]:
+    print(f"{hashlib.sha256(Path(name).read_bytes()).hexdigest()}  {name}")
+PY
+  )
 }
+
+input_hashes() {
+  hash_files "$source_root" requirements.txt requirements-dev.txt
+  hash_files "$input_root" requirements-ci.in
+}
+
 input_hashes > "$temporary_directory/input-sha256.before"
 cp -- "$source_root/requirements.txt" "$source_root/requirements-dev.txt" requirements-ci.in "$temporary_directory/inputs/"
-(
-  cd "$temporary_directory/inputs"
-  sha256sum "${input_names[@]}"
-) > "$temporary_directory/input-sha256.snapshot"
+hash_files "$temporary_directory/inputs" "${input_names[@]}" > "$temporary_directory/input-sha256.snapshot"
 cmp "$temporary_directory/input-sha256.before" "$temporary_directory/input-sha256.snapshot"
-python -m pip install \
-  --dry-run \
-  --ignore-installed \
-  --only-binary=:all: \
-  --report "$temporary_directory/selected.json" \
-  -r "$temporary_directory/inputs/requirements-ci.in"
-python - \
-  "$temporary_directory/selected.json" \
-  "$temporary_directory/inputs" \
-  "$candidate_lock" <<'PY'
+
+uv --no-config pip compile "$temporary_directory/inputs/requirements-ci.in" \
+  --python "$python_bin" \
+  --python-version "$PYTHON_VERSION" \
+  --python-platform x86_64-unknown-linux-gnu \
+  --generate-hashes \
+  --only-binary :all: \
+  --emit-build-options \
+  --no-annotate \
+  --no-header \
+  --no-python-downloads \
+  --output-file "$candidate_lock" \
+  --quiet
+
+"$python_bin" - "$temporary_directory/inputs" "$candidate_lock" "$UV_VERSION" <<'PY'
 import hashlib
-import json
-import os
 from pathlib import Path
-import platform
 import re
 import sys
-from urllib.parse import urlparse
 
 
-report_path = Path(sys.argv[1])
-input_root = Path(sys.argv[2])
-output_path = Path(sys.argv[3])
-report = json.loads(report_path.read_text(encoding="utf-8"))
-environment = report.get("environment", {})
-expected_environment = {
-    "implementation_name": "cpython",
-    "implementation_version": "3.14.6",
-    "platform_machine": "x86_64",
-    "platform_system": "Linux",
-    "python_full_version": "3.14.6",
-    "sys_platform": "linux",
+inputs = Path(sys.argv[1])
+lock = Path(sys.argv[2])
+uv_version = sys.argv[3]
+body = lock.read_text(encoding="utf-8")
+versions = {
+    re.sub(r"[-_.]+", "-", match.group(1)).lower(): match.group(2)
+    for match in re.finditer(r"^([A-Za-z0-9_.-]+)==([^\s;\\]+)", body, re.M)
 }
-for field, expected in expected_environment.items():
-    if environment.get(field) != expected:
-        raise SystemExit(
-            f"pip report {field}={environment.get(field)!r}; expected {expected!r}"
-        )
-
-requirements = {}
-for item in report.get("install", []):
-    metadata = item.get("metadata", {})
-    name = re.sub(r"[-_.]+", "-", str(metadata.get("name", ""))).lower()
-    version = str(metadata.get("version", ""))
-    download = item.get("download_info", {})
-    artifact = Path(urlparse(str(download.get("url", ""))).path).name
-    digest = download.get("archive_info", {}).get("hashes", {}).get("sha256")
-    if not name or not version or not artifact.endswith(".whl"):
-        raise SystemExit(f"non-wheel or malformed selected artifact: {item!r}")
-    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
-        raise SystemExit(f"missing SHA256 for selected artifact: {artifact}")
-    if name in requirements:
-        raise SystemExit(f"duplicate selected distribution: {name}")
-    requirements[name] = (version, digest)
-
-if not requirements or requirements.get("pip", (None,))[0] != "26.2.1":
-    raise SystemExit("selected lock must contain pip==26.2.1")
-if requirements.get("pip-audit", (None,))[0] != "2.10.1":
+if versions.get("pip-audit") != "2.10.1":
     raise SystemExit("selected lock must contain pip-audit==2.10.1")
-
-lines = [
+if versions.get("pip") != "26.2.1":
+    raise SystemExit("pip-audit must retain its locked pip==26.2.1 dependency")
+header = [
     "# Generated by scripts/healthcare/compile_python_lock.",
     *(
-        f"# Input: {name} ({hashlib.sha256((input_root / name).read_bytes()).hexdigest()})"
+        f"# Input: {name} ({hashlib.sha256((inputs / name).read_bytes()).hexdigest()})"
         for name in ("requirements.txt", "requirements-dev.txt", "requirements-ci.in")
     ),
-    f"# Python: {platform.python_version()} ({platform.system()} {platform.machine()})",
-    "# Resolver: pip 26.1.2",
-    "# Each hash is the wheel selected on native Linux/amd64 by pip's install report.",
-    "--only-binary :all:",
-    "",
+    "# Target: CPython 3.14.7 (Linux x86_64)",
+    f"# Resolver: uv {uv_version}",
 ]
-lines.extend(
-    f"{name}=={version} --hash=sha256:{digest}"
-    for name, (version, digest) in sorted(requirements.items())
-)
-output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+lock.write_text("\n".join(header) + "\n" + body, encoding="utf-8")
 PY
-python -m pip install \
+
+uv --no-config venv --python "$python_bin" --no-python-downloads "$temporary_directory/venv" >/dev/null
+uv --no-config pip install \
   --dry-run \
-  --ignore-installed \
-  --only-binary=:all: \
+  --python "$temporary_directory/venv/bin/python" \
+  --python-version "$PYTHON_VERSION" \
+  --python-platform x86_64-unknown-linux-gnu \
+  --only-binary :all: \
   --require-hashes \
   -r "$candidate_lock"
+
 input_hashes > "$temporary_directory/input-sha256.after"
 if ! cmp -s \
   "$temporary_directory/input-sha256.before" \
@@ -115,4 +102,4 @@ if ! cmp -s \
   exit 1
 fi
 mv -- "$candidate_lock" requirements-ci.lock
-sha256sum requirements-ci.lock
+hash_files "$input_root" requirements-ci.lock

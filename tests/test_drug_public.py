@@ -93,6 +93,19 @@ class DrugNativeSelectionTests(unittest.TestCase):
 
 
 class PublicDrugTests(unittest.TestCase):
+    def test_validation_uses_pinned_uv_and_lockfile_provenance(self):
+        gate = (ROOT / "scripts/drug/check").read_text()
+        workflow = (ROOT / ".github/workflows/drug.yml").read_text()
+        self.assertIn("readonly UV_VERSION='0.12.12'", gate)
+        self.assertIn("uv --no-config sync --locked --all-groups --python \"$python_bin\" --no-build", gate)
+        self.assertIn("uv --no-config export --quiet --locked --all-groups", gate)
+        self.assertIn("uv_lock_sha256=", gate)
+        self.assertNotIn("-m pip install", gate)
+        self.assertIn(
+            "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d",
+            workflow,
+        )
+
     def test_cleanup_verifies_absence_and_preserves_original_failure(self):
         source = (ROOT / "scripts/drug/check").read_text()
         functions = source[source.index("resource_suffix="):source.index("require_coverage_protocol()")]

@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import re
+import time
+import urllib.error
 import urllib.request
 
 REPOSITORIES = {"EndurantDevs/drug-api", "EndurantDevs/healthcare-mrf-api"}
@@ -23,12 +25,20 @@ def api(repository, path, method="GET"):
             "X-GitHub-Api-Version": "2022-11-28",
         },
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        if method == "DELETE":
-            if response.status != 204:
-                raise ValueError("GitHub artifact deletion did not return 204")
-            return None
-        body = response.read(16 * 1024 * 1024 + 1)
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                if method == "DELETE":
+                    if response.status != 204:
+                        raise ValueError("GitHub artifact deletion did not return 204")
+                    return None
+                body = response.read(16 * 1024 * 1024 + 1)
+            break
+        except urllib.error.HTTPError as error:
+            if method != "GET" or error.code not in {500, 502, 503, 504} or attempt == 2:
+                raise
+            error.close()
+            time.sleep(attempt + 1)
     if len(body) > 16 * 1024 * 1024:
         raise ValueError("GitHub response exceeds the bounded limit")
     return json.loads(body)

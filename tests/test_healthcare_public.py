@@ -2,8 +2,10 @@
 
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -15,6 +17,59 @@ CHECK_FUNCTIONS = (ROOT / "scripts/healthcare/check").read_text().rsplit("\ncase
 
 
 class HealthcarePublicChecks(unittest.TestCase):
+    def test_validation_uses_pinned_uv(self):
+        setup = (ROOT / "scripts/healthcare/setup/action.yml").read_text()
+        check = (ROOT / "scripts/healthcare/check").read_text()
+        installer = (ROOT / "scripts/healthcare/install_python_lock").read_text()
+        self.assertIn(
+            "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d",
+            setup,
+        )
+        self.assertIn("version: 0.12.12", setup)
+        generator = (ROOT / "scripts/healthcare/compile_python_lock").read_text()
+        self.assertIn("uv --no-config venv --python 3.14.7", check)
+        self.assertIn("uv --no-config pip sync", installer)
+        self.assertIn("hashlib.sha256", generator)
+        self.assertNotIn("sha256sum", generator)
+        self.assertNotIn("--constraints", generator)
+        self.assertNotIn("python -m pip install", check + installer)
+
+    def test_installer_coverage_profile_and_exact_set_checks_are_executable(self):
+        installer = (ROOT / "scripts/healthcare/install_python_lock").read_text()
+        programs = re.findall(r"<<'PY'\n(.*?)\nPY", installer, re.S)
+        self.assertEqual(len(programs), 3)
+        coverage_program, comparison_program = programs[1:]
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            full = root / "full.lock"
+            selected = root / "coverage.lock"
+            full.write_text(
+                "--only-binary :all:\n\n"
+                "coverage==7.16.0 \\\n    --hash=sha256:" + "a" * 64 + "\n"
+                "pytest==9.1.1 \\\n    --hash=sha256:" + "b" * 64 + "\n"
+            )
+            subprocess.run(
+                [sys.executable, "-c", coverage_program, str(selected), str(full)],
+                check=True, capture_output=True, text=True,
+            )
+            self.assertIn("coverage==7.16.0", selected.read_text())
+            self.assertNotIn("pytest", selected.read_text())
+
+            installed = root / "installed.lock"
+            installed.write_text("coverage==7.16.0\n")
+            subprocess.run(
+                [sys.executable, "-c", comparison_program, str(selected), str(installed)],
+                check=True, capture_output=True, text=True,
+            )
+            installed.write_text("coverage==7.16.0\npytest==9.1.1\n")
+            mismatch = subprocess.run(
+                [sys.executable, "-c", comparison_program, str(selected), str(installed)],
+                capture_output=True, text=True,
+            )
+            self.assertNotEqual(mismatch.returncode, 0)
+            self.assertIn("does not match", mismatch.stderr)
+
     def test_matrix_artifact_outputs_are_unique_and_reject_missing_or_multiline_ids(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         with tempfile.TemporaryDirectory() as temporary:
@@ -104,7 +159,7 @@ class HealthcarePublicChecks(unittest.TestCase):
                        "CI_DEPS_READY": "0", "CI_PYTHON_ENV_READY": "0",
                        "PREPUSH_DEPS_READY": "0", "PREPUSH_PYTHON_ENV_READY": "0"}
                 result = subprocess.run(
-                    ["bash", "-euc", 'python() { return "$VENV_STATUS"; };\n'
+                    ["bash", "-euc", 'uv() { [ "$1 $2" = "--no-config --version" ] && { echo "uv 0.12.12"; return; }; return "$VENV_STATUS"; };\n'
                      'rm() { [ "$REMOVE_STATUS" = 0 ] || return "$REMOVE_STATUS"; command rm "$@"; };\n' + function +
                      "\nprepare_python_environment\n"], env=env, capture_output=True, text=True,
                 )
