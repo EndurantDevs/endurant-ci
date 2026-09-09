@@ -16,10 +16,10 @@ import platform
 
 
 actual = (platform.python_version(), platform.system(), platform.machine())
-expected = ("3.14.6", "Linux", "x86_64")
+expected = ("3.14.7", "Linux", "x86_64")
 if actual != expected:
     raise SystemExit(
-        "requirements-ci.lock targets CPython 3.14.6 on Linux x86_64; "
+        "requirements-ci.lock targets CPython 3.14.7 on Linux x86_64; "
         f"found {actual[0]} on {actual[1]} {actual[2]}. "
         "Install this CI lock only in its native Linux/amd64 CI environment."
     )

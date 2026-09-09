@@ -2,7 +2,7 @@
 # Input: requirements.txt (c00564e1f74fe0b637b3b4f79a4321b3ba2a7560fbc4540e8545cdf9f843cf01)
 # Input: requirements-dev.txt (cb736e9e23acaf44dfc9b98e0aec0599bce3226ebcb15e2b8a4388ca09607933)
 # Input: requirements-ci.in (50e58c879dfb3983636119f365880fa403daaf290c1a1d0ad787cf62adea8abf)
-# Python: 3.14.6 (Linux x86_64)
+# Python: 3.14.7 (Linux x86_64)
 # Resolver: pip 26.1.2
 # Each hash is the wheel selected on native Linux/amd64 by pip's install report.
 --only-binary :all:

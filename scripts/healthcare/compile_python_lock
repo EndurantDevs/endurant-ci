@@ -3,7 +3,7 @@ input_root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source_root=${SOURCE_ROOT:?SOURCE_ROOT must identify the public source checkout}
 cd "$input_root"
 set -euo pipefail
-test "$(python -c 'import platform; print(platform.python_version())')" = 3.14.6
+test "$(python -c 'import platform; print(platform.python_version())')" = 3.14.7
 test "$(python -c 'import platform; print(platform.machine())')" = x86_64
 test "$(python -c 'import platform; print(platform.system())')" = Linux
 test "$(python -m pip --version | awk '{print $2}')" = 26.1.2
@@ -50,10 +50,10 @@ report = json.loads(report_path.read_text(encoding="utf-8"))
 environment = report.get("environment", {})
 expected_environment = {
     "implementation_name": "cpython",
-    "implementation_version": "3.14.6",
+    "implementation_version": "3.14.7",
     "platform_machine": "x86_64",
     "platform_system": "Linux",
-    "python_full_version": "3.14.6",
+    "python_full_version": "3.14.7",
     "sys_platform": "linux",
 }
 for field, expected in expected_environment.items():

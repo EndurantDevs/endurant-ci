@@ -6,10 +6,10 @@ cd "${SOURCE_ROOT:?SOURCE_ROOT must name the exact public checkout}"
 
 readonly PYTHON_VERSION='3.14.7'
 readonly PIP_VERSION='26.2.1'
-readonly POSTGRES_IMAGE='postgres:18@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941'
-readonly REDIS_IMAGE='redis:7@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73'
+readonly POSTGRES_IMAGE='postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280'
+readonly REDIS_IMAGE='redis:7@sha256:71da9275c5f3fcb97d0fa0c8c5b36cc995327265420f17a04bfd544f458059f7'
 readonly RUNTIME_BASE_IMAGE='python:3.14.7-slim-trixie@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6'
-readonly SEMGREP_IMAGE='returntocorp/semgrep@sha256:e1e0cde346c758f755e1bd28fd0ea43cde9d523b59a040611a6bdde2f84bb3dd'
+readonly SEMGREP_IMAGE='returntocorp/semgrep@sha256:51c9f53a4fce0d55e9abd08d7b96968654248a4b1122e77f20e0a49c0072446c'
 
 mode="${1:-measure}"
 if [[ -n "${PYTHON_BIN:-}" ]]; then
