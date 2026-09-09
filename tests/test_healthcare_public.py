@@ -93,32 +93,63 @@ class HealthcarePublicChecks(unittest.TestCase):
             (source / "tracked").write_text("modified\n")
             self.assertNotEqual(freeze(), 0)
 
-    def test_exact_image_cleanup_runs_after_return_and_build_failure(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            log = root / "cleanup"
-            env = {**os.environ, "SOURCE_ROOT": str(root), "CI_ROOT": str(ROOT),
-                   "SOURCE_SHA": "a" * 40, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
-                   "CLEANUP_LOG": str(log)}
-            script = CHECK_FUNCTIONS + r'''
+    def test_python_environment_cleanup_covers_creation_failure(self):
+        source = (ROOT / "scripts/healthcare/check").read_text()
+        start = source.index("prepare_python_environment()")
+        function = source[start:source.index("\n}\n", start) + 3]
+        for status, remove, expected in ((0, 0, 0), (17, 0, 17), (0, 23, 1), (17, 23, 17)):
+            with self.subTest(status=status, remove=remove), tempfile.TemporaryDirectory() as directory:
+                env = {**os.environ, "RUNNER_TEMP": directory, "VENV_STATUS": str(status),
+                       "REMOVE_STATUS": str(remove),
+                       "CI_DEPS_READY": "0", "CI_PYTHON_ENV_READY": "0",
+                       "PREPUSH_DEPS_READY": "0", "PREPUSH_PYTHON_ENV_READY": "0"}
+                result = subprocess.run(
+                    ["bash", "-euc", 'python() { return "$VENV_STATUS"; };\n'
+                     'rm() { [ "$REMOVE_STATUS" = 0 ] || return "$REMOVE_STATUS"; command rm "$@"; };\n' + function +
+                     "\nprepare_python_environment\n"], env=env, capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertEqual(bool(list(Path(directory).iterdir())), bool(remove))
+
+    def test_exact_image_cleanup_covers_failure_and_unavailable_docker(self):
+        for build, remove, listing, expected in (
+            (0, 0, 0, 0), (17, 0, 0, 17), (0, 23, 0, 1),
+            (17, 23, 0, 17), (0, 0, 29, 1), (17, 0, 29, 17),
+        ):
+            with self.subTest(build=build, remove=remove, listing=listing):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    env = {**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT),
+                           "SOURCE_SHA": "a" * 40, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
+                           "STUB_ROOT": temporary, "BUILD_STATUS": str(build),
+                           "REMOVE_STATUS": str(remove), "LIST_STATUS": str(listing)}
+                    script = CHECK_FUNCTIONS + r'''
 git() { printf '%s\n' "$SOURCE_SHA"; }
 docker() {
-  if [ "$1" = image ]; then
-    printf '%s\n' "$*" >> "$CLEANUP_LOG"
-  elif [ "$1" = build ] && [ "$FAIL_BUILD" = 1 ]; then
-    return 17
-  fi
+  case "$1 ${2:-}" in
+    build*) touch "$STUB_ROOT/image"; return "$BUILD_STATUS" ;;
+    'image ls')
+      [ "$LIST_STATUS" = 0 ] || return "$LIST_STATUS"
+      [ ! -f "$STUB_ROOT/image" ] || printf 'sha256:synthetic\n'
+      ;;
+    'image rm')
+      printf '%s\n' "$*" >> "$STUB_ROOT/cleanup"
+      [ "$REMOVE_STATUS" = 0 ] || return "$REMOVE_STATUS"
+      rm "$STUB_ROOT/image"
+      ;;
+  esac
   return 0
 }
 run_container_package
 '''
-            for fail, expected in (("0", 0), ("1", 17)):
-                with self.subTest(fail=fail):
-                    result = subprocess.run(["bash", "-euc", script], env={**env, "FAIL_BUILD": fail},
+                    result = subprocess.run(["bash", "-euc", script], env=env,
                                             capture_output=True, text=True)
                     self.assertEqual(result.returncode, expected, result.stderr)
-                    self.assertEqual(log.read_text(), "image rm --force healthcare-mrf-api:ci-123-2\n")
-                    log.unlink()
+                    if not listing:
+                        self.assertEqual((root / "cleanup").read_text(),
+                                         "image rm healthcare-mrf-api:ci-123-2\n")
+                    self.assertEqual((root / "image").exists(), bool(remove or listing))
+
 
 
 if __name__ == "__main__":

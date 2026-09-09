@@ -29,24 +29,36 @@ redis_name="drug-ci-redis-$resource_suffix"
 semgrep_name="drug-ci-semgrep-$resource_suffix"
 runtime_name="drug-ci-runtime-$resource_suffix"
 runtime_tag="drug-ci-runtime:$resource_suffix"
+cleanup_required=0
 cleanup() {
-    local cleanup_status=0 name
+    [[ "$cleanup_required" == 1 ]] || return 0
+    local cleanup_status=0 name remaining
     for name in "$postgres_name" "$redis_name" "$semgrep_name" "$runtime_name"; do
-        if docker container inspect "$name" >/dev/null 2>&1; then
+        remaining="$(docker container ls --all --filter "name=^/${name}$" --format '{{.Names}}')" \
+            || { cleanup_status=1; continue; }
+        if [[ -n "$remaining" ]]; then
             docker rm --force "$name" >/dev/null || cleanup_status=1
-            ! docker container inspect "$name" >/dev/null 2>&1 || cleanup_status=1
         fi
+        remaining="$(docker container ls --all --filter "name=^/${name}$" --format '{{.Names}}')" \
+            || cleanup_status=1
+        [[ -z "$remaining" ]] || cleanup_status=1
     done
-    if docker image inspect "$runtime_tag" >/dev/null 2>&1; then
+    remaining="$(docker image ls --quiet "$runtime_tag")" || return 1
+    if [[ -n "$remaining" ]]; then
         docker image rm "$runtime_tag" >/dev/null || cleanup_status=1
-        ! docker image inspect "$runtime_tag" >/dev/null 2>&1 || cleanup_status=1
     fi
-    return "$cleanup_status"
+    remaining="$(docker image ls --quiet "$runtime_tag")" || return 1
+    [[ -z "$remaining" ]] || cleanup_status=1
+    [[ "$cleanup_status" == 0 ]] || return "$cleanup_status"
+    cleanup_required=0
 }
 finish() {
     local result=$?
     trap - EXIT
-    cleanup || result=1
+    if ! cleanup; then
+        printf '%s\n' 'Unable to verify exact CI Docker resource cleanup.' >&2
+        [[ "$result" != 0 ]] || result=1
+    fi
     exit "$result"
 }
 trap finish EXIT
@@ -174,6 +186,7 @@ coverage_measurement() {
 security() {
     "$python_bin" -m pip_audit -r requirements.txt
     "$python_bin" -m pip_audit -r requirements-dev.txt
+    cleanup_required=1
     docker run --rm --name "$semgrep_name" --network none --volume "$PWD:/src:ro" --workdir /src \
         "$SEMGREP_IMAGE" \
         semgrep --config .semgrep.yml --no-git-ignore .
@@ -211,6 +224,7 @@ runtime_image() {
     grep -Fqx "FROM $RUNTIME_BASE_IMAGE" Dockerfile
     source_revision="${HLTHPRT_SOURCE_COMMIT:-$(git rev-parse HEAD)}"
     image_revision="$runtime_tag"
+    cleanup_required=1
     docker build \
         --build-arg "HLTHPRT_SOURCE_COMMIT=$source_revision" \
         --tag "$image_revision" \
@@ -224,6 +238,7 @@ runtime_image() {
 
 local_services() {
     local postgres_port redis_port
+    cleanup_required=1
     docker run --detach --rm --name "$postgres_name" \
         --env POSTGRES_PASSWORD=postgres \
         --env POSTGRES_DB=healthporta_drug_ci \
@@ -298,6 +313,7 @@ measure() {
     security
     runtime_image
     local_services
+    cleanup
     require_frozen_candidate
     write_receipt "$resolved_base_sha"
     printf 'source validation: passed for %s\n' "$candidate_sha"

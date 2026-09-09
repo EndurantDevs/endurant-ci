@@ -41,6 +41,21 @@ def render_workflow(kind, revision, caller):
         "cancel-in-progress": "${{ !(" + METADATA_ONLY + ") && github.ref != 'refs/heads/main' }}",
     }
     workflow["jobs"] = {"smoke": workflow["jobs"]["smoke"], **canonical["jobs"]}
+    # The reusable validation graph remains read-only. Only the flat caller adds cleanup.
+    workflow["jobs"]["artifact-cleanup"] = {
+        "name": "CI artifact cleanup", "runs-on": "ubuntu-latest", "timeout-minutes": 10,
+        "needs": ["smoke", "source-validation" if kind == "healthcare" else "publish"],
+        "permissions": {"contents": "read", "actions": "write"},
+        "steps": [
+            {"name": "Check out trusted cleanup helper",
+             "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+             "with": {"repository": "EndurantDevs/endurant-ci", "ref": revision,
+                      "path": "ci", "persist-credentials": False}},
+            {"name": "Remove validated CI intermediates",
+             "env": {"GH_TOKEN": "${{ github.token }}", "PYTHONDONTWRITEBYTECODE": "1"},
+             "run": "python3 ci/scripts/artifact_cleanup.py"},
+        ],
+    }
     for job_id, job in workflow["jobs"].items():
         label = job["name"]
         if label == "${{ matrix.label }}":

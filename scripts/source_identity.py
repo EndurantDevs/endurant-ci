@@ -11,11 +11,12 @@ REPOSITORIES = {"EndurantDevs/drug-api", "EndurantDevs/healthcare-mrf-api"}
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 
 
-def api(repository, path):
+def api(repository, path, method="GET"):
     if repository not in REPOSITORIES:
         raise ValueError("repository is outside the public validation allowlist")
     request = urllib.request.Request(
         f"https://api.github.com/repos/{repository}/{path}",
+        method=method,
         headers={
             "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
             "Accept": "application/vnd.github+json",
@@ -23,6 +24,10 @@ def api(repository, path):
         },
     )
     with urllib.request.urlopen(request, timeout=30) as response:
+        if method == "DELETE":
+            if response.status != 204:
+                raise ValueError("GitHub artifact deletion did not return 204")
+            return None
         body = response.read(16 * 1024 * 1024 + 1)
     if len(body) > 16 * 1024 * 1024:
         raise ValueError("GitHub response exceeds the bounded limit")
