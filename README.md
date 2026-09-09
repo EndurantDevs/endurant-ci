@@ -2,7 +2,7 @@
 
 Shared validation workflows for public Python services. Application source and tests remain in their own repositories; orchestration and reusable validation scripts live here.
 
-Compile the reviewed job graph into the service's `.github/workflows/ci.yml` with `python scripts/render_workflow.py drug|healthcare <exact-package-commit> <caller-ci.yml>`. This keeps job labels prefix-free and pins every shared script checkout to the same commit. Validation jobs run on standard GitHub-hosted Linux runners with read-only repository permissions. Do not pass secrets.
+Compile the reviewed job graph into the service's `.github/workflows/ci.yml` with `uv run --with PyYAML==6.0.3 python scripts/render_workflow.py drug|healthcare <exact-package-commit> <caller-ci.yml>`. This keeps job labels prefix-free and pins every shared script checkout to the same commit. Validation jobs run on standard GitHub-hosted Linux runners with read-only repository permissions. Do not pass secrets.
 
 PR title and base changes trigger validation. Description-only edits produce separately named, skipped checks in their own concurrency group, preserving active validation and required check results.
 
