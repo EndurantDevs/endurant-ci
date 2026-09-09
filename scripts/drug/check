@@ -3,6 +3,7 @@
 set -euo pipefail
 
 cd "${SOURCE_ROOT:?SOURCE_ROOT must name the exact public checkout}"
+: "${CI_ROOT:?CI_ROOT must name the pinned public CI checkout}"
 
 readonly PYTHON_VERSION='3.14.7'
 readonly UV_VERSION='0.12.12'

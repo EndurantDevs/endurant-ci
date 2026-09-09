@@ -112,7 +112,11 @@ class RenderWorkflowChecks(unittest.TestCase):
                     self.assertEqual(step["if"], "steps.image.outputs.publish == 'true'")
                 self.assertEqual(publisher["steps"][2]["with"], {"artifact-ids": "${{ steps.image.outputs.artifact_id }}",
                     "digest-mismatch": "error", "path": "${{ runner.temp }}/public-image-download", "merge-multiple": True})
-                self.assertEqual(steps["Upload DEV image receipt"]["with"]["retention-days"], 90)
+                self.assertEqual(steps["Upload DEV image receipt"]["with"], {
+                    "name": kind + "-public-image-${{ github.run_id }}-${{ github.run_attempt }}",
+                    "path": "${{ runner.temp }}/public-image-receipt/image.json",
+                    "if-no-files-found": "error", "retention-days": 90})
+                self.assertEqual(publisher["if"], "${{ " + RENDERER.GUARD + "success()) }}")
                 self.assertEqual(steps["Upload DEV image publication intent"]["with"], {
                     "name": kind + "-public-image-intent-${{ github.run_id }}-${{ github.run_attempt }}",
                     "path": "${{ runner.temp }}/public-image-intent/intent.json",
