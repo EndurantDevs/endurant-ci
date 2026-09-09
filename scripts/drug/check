@@ -125,7 +125,7 @@ require_python() {
 
 install() {
     test "$(uv --version | awk '{print $2}')" = "$UV_VERSION"
-    uv sync --locked --all-groups --python "$python_bin" --no-python-downloads
+    uv sync --locked --all-groups --python "$python_bin" --no-build --no-python-downloads
     python_bin="$SOURCE_ROOT/.venv/bin/python"
 }
 

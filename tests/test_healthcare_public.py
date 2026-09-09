@@ -26,6 +26,7 @@ class HealthcarePublicChecks(unittest.TestCase):
         self.assertIn("version: 0.12.11", setup)
         self.assertIn("uv venv --python 3.14.7", check)
         self.assertIn("uv pip sync", installer)
+        self.assertNotIn("--constraints", (ROOT / "scripts/healthcare/compile_python_lock").read_text())
         self.assertNotIn("python -m pip install", check + installer)
 
     def test_matrix_artifact_outputs_are_unique_and_reject_missing_or_multiline_ids(self):

@@ -30,7 +30,6 @@ cp -- "$source_root/requirements.txt" "$source_root/requirements-dev.txt" requir
 cmp "$temporary_directory/input-sha256.before" "$temporary_directory/input-sha256.snapshot"
 
 uv pip compile "$temporary_directory/inputs/requirements-ci.in" \
-  --constraints "$input_root/requirements-ci.lock" \
   --python "$python_bin" \
   --python-version "$PYTHON_VERSION" \
   --python-platform x86_64-unknown-linux-gnu \
