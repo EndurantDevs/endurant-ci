@@ -173,6 +173,40 @@ class ArtifactCleanupChecks(unittest.TestCase):
             with self.assertRaises(OSError):
                 cleanup.github.api("EndurantDevs/drug-api", "actions/artifacts/1", "DELETE")
 
+    def test_get_api_retries_only_transient_github_failures(self):
+        def failure(code):
+            return cleanup.github.urllib.error.HTTPError(
+                "https://api.github.test", code, "synthetic", {}, None)
+
+        with patch.dict("os.environ", {"GH_TOKEN": "synthetic"}), patch.object(
+                cleanup.github.urllib.request, "urlopen") as request, patch.object(
+                cleanup.github.time, "sleep") as sleep:
+            response = request.return_value.__enter__.return_value
+            response.read.return_value = b"{}"
+            request.side_effect = [failure(500), request.return_value]
+            self.assertEqual(cleanup.github.api("EndurantDevs/drug-api", "actions/runs/1"), {})
+            self.assertEqual([item.args for item in sleep.call_args_list], [(1,)])
+
+        for method, code in (("GET", 429), ("DELETE", 500)):
+            with self.subTest(method=method, code=code), patch.dict(
+                    "os.environ", {"GH_TOKEN": "synthetic"}), patch.object(
+                    cleanup.github.urllib.request, "urlopen", side_effect=failure(code)) as request, \
+                    patch.object(cleanup.github.time, "sleep") as sleep, self.assertRaises(
+                    cleanup.github.urllib.error.HTTPError) as raised:
+                cleanup.github.api("EndurantDevs/drug-api", "actions/runs/1", method)
+            raised.exception.close()
+            self.assertEqual(request.call_count, 1)
+            sleep.assert_not_called()
+
+        with patch.dict("os.environ", {"GH_TOKEN": "synthetic"}), patch.object(
+                cleanup.github.urllib.request, "urlopen", side_effect=[failure(503) for _ in range(3)]
+                ) as request, patch.object(cleanup.github.time, "sleep") as sleep, self.assertRaises(
+                cleanup.github.urllib.error.HTTPError) as raised:
+            cleanup.github.api("EndurantDevs/drug-api", "actions/runs/1")
+        raised.exception.close()
+        self.assertEqual(request.call_count, 3)
+        self.assertEqual([item.args for item in sleep.call_args_list], [(1,), (2,)])
+
     def test_main_binds_own_run_and_source_event_and_skips_fork_deletion(self):
         repository = "EndurantDevs/drug-api"
         payload = {"repository": {"full_name": repository, "private": False},

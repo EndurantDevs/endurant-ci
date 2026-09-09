@@ -9,32 +9,6 @@ concurrency:
   group: package-ci-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 jobs:
-  lock-candidate:
-    name: Healthcare lock candidate
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          path: ci
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: EndurantDevs/healthcare-mrf-api
-          ref: 55a5cbe01328533e0237c9fada45f78b30179f99
-          path: source
-          persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
-        with:
-          python-version: 3.14.7
-      - run: python -m pip install --upgrade pip==26.1.2
-      - run: SOURCE_ROOT="$GITHUB_WORKSPACE/source" bash ci/scripts/healthcare/compile_python_lock
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: healthcare-requirements-ci-lock
-          path: ci/scripts/healthcare/requirements-ci.lock
-          if-no-files-found: error
-          retention-days: 1
   validate:
     name: Public CI policy
     runs-on: ubuntu-latest
