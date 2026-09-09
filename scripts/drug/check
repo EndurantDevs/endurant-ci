@@ -4,18 +4,18 @@ set -euo pipefail
 
 cd "${SOURCE_ROOT:?SOURCE_ROOT must name the exact public checkout}"
 
-readonly PYTHON_VERSION='3.13.15'
+readonly PYTHON_VERSION='3.14.7'
 readonly PIP_VERSION='26.2.1'
 readonly POSTGRES_IMAGE='postgres:18@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941'
 readonly REDIS_IMAGE='redis:7@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73'
-readonly RUNTIME_BASE_IMAGE='python:3.13.15-slim-trixie@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a'
+readonly RUNTIME_BASE_IMAGE='python:3.14.7-slim-trixie@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6'
 readonly SEMGREP_IMAGE='returntocorp/semgrep@sha256:e1e0cde346c758f755e1bd28fd0ea43cde9d523b59a040611a6bdde2f84bb3dd'
 
 mode="${1:-measure}"
 if [[ -n "${PYTHON_BIN:-}" ]]; then
     python_bin="$PYTHON_BIN"
-elif command -v python3.13 >/dev/null; then
-    python_bin=python3.13
+elif command -v python3.14 >/dev/null; then
+    python_bin=python3.14
 else
     python_bin=python3
 fi
