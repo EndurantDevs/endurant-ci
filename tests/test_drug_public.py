@@ -98,6 +98,7 @@ class PublicDrugTests(unittest.TestCase):
         functions = source[source.index("resource_suffix="):source.index("require_coverage_protocol()")]
         stub = r'''
 python_bin=python3
+sleep() { [ "$*" = 1 ]; }
 docker() {
   printf '%s\n' "$*" >> "$STUB_ROOT/calls"
   case "$1 ${2:-}" in
@@ -146,6 +147,73 @@ docker() {
                     self.assertEqual((root / "image").exists(), bool(remove or listing or not required))
                     if not required:
                         self.assertFalse((root / "calls").exists())
+
+    def test_service_cleanup_waits_for_auto_removal_without_retrying_removal(self):
+        source = (ROOT / "scripts/drug/check").read_text()
+        resources = source[source.index("resource_suffix="):source.index("require_coverage_protocol()")]
+        services = source[source.index("local_services()"):source.index("write_receipt()")]
+        stub = r'''
+python_bin=python3
+POSTGRES_IMAGE=postgres
+REDIS_IMAGE=redis
+postgres18() { :; }; redis() { :; }
+sleep() { [ "$*" = 1 ]; printf '%s\n' "$*" >> "$STUB_ROOT/sleeps"; }
+docker() {
+  case "$1 ${2:-}" in
+    'run --detach')
+      while [ "$1" != --name ]; do shift; done
+      touch "$STUB_ROOT/$2"
+      ;;
+    exec*) ;;
+    port*) printf '127.0.0.1:1234\n' ;;
+    'container ls')
+      name=${5#name=^/}; name=${name%\$}
+      if [ -f "$STUB_ROOT/$name.removing" ]; then
+        checks=$(cat "$STUB_ROOT/$name.removing")
+        checks=$((checks + 1))
+        printf '%s\n' "$checks" > "$STUB_ROOT/$name.removing"
+        [ "$LIST_STATUS" = 0 ] || return "$LIST_STATUS"
+        [ "$checks" -lt "$SETTLE_CHECK" ] || rm -f "$STUB_ROOT/$name"
+      fi
+      [ ! -f "$STUB_ROOT/$name" ] || printf '%s\n' "$name"
+      ;;
+    'rm --force')
+      printf '%s\n' "$*" >> "$STUB_ROOT/removals"
+      [ "$#" = 3 ] || return 99
+      printf '0\n' > "$STUB_ROOT/$3.removing"
+      return 23
+      ;;
+    'image ls') ;;
+    *) return 99 ;;
+  esac
+  return 0
+}
+'''
+        for status in (0, 17):
+            for settle, listing in ((1, 0), (3, 0), (4, 0), (3, 29)):
+                with self.subTest(status=status, settle=settle, listing=listing):
+                    with tempfile.TemporaryDirectory() as directory:
+                        root = Path(directory)
+                        env = {**os.environ, "STUB_ROOT": directory, "SETTLE_CHECK": str(settle),
+                               "LIST_STATUS": str(listing)}
+                        script = stub + resources + services + (
+                            '\nlocal_services\n' + ('cleanup\n' if status == 0 else '') + f'exit {status}\n'
+                        )
+                        result = subprocess.run(["bash", "-euc", script], env=env,
+                                                capture_output=True, text=True)
+                        incomplete = bool(listing or settle > 3)
+                        self.assertEqual(result.returncode, status or int(incomplete), result.stderr)
+                        removals = (root / "removals").read_text().splitlines()
+                        self.assertEqual(len(removals), 2)
+                        self.assertEqual(len(set(removals)), 2)
+                        for line in removals:
+                            name = line.removeprefix("rm --force ")
+                            self.assertEqual((root / name).exists(), incomplete)
+                            self.assertEqual(int((root / f"{name}.removing").read_text()),
+                                             1 if listing else min(settle, 3))
+                        sleep_log = root / "sleeps"
+                        sleeps = len(sleep_log.read_text().splitlines()) if sleep_log.exists() else 0
+                        self.assertEqual(sleeps, 0 if listing else 2 * (min(settle, 3) - 1))
 
     def test_source_coverage_contract_rejects_downgrade_and_non_boolean(self):
         self.assertEqual(POLICY.drug_coverage_protocol({}, {}), "legacy")
