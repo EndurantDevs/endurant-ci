@@ -30,11 +30,13 @@ class RenderWorkflowChecks(unittest.TestCase):
                     rendered = RENDERER.render_workflow(kind, "1" * 40, caller)
                     workflow = yaml.safe_load(rendered)
                     self.assertEqual(workflow["on"], original["on"])
-                    self.assertEqual(set(workflow["jobs"]), {"smoke", *canonical["jobs"]})
+                    self.assertEqual(set(workflow["jobs"]), {"smoke", "artifact-cleanup", *canonical["jobs"]})
                     self.assertNotIn("${{ inputs.ci_revision }}", rendered)
                     for job_id, job in workflow["jobs"].items():
                         self.assertNotIn("uses", job)
                         self.assertEqual(job["runs-on"], "ubuntu-latest")
+                        if job_id == "artifact-cleanup":
+                            continue  # Its complete privilege and execution contract is checked below.
                         template = original["jobs"][job_id] if job_id == "smoke" else canonical["jobs"][job_id]
                         expected = json.loads(json.dumps(template).replace("${{ inputs.ci_revision }}", "1" * 40))
                         if job_id != "smoke":
@@ -53,6 +55,42 @@ class RenderWorkflowChecks(unittest.TestCase):
                     self.assertEqual(RENDERER.render_workflow(kind, "1" * 40, caller), rendered)
                     refreshed = yaml.safe_load(RENDERER.render_workflow(kind, "2" * 40, caller))
                     self.assertEqual(refreshed["jobs"]["smoke"], workflow["jobs"]["smoke"])
+
+    def test_only_final_cleanup_gets_write_access_and_executes_pinned_helpers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            caller = Path(directory) / "ci.yml"
+            for kind in ("healthcare", "drug"):
+                caller.write_text(yaml.safe_dump({"on": {"push": {"branches": ["dev"]}},
+                    "jobs": {"smoke": {"name": "portable import checks", "runs-on": "ubuntu-latest",
+                                       "steps": [{"run": "echo synthetic"}]}}}))
+                workflow = yaml.safe_load(RENDERER.render_workflow(kind, "1" * 40, caller))
+                self.assertEqual(workflow["permissions"], {"contents": "read", "pull-requests": "read", "actions": "read"})
+                cleanup_job = workflow["jobs"]["artifact-cleanup"]
+                self.assertEqual(cleanup_job, {
+                    "name": RENDERER.job_name("CI artifact cleanup"), "runs-on": "ubuntu-latest", "timeout-minutes": 10,
+                    "needs": ["smoke", "source-validation" if kind == "healthcare" else "publish"],
+                    "if": "${{ " + RENDERER.GUARD + "success()) }}",
+                    "permissions": {"contents": "read", "actions": "write"},
+                    "steps": [{"name": "Check out trusted cleanup helper",
+                               "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+                               "with": {"repository": "EndurantDevs/endurant-ci", "ref": "1" * 40,
+                                        "path": "ci", "persist-credentials": False}},
+                              {"name": "Remove validated CI intermediates",
+                               "env": {"GH_TOKEN": "${{ github.token }}", "PYTHONDONTWRITEBYTECODE": "1"},
+                               "run": "python3 ci/scripts/artifact_cleanup.py"}],
+                })
+                ancestors = set()
+                pending = list(cleanup_job["needs"])
+                while pending:
+                    identifier = pending.pop()
+                    if identifier in ancestors:
+                        continue
+                    ancestors.add(identifier)
+                    needs = workflow["jobs"][identifier].get("needs", [])
+                    pending.extend([needs] if isinstance(needs, str) else needs)
+                self.assertEqual(ancestors, set(workflow["jobs"]) - {"artifact-cleanup"})
+                for identifier in ancestors:
+                    self.assertTrue(all(value == "read" for value in workflow["jobs"][identifier].get("permissions", {}).values()))
 
     def test_existing_metadata_skipped_smoke_becomes_a_real_static_required_check(self):
         smoke = {"name": "portable import checks", "runs-on": "ubuntu-latest",

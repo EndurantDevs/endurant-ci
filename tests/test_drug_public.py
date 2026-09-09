@@ -4,6 +4,8 @@ import copy
 import hashlib
 import importlib.util
 import json
+import os
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -91,6 +93,60 @@ class DrugNativeSelectionTests(unittest.TestCase):
 
 
 class PublicDrugTests(unittest.TestCase):
+    def test_cleanup_verifies_absence_and_preserves_original_failure(self):
+        source = (ROOT / "scripts/drug/check").read_text()
+        functions = source[source.index("resource_suffix="):source.index("require_coverage_protocol()")]
+        stub = r'''
+python_bin=python3
+docker() {
+  printf '%s\n' "$*" >> "$STUB_ROOT/calls"
+  case "$1 ${2:-}" in
+    'container ls')
+      [ "$LIST_STATUS" = 0 ] || return "$LIST_STATUS"
+      name=${5#name=^/}; name=${name%\$}
+      [ ! -f "$STUB_ROOT/$name" ] || printf '%s\n' "$name"
+      ;;
+    'rm --force')
+      [ "$REMOVE_STATUS" = 0 ] || return "$REMOVE_STATUS"
+      for name in "${@:3}"; do rm -f "$STUB_ROOT/$name"; done
+      ;;
+    'image ls')
+      [ "$LIST_STATUS" = 0 ] || return "$LIST_STATUS"
+      [ ! -f "$STUB_ROOT/image" ] || printf 'sha256:synthetic\n'
+      ;;
+    'image rm')
+      [ "$REMOVE_STATUS" = 0 ] || return "$REMOVE_STATUS"
+      rm "$STUB_ROOT/image"
+      ;;
+    *) return 99 ;;
+  esac
+  return 0
+}
+'''
+        for status, remove, listing, required, expected in (
+            (0, 0, 0, 1, 0), (17, 0, 0, 1, 17), (0, 23, 0, 1, 1),
+            (17, 23, 0, 1, 17), (0, 0, 29, 1, 1), (17, 0, 29, 1, 17),
+            (0, 0, 29, 0, 0),
+        ):
+            with self.subTest(status=status, remove=remove, listing=listing, required=required):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    env = {**os.environ, "STUB_ROOT": directory, "REMOVE_STATUS": str(remove),
+                           "LIST_STATUS": str(listing)}
+                    script = stub + functions + (
+                        '\ntouch "$STUB_ROOT/$postgres_name" "$STUB_ROOT/image" "$STUB_ROOT/unrelated"\n'
+                        f'cleanup_required={required}\nexit {status}\n'
+                    )
+                    result = subprocess.run(["bash", "-euc", script], env=env,
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    self.assertTrue((root / "unrelated").exists())
+                    leftovers = list(root.glob("drug-ci-postgres-*"))
+                    self.assertEqual(bool(leftovers), bool(remove or listing or not required))
+                    self.assertEqual((root / "image").exists(), bool(remove or listing or not required))
+                    if not required:
+                        self.assertFalse((root / "calls").exists())
+
     def test_source_coverage_contract_rejects_downgrade_and_non_boolean(self):
         self.assertEqual(POLICY.drug_coverage_protocol({}, {}), "legacy")
         self.assertEqual(POLICY.drug_coverage_protocol({}, {"machine_artifact_required": True}), "machine")
