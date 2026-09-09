@@ -58,7 +58,18 @@ jobs:
       - name: Run complete public source validation
         env:
           PUBLIC_CI_ARTIFACT_ROOT: ${{ runner.temp }}/drug-public-measurement
+          PUBLIC_CI_EXPORT_IMAGE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && '1' || '0' }}
+          GH_TOKEN: ${{ github.token }}
         run: bash "$CI_ROOT/scripts/drug/check" measure
+      - name: Upload tested DEV image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: drug-public-image-staging-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/drug-public-image-staging-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
       - name: Upload public coverage staging data
         id: staging
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

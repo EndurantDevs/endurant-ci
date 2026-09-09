@@ -37,14 +37,53 @@ def render_workflow(kind, revision, caller):
         workflow["env"] = canonical["env"]
     workflow["run-name"] = "${{ " + METADATA_ONLY + " && 'CI metadata update' || 'CI' }}"
     workflow["concurrency"] = {
-        "group": "${{ " + METADATA_ONLY + " && format('ci-metadata-{0}', github.run_id) || format('ci-{0}', github.ref) }}",
-        "cancel-in-progress": "${{ !(" + METADATA_ONLY + ") && github.ref != 'refs/heads/main' }}",
+        "group": "${{ " + METADATA_ONLY + " && format('ci-metadata-{0}', github.run_id) || "
+                 "github.event_name == 'push' && format('ci-push-{0}', github.run_id) || format('ci-{0}', github.ref) }}",
+        "cancel-in-progress": "${{ github.event_name == 'pull_request' && !(" + METADATA_ONLY + ") }}",
     }
     workflow["jobs"] = {"smoke": workflow["jobs"]["smoke"], **canonical["jobs"]}
-    # The reusable validation graph remains read-only. Only the flat caller adds cleanup.
+    # Source execution remains read-only; privileged jobs execute pinned helpers only.
+    workflow["jobs"]["dev-image-publication"] = {
+        "name": "DEV image publication", "runs-on": "ubuntu-latest", "timeout-minutes": 30,
+        "needs": ["smoke", "source-validation" if kind == "healthcare" else "publish"],
+        "permissions": {"contents": "read", "pull-requests": "read", "actions": "read", "packages": "write"},
+        "env": {"CI_REVISION": revision, "PYTHONDONTWRITEBYTECODE": "1"},
+        "steps": [
+            {"name": "Check out trusted image publisher",
+             "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+             "with": {"repository": "EndurantDevs/endurant-ci", "ref": revision,
+                      "path": "ci", "persist-credentials": False}},
+            {"name": "Authenticate DEV image input", "id": "image",
+             "env": {"GH_TOKEN": "${{ github.token }}"},
+             "run": "python3 ci/scripts/source_image.py prepare"},
+            {"name": "Download validated image archive", "if": "steps.image.outputs.publish == 'true'",
+             "uses": "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+             "with": {"artifact-ids": "${{ steps.image.outputs.artifact_id }}", "digest-mismatch": "error",
+                      "path": "${{ runner.temp }}/public-image-download", "merge-multiple": True}},
+            {"name": "Stage DEV image publication intent", "if": "steps.image.outputs.publish == 'true'",
+             "env": {"GH_TOKEN": "${{ github.token }}"},
+             "run": "python3 ci/scripts/source_image.py stage"},
+            {"name": "Upload DEV image publication intent", "if": "steps.image.outputs.publish == 'true'",
+             "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+             "with": {"name": kind + "-public-image-intent-${{ github.run_id }}-${{ github.run_attempt }}",
+                      "path": "${{ runner.temp }}/public-image-intent/intent.json",
+                      "if-no-files-found": "error", "retention-days": 90}},
+            {"name": "Publish validated DEV image", "if": "steps.image.outputs.publish == 'true'",
+             "env": {"GH_TOKEN": "${{ github.token }}"},
+             "run": "python3 ci/scripts/source_image.py publish"},
+            {"name": "Upload DEV image receipt", "if": "steps.image.outputs.publish == 'true'",
+             "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+             "with": {"name": kind + "-public-image-${{ github.run_id }}-${{ github.run_attempt }}",
+                      "path": "${{ runner.temp }}/public-image-receipt/image.json",
+                      "if-no-files-found": "error", "retention-days": 90}},
+            {"name": "Reconcile DEV image publication", "if": "always() && steps.image.outputs.publish == 'true'",
+             "env": {"GH_TOKEN": "${{ github.token }}"},
+             "run": "python3 ci/scripts/source_image.py reconcile"},
+        ],
+    }
     workflow["jobs"]["artifact-cleanup"] = {
         "name": "CI artifact cleanup", "runs-on": "ubuntu-latest", "timeout-minutes": 10,
-        "needs": ["smoke", "source-validation" if kind == "healthcare" else "publish"],
+        "needs": ["dev-image-publication"],
         "permissions": {"contents": "read", "actions": "write"},
         "steps": [
             {"name": "Check out trusted cleanup helper",

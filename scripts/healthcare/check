@@ -312,26 +312,34 @@ run_container_package() {
   local cleanup_command
   printf -v cleanup_command 'cleanup_container_image $? %q' "$image"
   trap "$cleanup_command" EXIT
+  local build_args=(--build-arg "HLTHPRT_SOURCE_COMMIT=${source_commit}")
+  if [[ "${PUBLIC_CI_EXPORT_IMAGE:-0}" == 1 ]]; then
+    build_args+=(--label "org.endurantdevs.public-ci.repository=${GITHUB_REPOSITORY:?}"
+                 --label "org.endurantdevs.public-ci.run=${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}")
+  fi
   docker build \
+    "${build_args[@]}" \
     --platform linux/amd64 \
-    --build-arg "HLTHPRT_SOURCE_COMMIT=${source_commit}" \
     --tag "$image" \
     .
+  local tested_image
+  tested_image=$(docker image inspect --format '{{.Id}}' "$image")
+  [[ "$tested_image" =~ ^sha256:[0-9a-f]{64}$ ]]
   if docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
-    "$image" \
+    "$tested_image" \
     | grep -q '^HLTHPRT_SOURCE_COMMIT='; then
     exit 1
   fi
   docker run --rm --platform linux/amd64 \
     --entrypoint /bin/sh \
-    "$image" \
+    "$tested_image" \
     -ec '
       test "$(cat /opt/healthporta/build-identity/healthcare-source-commit)" = "$1"
       test "$(stat -c "%u:%g:%a:%h:%s" /opt/healthporta/build-identity/healthcare-source-commit)" = "0:0:444:1:41"
     ' sh "$source_commit"
   docker run --rm --platform linux/amd64 \
     --entrypoint /bin/sh \
-    "$image" \
+    "$tested_image" \
     -ec '
       test -x /opt/support/ptg2_scanner/target/release/ptg2_scanner
       test -x /opt/support/ptg2_scanner/target/release/ptg2_provider_graph_v4
@@ -340,7 +348,7 @@ run_container_package() {
     '
   docker run --rm --platform linux/amd64 \
     --entrypoint /bin/sh \
-    "$image" \
+    "$tested_image" \
     -ec '
       set +e
       operation_output=$(env \
@@ -357,7 +365,7 @@ run_container_package() {
     '
   docker run --rm --platform linux/amd64 \
     --entrypoint /bin/sh \
-    "$image" \
+    "$tested_image" \
     -ec '
       set +e
       operation_output=$(env \
@@ -377,7 +385,7 @@ run_container_package() {
     '
   docker run --rm --platform linux/amd64 \
     --entrypoint /bin/sh \
-    "$image" \
+    "$tested_image" \
     -ec '
       set +e
       operation_output=$(env \
@@ -399,7 +407,7 @@ run_container_package() {
     '
   docker run --rm --platform linux/amd64 \
     --entrypoint /bin/sh \
-    "$image" \
+    "$tested_image" \
     -ec '
       set +e
       operation_output=$(env \
@@ -418,7 +426,7 @@ run_container_package() {
     '
   docker run --rm --platform linux/amd64 \
     --entrypoint /bin/sh \
-    "$image" \
+    "$tested_image" \
     -ec '
       for operation in \
         sync-verified-state \
@@ -444,7 +452,7 @@ run_container_package() {
     '
   docker run --rm --platform linux/amd64 \
     --entrypoint /bin/sh \
-    "$image" \
+    "$tested_image" \
     -ec '
       set +e
       operation_output=$(env \
@@ -457,6 +465,9 @@ run_container_package() {
       test "$operation_status" -eq 1
       test "$operation_output" = '\''{"code":"disabled","status":"error"}'\''
     '
+  if [ "${PUBLIC_CI_EXPORT_IMAGE:-0}" = 1 ]; then
+    python3 "$CI_ROOT/scripts/source_image.py" export "$tested_image"
+  fi
 }
 
 run_security() {

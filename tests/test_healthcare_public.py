@@ -70,6 +70,34 @@ class HealthcarePublicChecks(unittest.TestCase):
             self.assertNotEqual(mismatch.returncode, 0)
             self.assertIn("does not match", mismatch.stderr)
 
+    def test_export_builds_bind_the_run_in_the_tested_image_configuration(self):
+        for kind, function in (("healthcare", "run_container_package"), ("drug", "runtime_image")):
+            source = (ROOT / f"scripts/{kind}/check").read_text()
+            start = source.index(function + "() {")
+            body = source[start:source.index("\n}\n", start) + 3]
+            repository = "EndurantDevs/" + ("healthcare-mrf-api" if kind == "healthcare" else "drug-api")
+            for export in ("0", "1"):
+                with self.subTest(kind=kind, export=export), tempfile.TemporaryDirectory() as temporary:
+                    output = Path(temporary) / "args"
+                    environment = {**os.environ, "SOURCE_SHA": "a" * 40, "GITHUB_REPOSITORY": repository,
+                                   "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
+                                   "PUBLIC_CI_EXPORT_IMAGE": export, "BUILD_ARGS": str(output)}
+                    script = body + r'''
+git() { printf '%s\n' "$SOURCE_SHA"; }
+grep() { return 0; }
+docker() { printf '%s\0' "$@" > "$BUILD_ARGS"; return 17; }
+cleanup_container_image() { exit "$1"; }
+runtime_tag=test-local:synthetic
+RUNTIME_BASE_IMAGE=synthetic
+''' + function
+                    result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 17, result.stderr)
+                    args = output.read_bytes().decode().rstrip("\0").split("\0")
+                    self.assertEqual(args[0], "build")
+                    labels = [args[index + 1] for index, value in enumerate(args) if value == "--label"]
+                    self.assertEqual(labels, ["org.endurantdevs.public-ci.repository=" + repository,
+                                              "org.endurantdevs.public-ci.run=123-2"] if export == "1" else [])
+
     def test_matrix_artifact_outputs_are_unique_and_reject_missing_or_multiline_ids(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         with tempfile.TemporaryDirectory() as temporary:
@@ -188,6 +216,7 @@ git() { printf '%s\n' "$SOURCE_SHA"; }
 docker() {
   case "$1 ${2:-}" in
     build*) touch "$STUB_ROOT/image"; return "$BUILD_STATUS" ;;
+    'image inspect') printf 'sha256:%064d\n' 0 ;;
     'image ls')
       [ "$LIST_STATUS" = 0 ] || return "$LIST_STATUS"
       [ ! -f "$STUB_ROOT/image" ] || printf 'sha256:synthetic\n'

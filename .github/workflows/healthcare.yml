@@ -333,6 +333,9 @@ jobs:
     - name: Prepare source and toolchain
       uses: ./ci/scripts/healthcare/setup
     - name: Run complete validation stage
+      env:
+        PUBLIC_CI_EXPORT_IMAGE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && '1' || '0' }}
+        GH_TOKEN: ${{ github.token }}
       run: 'bash "$CI_ROOT/scripts/healthcare/check" container-package
 
         git diff --exit-code
@@ -340,6 +343,15 @@ jobs:
         git diff --cached --exit-code
 
         test -z "$(git ls-files --others --exclude-standard)"'
+    - name: Upload tested DEV image
+      if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: healthcare-public-image-staging-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/healthcare-public-image-staging-${{ github.run_id }}-${{ github.run_attempt }}/
+        if-no-files-found: error
+        retention-days: 1
+        compression-level: 0
   security:
     name: Security scans
     runs-on: ubuntu-latest
