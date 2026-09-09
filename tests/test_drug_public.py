@@ -22,8 +22,72 @@ def load(name, path):
 IDENTITY = load("source_identity", "scripts/source_identity.py")
 POLICY = load("coverage_policy", "scripts/coverage_policy.py")
 MEASUREMENT = load("drug_measurement", "scripts/drug/measurement.py")
+NATIVE_TESTS = load("drug_native_tests", "scripts/drug/native_tests.py")
 SOURCE, BASE, PIN = "1" * 40, "2" * 40, "3" * 40
 REPOSITORY = "EndurantDevs/drug-api"
+
+
+class DrugNativeSelectionTests(unittest.TestCase):
+    def test_legacy_and_complete_source_preserve_existing_native_inventory(self):
+        expected = (
+            "tests/process/test_import_table_switching.py",
+            "tests/process/test_ndc_rxnorm_mapping.py",
+            "tests/process/test_drug_indications.py",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertEqual(NATIVE_TESTS.postgres_test_paths(root), expected)
+            for name in NATIVE_TESTS.NDC_SOURCE_SET:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("raise AssertionError('source files must not execute during selection')\n")
+            self.assertEqual(NATIVE_TESTS.postgres_test_paths(root), (
+                *expected, "tests/process/test_ndc_publication_proof_postgres.py",
+            ))
+
+    def test_every_partial_publication_source_set_is_rejected(self):
+        for present in range(1, 7):
+            with self.subTest(present=present), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                for index, name in enumerate(NATIVE_TESTS.NDC_SOURCE_SET):
+                    if present & (1 << index):
+                        path = root / name
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.touch()
+                with self.assertRaisesRegex(ValueError, "requires its native proof"):
+                    NATIVE_TESTS.postgres_test_paths(root)
+
+    def test_each_nonregular_publication_source_path_is_rejected(self):
+        for name in NATIVE_TESTS.NDC_SOURCE_SET:
+            for kind in ("directory", "symlink", "dangling-symlink"):
+                with self.subTest(name=name, kind=kind), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    for candidate in NATIVE_TESTS.NDC_SOURCE_SET:
+                        path = root / candidate
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.touch()
+                    invalid = root / name
+                    invalid.unlink()
+                    if kind == "directory":
+                        invalid.mkdir()
+                    else:
+                        target = root / "synthetic-source.py"
+                        if kind == "symlink":
+                            target.touch()
+                        invalid.symlink_to(target)
+                    with self.assertRaisesRegex(ValueError, "regular files"):
+                        NATIVE_TESTS.postgres_test_paths(root)
+
+    def test_gate_checks_selector_failure_before_migrations(self):
+        gate = (ROOT / "scripts/drug/check").read_text()
+        postgres = gate.split("\npostgres18() {", 1)[1].split("\n}\n", 1)[0]
+        selection = '    selection="$("$python_bin" "$CI_ROOT/scripts/drug/native_tests.py")"'
+        self.assertIn("\nset -euo pipefail\n", gate)
+        self.assertIn("\n" + selection + "\n", postgres)
+        self.assertLess(postgres.index(selection), postgres.index("mapfile -t postgres_tests"))
+        self.assertLess(postgres.index("mapfile -t postgres_tests"), postgres.index("-m alembic upgrade head"))
+        self.assertIn('"$python_bin" -m pytest -q "${postgres_tests[@]}"', postgres)
+        self.assertNotIn("<(", postgres)
 
 
 class PublicDrugTests(unittest.TestCase):
