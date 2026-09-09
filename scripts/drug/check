@@ -180,11 +180,12 @@ security() {
 }
 
 postgres18() {
+    local selection
+    local -a postgres_tests
+    selection="$("$python_bin" "$CI_ROOT/scripts/drug/native_tests.py")"
+    mapfile -t postgres_tests <<< "$selection"
     "$python_bin" -m alembic upgrade head
-    "$python_bin" -m pytest -q \
-        tests/process/test_import_table_switching.py \
-        tests/process/test_ndc_rxnorm_mapping.py \
-        tests/process/test_drug_indications.py
+    "$python_bin" -m pytest -q "${postgres_tests[@]}"
 }
 
 redis() {
