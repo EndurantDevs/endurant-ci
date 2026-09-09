@@ -32,15 +32,20 @@ runtime_tag="drug-ci-runtime:$resource_suffix"
 cleanup_required=0
 cleanup() {
     [[ "$cleanup_required" == 1 ]] || return 0
-    local cleanup_status=0 name remaining
+    cleanup_required=0
+    local cleanup_status=0 name remaining attempt
     for name in "$postgres_name" "$redis_name" "$semgrep_name" "$runtime_name"; do
         remaining="$(docker container ls --all --filter "name=^/${name}$" --format '{{.Names}}')" \
             || { cleanup_status=1; continue; }
         if [[ -n "$remaining" ]]; then
-            docker rm --force "$name" >/dev/null || cleanup_status=1
+            docker rm --force "$name" >/dev/null || true
+            for attempt in 1 2 3; do
+                remaining="$(docker container ls --all --filter "name=^/${name}$" --format '{{.Names}}')" \
+                    || { cleanup_status=1; break; }
+                [[ -n "$remaining" ]] || break
+                [[ "$attempt" == 3 ]] || sleep 1
+            done
         fi
-        remaining="$(docker container ls --all --filter "name=^/${name}$" --format '{{.Names}}')" \
-            || cleanup_status=1
         [[ -z "$remaining" ]] || cleanup_status=1
     done
     remaining="$(docker image ls --quiet "$runtime_tag")" || return 1
@@ -49,8 +54,7 @@ cleanup() {
     fi
     remaining="$(docker image ls --quiet "$runtime_tag")" || return 1
     [[ -z "$remaining" ]] || cleanup_status=1
-    [[ "$cleanup_status" == 0 ]] || return "$cleanup_status"
-    cleanup_required=0
+    return "$cleanup_status"
 }
 finish() {
     local result=$?
@@ -267,7 +271,6 @@ local_services() {
     HLTHPRT_DB_SCHEMA=rx_data \
     DB_SCHEMA=rx_data postgres18
     HLTHPRT_REDIS_ADDRESS="redis://127.0.0.1:$redis_port" redis
-    docker rm --force "$postgres_name" "$redis_name" >/dev/null
 }
 
 write_receipt() {

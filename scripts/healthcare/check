@@ -50,6 +50,7 @@ prepare_python_environment() {
     local status=$?
     trap - EXIT
     if ! rm -rf -- "$python_environment_root"; then
+      printf 'Unable to remove CI Python environment: %s\n' "$python_environment_root" >&2
       [ "$status" -ne 0 ] || status=1
     fi
     exit "$status"

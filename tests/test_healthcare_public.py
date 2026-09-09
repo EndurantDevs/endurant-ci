@@ -110,6 +110,11 @@ class HealthcarePublicChecks(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, expected, result.stderr)
                 self.assertEqual(bool(list(Path(directory).iterdir())), bool(remove))
+                if remove:
+                    leftover = next(Path(directory).iterdir())
+                    self.assertIn(f"Unable to remove CI Python environment: {leftover}", result.stderr)
+                else:
+                    self.assertNotIn("Unable to remove CI Python environment:", result.stderr)
 
     def test_exact_image_cleanup_covers_failure_and_unavailable_docker(self):
         for build, remove, listing, expected in (
