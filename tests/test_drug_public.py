@@ -96,9 +96,9 @@ class PublicDrugTests(unittest.TestCase):
     def test_validation_uses_pinned_uv_and_lockfile_provenance(self):
         gate = (ROOT / "scripts/drug/check").read_text()
         workflow = (ROOT / ".github/workflows/drug.yml").read_text()
-        self.assertIn("readonly UV_VERSION='0.12.11'", gate)
-        self.assertIn("uv sync --locked --all-groups --python \"$python_bin\" --no-build", gate)
-        self.assertIn("uv export --quiet --locked --all-groups", gate)
+        self.assertIn("readonly UV_VERSION='0.12.12'", gate)
+        self.assertIn("uv --no-config sync --locked --all-groups --python \"$python_bin\" --no-build", gate)
+        self.assertIn("uv --no-config export --quiet --locked --all-groups", gate)
         self.assertIn("uv_lock_sha256=", gate)
         self.assertNotIn("-m pip install", gate)
         self.assertIn(

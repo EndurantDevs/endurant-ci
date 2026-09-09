@@ -4,10 +4,10 @@ source_root=${SOURCE_ROOT:?SOURCE_ROOT must identify the public source checkout}
 cd "$input_root"
 set -euo pipefail
 
-readonly UV_VERSION=0.12.11
+readonly UV_VERSION=0.12.12
 readonly PYTHON_VERSION=3.14.7
-test "$(uv --version | awk '{print $2}')" = "$UV_VERSION"
-python_bin=$(uv python find "$PYTHON_VERSION")
+test "$(uv --no-config --version | awk '{print $2}')" = "$UV_VERSION"
+python_bin=$(uv --no-config python find "$PYTHON_VERSION")
 test "$("$python_bin" -c 'import platform; print(platform.python_version())')" = "$PYTHON_VERSION"
 
 temporary_directory=$(mktemp -d)
@@ -16,20 +16,31 @@ trap 'rm -rf -- "$temporary_directory"; rm -f -- "$candidate_lock"' EXIT
 input_names=(requirements.txt requirements-dev.txt requirements-ci.in)
 mkdir "$temporary_directory/inputs"
 
+hash_files() {
+  local directory=$1
+  shift
+  (cd "$directory" && "$python_bin" - "$@" <<'PY'
+import hashlib
+from pathlib import Path
+import sys
+
+for name in sys.argv[1:]:
+    print(f"{hashlib.sha256(Path(name).read_bytes()).hexdigest()}  {name}")
+PY
+  )
+}
+
 input_hashes() {
-  (cd "$source_root" && sha256sum requirements.txt requirements-dev.txt)
-  sha256sum requirements-ci.in
+  hash_files "$source_root" requirements.txt requirements-dev.txt
+  hash_files "$input_root" requirements-ci.in
 }
 
 input_hashes > "$temporary_directory/input-sha256.before"
 cp -- "$source_root/requirements.txt" "$source_root/requirements-dev.txt" requirements-ci.in "$temporary_directory/inputs/"
-(
-  cd "$temporary_directory/inputs"
-  sha256sum "${input_names[@]}"
-) > "$temporary_directory/input-sha256.snapshot"
+hash_files "$temporary_directory/inputs" "${input_names[@]}" > "$temporary_directory/input-sha256.snapshot"
 cmp "$temporary_directory/input-sha256.before" "$temporary_directory/input-sha256.snapshot"
 
-uv pip compile "$temporary_directory/inputs/requirements-ci.in" \
+uv --no-config pip compile "$temporary_directory/inputs/requirements-ci.in" \
   --python "$python_bin" \
   --python-version "$PYTHON_VERSION" \
   --python-platform x86_64-unknown-linux-gnu \
@@ -55,7 +66,7 @@ uv_version = sys.argv[3]
 body = lock.read_text(encoding="utf-8")
 versions = {
     re.sub(r"[-_.]+", "-", match.group(1)).lower(): match.group(2)
-    for match in re.finditer(r"^([A-Za-z0-9_.-]+)==([^ ;\\]+)", body, re.M)
+    for match in re.finditer(r"^([A-Za-z0-9_.-]+)==([^\s;\\]+)", body, re.M)
 }
 if versions.get("pip-audit") != "2.10.1":
     raise SystemExit("selected lock must contain pip-audit==2.10.1")
@@ -73,8 +84,8 @@ header = [
 lock.write_text("\n".join(header) + "\n" + body, encoding="utf-8")
 PY
 
-uv venv --python "$python_bin" --no-python-downloads "$temporary_directory/venv" >/dev/null
-uv pip install \
+uv --no-config venv --python "$python_bin" --no-python-downloads "$temporary_directory/venv" >/dev/null
+uv --no-config pip install \
   --dry-run \
   --python "$temporary_directory/venv/bin/python" \
   --python-version "$PYTHON_VERSION" \
@@ -91,4 +102,4 @@ if ! cmp -s \
   exit 1
 fi
 mv -- "$candidate_lock" requirements-ci.lock
-sha256sum requirements-ci.lock
+hash_files "$input_root" requirements-ci.lock

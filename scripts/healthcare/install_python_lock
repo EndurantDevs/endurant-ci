@@ -3,14 +3,14 @@ set -euo pipefail
 
 input_root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source_root=${SOURCE_ROOT:?SOURCE_ROOT must identify the public source checkout}
-readonly UV_VERSION=0.12.11
+readonly UV_VERSION=0.12.12
 
 case "$#:${1-}" in
   0:|1:coverage) ;;
   *) echo "usage: scripts/healthcare/install_python_lock [coverage]" >&2; exit 2 ;;
 esac
 
-test "$(uv --version | awk '{print $2}')" = "$UV_VERSION"
+test "$(uv --no-config --version | awk '{print $2}')" = "$UV_VERSION"
 python "$input_root/validate_python_lock_inputs" "$source_root"
 
 python - <<'PY'
@@ -57,13 +57,13 @@ Path(sys.argv[1]).write_text("--only-binary :all:\n\n" + "\n".join(selected) + "
 PY
 fi
 
-uv pip sync \
+uv --no-config pip sync \
   --python "$(command -v python)" \
   --only-binary :all: \
   --require-hashes \
   --strict \
   "$lock_file"
-uv pip freeze --python "$(command -v python)" --strict > "$temporary_directory/installed.lock"
+uv --no-config pip freeze --python "$(command -v python)" --strict > "$temporary_directory/installed.lock"
 python - "$lock_file" "$temporary_directory/installed.lock" <<'PY'
 from pathlib import Path
 import re
@@ -71,7 +71,7 @@ import sys
 
 
 normalize = lambda name: re.sub(r"[-_.]+", "-", name).lower()
-pattern = re.compile(r"^([A-Za-z0-9_.-]+)==([^ ;\\]+)", re.M)
+pattern = re.compile(r"^([A-Za-z0-9_.-]+)==([^\s;\\]+)", re.M)
 expected = {normalize(name): version for name, version in pattern.findall(Path(sys.argv[1]).read_text())}
 installed = {normalize(name): version for name, version in pattern.findall(Path(sys.argv[2]).read_text())}
 if installed != expected:

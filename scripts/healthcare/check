@@ -56,8 +56,8 @@ prepare_python_environment() {
     exit "$status"
   }
   trap cleanup_python_environment EXIT
-  test "$(uv --version | awk '{print $2}')" = 0.12.11
-  uv venv --python 3.14.7 --no-python-downloads "$python_environment_root/venv"
+  test "$(uv --no-config --version | awk '{print $2}')" = 0.12.12
+  uv --no-config venv --python 3.14.7 --no-python-downloads "$python_environment_root/venv"
   export VIRTUAL_ENV="$python_environment_root/venv"
   export PATH="$VIRTUAL_ENV/bin:$PATH"
   unset PYTHONHOME || true
@@ -272,8 +272,8 @@ run_rust() {
         "$(basename "${wheels[0]}")" \
         > "$(artifact_path ptg2-address-canon-wheel.sha256)"
     fi
-    uv pip install --python "$(command -v python)" --no-build --no-deps "${wheels[0]}"
-    uv pip check --python "$(command -v python)"
+    uv --no-config pip install --python "$(command -v python)" --no-build --no-deps "${wheels[0]}"
+    uv --no-config pip check --python "$(command -v python)"
   )
   timeout --foreground 295s python -m pytest -q tests/test_address_canon_pyo3.py
   (
