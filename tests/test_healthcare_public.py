@@ -1,5 +1,6 @@
 """Exercise hosted artifact placement and exact-image cleanup without services."""
 
+import json
 import os
 from pathlib import Path
 import re
@@ -14,6 +15,12 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECK_FUNCTIONS = (ROOT / "scripts/healthcare/check").read_text().rsplit("\ncase ", 1)[0]
+IMAGE_VALIDATORS = (
+    "scripts/smoke/provider_directory_runtime_contract.py",
+    "scripts/research/provider_directory_coverage_audit.py",
+    "scripts/research/provider_directory_fhir_harness.py",
+    "scripts/devops/ptg2_strict_v3_cutover_ready.py",
+)
 
 
 class HealthcarePublicChecks(unittest.TestCase):
@@ -207,6 +214,10 @@ RUNTIME_BASE_IMAGE=synthetic
             with self.subTest(build=build, remove=remove, listing=listing):
                 with tempfile.TemporaryDirectory() as temporary:
                     root = Path(temporary)
+                    for relative in IMAGE_VALIDATORS:
+                        path = root / relative
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.touch()
                     env = {**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT),
                            "SOURCE_SHA": "a" * 40, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
                            "STUB_ROOT": temporary, "BUILD_STATUS": str(build),
@@ -238,6 +249,84 @@ run_container_package
                         self.assertEqual((root / "cleanup").read_text(),
                                          "image rm healthcare-mrf-api:ci-123-2\n")
                     self.assertEqual((root / "image").exists(), bool(remove or listing))
+
+    def test_packaged_contracts_execute_on_tested_image_before_export_and_fail_closed(self):
+        for failure in ("none", "provider", "files", "help", "missing-validator"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "source with spaces"
+                source.mkdir()
+                for relative in IMAGE_VALIDATORS:
+                    path = source / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    if failure != "missing-validator" or relative != IMAGE_VALIDATORS[-1]:
+                        path.touch()
+                environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                    "SOURCE_SHA": "a" * 40, "GITHUB_REPOSITORY": "EndurantDevs/healthcare-mrf-api",
+                    "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2", "PUBLIC_CI_EXPORT_IMAGE": "1",
+                    "TEST_IMAGE": "sha256:" + "b" * 64, "TEST_PYTHON": sys.executable,
+                    "STUB_ROOT": temporary, "FAIL_CHECK": failure}
+                script = CHECK_FUNCTIONS + r'''
+git() { printf '%s\n' "$SOURCE_SHA"; }
+log_call() {
+  "$TEST_PYTHON" -c 'import json, os, sys
+with open(os.environ["STUB_ROOT"] + "/calls", "a") as output:
+    output.write(json.dumps(sys.argv[1:]) + "\n")' "$@"
+}
+docker() {
+  log_call docker "$@"
+  case "$1 ${2:-}" in
+    build*) touch "$STUB_ROOT/image" ;;
+    'image inspect') printf '%s\n' "$TEST_IMAGE" ;;
+    'image ls') [ ! -f "$STUB_ROOT/image" ] || printf '%s\n' "$TEST_IMAGE" ;;
+    'image rm') command rm "$STUB_ROOT/image" ;;
+    run*)
+      case "$*" in
+        *scripts/smoke/provider_directory_runtime_contract.py*) [ "$FAIL_CHECK" != provider ] || return 17 ;;
+        *RECEIPT_AUTHORITY_ROLE_ENV*) [ "$FAIL_CHECK" != files ] || return 17 ;;
+        */run/healthporta-validation/cutover-ready.py*) [ "$FAIL_CHECK" != help ] || return 17 ;;
+      esac ;;
+  esac
+  return 0
+}
+python3() { log_call python3 "$@"; }
+run_container_package
+'''
+                result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0 if failure == "none" else 1 if failure == "missing-validator" else 17,
+                                 result.stderr)
+                calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]
+                self.assertEqual(calls[-2:], [
+                    ["docker", "image", "rm", "healthcare-mrf-api:ci-123-2"],
+                    ["docker", "image", "ls", "--quiet", "healthcare-mrf-api:ci-123-2"],
+                ])
+                self.assertFalse((root / "image").exists())
+                exports = [call for call in calls if call[0] == "python3"]
+                if failure != "none":
+                    self.assertFalse(exports)
+                    continue
+                self.assertEqual(exports, [["python3", str(ROOT / "scripts/source_image.py"), "export", environment["TEST_IMAGE"]]])
+                portable = [call for call in calls if call[:2] == ["docker", "run"] and any(
+                    "provider_directory_runtime_contract.py" in arg or "RECEIPT_AUTHORITY_ROLE_ENV" in arg
+                    or "/run/healthporta-validation/cutover-ready.py" in arg for arg in call)]
+                self.assertEqual(len(portable), 3)
+                for call in portable:
+                    self.assertEqual(call[call.index("--network") + 1], "none")
+                    self.assertEqual(call[call.index("--platform") + 1], "linux/amd64")
+                    self.assertIn(environment["TEST_IMAGE"], call)
+                    self.assertIn("--rm", call)
+                    self.assertLess(calls.index(call), calls.index(exports[0]))
+                mounted = [call[index + 1] for call in portable for index, arg in enumerate(call) if arg == "--mount"]
+                self.assertEqual(len(mounted), 4)
+                for relative in IMAGE_VALIDATORS:
+                    self.assertTrue(any(f"source={source}/{relative}," in mount and mount.endswith(",readonly") for mount in mounted))
+                checks = portable[1][-1]
+                for required in ("test -f /opt/alembic/versions/20260712120000_ptg2_v3_shared_schema.py",
+                                 "test -f /opt/alembic/versions/20260810110000_ptg_wave_receipt_authority.py",
+                                 "test -f /opt/process/ptg_wave_receipt_process_authority.py",
+                                 "grep -Fq RECEIPT_AUTHORITY_ROLE_ENV"):
+                    self.assertIn(required, checks)
+                self.assertEqual(portable[2][-2:], ["/run/healthporta-validation/cutover-ready.py", "--help"])
 
 
 

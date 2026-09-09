@@ -165,40 +165,48 @@ class NativeImageTransport(unittest.TestCase):
 
         for case, target in (("index", INDEX), ("manifest", MANIFEST)):
             with self.subTest(case=case):
+                self.assertEqual(docker("image", "ls", "--all", "--quiet").strip(), b"")
                 immutable = REPOSITORY + "@" + target
                 raw = docker("buildx", "imagetools", "inspect", "--raw", immutable)
                 self.assertEqual("sha256:" + hashlib.sha256(raw).hexdigest(), target)
-                docker("pull", "--platform", "linux/amd64", immutable)
                 tag = "localhost/ci-transport:" + name + "-" + case
-                docker("tag", immutable, tag)
-                archive = task / (case + ".tar")
-                with archive.open("xb") as output:
-                    subprocess.run(["docker", "exec", container_id, "docker", "save", tag],
-                                   check=True, stdout=output, stderr=subprocess.PIPE, timeout=180)
-                with tarfile.open(archive) as bundle:
-                    item = bundle.getmember("index.json")
-                    self.assertLessEqual(item.size, 65536)
-                    roots = json.load(bundle.extractfile(item))["manifests"]
-                    self.assertEqual(len(roots), 1)
-                    self.assertEqual(roots[0]["digest"], target)
-                with archive.open("rb") as incoming:
-                    ctr("images", "import", "-", stdin=incoming)  # Same transfer API and unpack defaults as DEV.
-                rows = [row.split() for row in ctr("images", "list").decode().splitlines()
-                        if row.split() and row.split()[0] == tag]
-                self.assertEqual(len(rows), 1)
-                self.assertEqual(rows[0][2], target)
-                for digest in dict.fromkeys((target, MANIFEST, CONFIG)):
-                    content = ctr("content", "get", digest)
-                    self.assertEqual("sha256:" + hashlib.sha256(content).hexdigest(), digest)
-                    document = json.loads(content)
-                    if digest == INDEX:
-                        native = [entry for entry in document["manifests"]
-                                  if entry.get("platform") == {"os": "linux", "architecture": "amd64"}]
-                        self.assertEqual([entry["digest"] for entry in native], [MANIFEST])
-                    elif digest == MANIFEST:
-                        self.assertEqual(document["config"]["digest"], CONFIG)
-                    else:
-                        self.assertEqual((document["os"], document["architecture"]), ("linux", "amd64"))
-                ctr("images", "rm", tag)
-                self.assertNotIn(tag, ctr("images", "list", "--quiet").decode().splitlines())
-                print(f"native transport: {case} target={target} manifest={MANIFEST} config={CONFIG}")
+                try:
+                    docker("pull", "--platform", "linux/amd64", immutable)
+                    docker("tag", immutable, tag)
+                    archive = task / (case + ".tar")
+                    with archive.open("xb") as output:
+                        subprocess.run(["docker", "exec", container_id, "docker", "save", tag],
+                                       check=True, stdout=output, stderr=subprocess.PIPE, timeout=180)
+                    with tarfile.open(archive) as bundle:
+                        item = bundle.getmember("index.json")
+                        self.assertLessEqual(item.size, 65536)
+                        roots = json.load(bundle.extractfile(item))["manifests"]
+                        print(f"native transport archive {case}: {json.dumps(roots, sort_keys=True)[:4096]}")
+                        # Docker also exports OCI referrers; bind the exact requested tag.
+                        self.assertEqual([root["digest"] for root in roots
+                                          if root.get("annotations", {}).get("io.containerd.image.name") == tag],
+                                         [target])
+                    with archive.open("rb") as incoming:
+                        ctr("images", "import", "-", stdin=incoming)  # Same transfer API and unpack defaults as DEV.
+                    rows = [row.split() for row in ctr("images", "list").decode().splitlines()
+                            if row.split() and row.split()[0] == tag]
+                    self.assertEqual(len(rows), 1)
+                    self.assertEqual(rows[0][2], target)
+                    for digest in dict.fromkeys((target, MANIFEST, CONFIG)):
+                        content = ctr("content", "get", digest)
+                        self.assertEqual("sha256:" + hashlib.sha256(content).hexdigest(), digest)
+                        document = json.loads(content)
+                        if digest == INDEX:
+                            native = [entry for entry in document["manifests"]
+                                      if entry.get("platform") == {"os": "linux", "architecture": "amd64"}]
+                            self.assertEqual([entry["digest"] for entry in native], [MANIFEST])
+                        elif digest == MANIFEST:
+                            self.assertEqual(document["config"]["digest"], CONFIG)
+                        else:
+                            self.assertEqual((document["os"], document["architecture"]), ("linux", "amd64"))
+                    ctr("images", "rm", tag)
+                    self.assertNotIn(tag, ctr("images", "list", "--quiet").decode().splitlines())
+                    print(f"native transport: {case} target={target} manifest={MANIFEST} config={CONFIG}")
+                finally:
+                    docker("image", "rm", "--no-prune", tag, immutable)
+                    self.assertEqual(docker("image", "ls", "--all", "--quiet").strip(), b"")

@@ -650,7 +650,13 @@ def reconcile(expected):
         raise ValueError("retained publication: package identity changed")
     graph = registry_publication(intent)
     if graph is None:
-        print("Authenticated registry confirms the publication tag is absent.")
+        # An interrupted index push can commit children before its final tagged root.
+        new = [item for item in package_versions(image) if item["id"] not in intent["prior_version_ids"]]
+        if new:
+            print("Unresolved publication versions: " + json.dumps(
+                [{"id": item["id"], "digest": item.get("name")} for item in new], sort_keys=True))
+            raise ValueError("retained publication: tag is absent but new package versions require ownership review")
+        print("Authenticated registry tag is absent and no new package versions remain.")
         return False
     versions = [item for item in package_versions(image) if item.get("name") in graph
                 or tag in item.get("metadata", {}).get("container", {}).get("tags", [])]
@@ -663,8 +669,17 @@ def reconcile(expected):
                 or not (artifacts.timestamp(intent["created_at"]) <= artifacts.timestamp(version["created_at"])
                         <= artifacts.timestamp(version["updated_at"]) <= datetime.now(timezone.utc))):
             raise ValueError("retained publication: graph version is existing, shared, or outside this publication")
+    def require_exclusive_graph(remaining):
+        current = [item for item in package_versions(image) if item["id"] not in intent["prior_version_ids"]]
+        if {item["id"] for item in current} != {item["id"] for item in remaining}:
+            # Untagged children can be shared by another newly published index.
+            print("Unresolved publication versions: " + json.dumps(
+                [{"id": item["id"], "digest": item.get("name")} for item in current], sort_keys=True))
+            raise ValueError("retained publication: versions outside the owned graph may share its children")
+
     # Validate the whole graph before deleting anything. Its run labels prevent ordinary
     # cross-attempt digest reuse; no existing or tagged child version can be removed.
+    require_exclusive_graph(versions)
     current_intent, run, job = authenticated_intent(expected)
     if (current_intent != intent or uploaded_payload(expected, run, job) is not None
             or package_id(image) != intent["package_id"]
@@ -678,6 +693,7 @@ def reconcile(expected):
     for index, version in enumerate(versions):
         endpoint = f"/versions/{version['id']}"
         if index:
+            require_exclusive_graph(versions[index:])
             current_intent, run, job = authenticated_intent(expected)
             if (current_intent != intent or uploaded_payload(expected, run, job) is not None
                     or package_id(image) != intent["package_id"] or package_api(image, endpoint) != version):

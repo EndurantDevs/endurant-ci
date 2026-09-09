@@ -598,8 +598,8 @@ class ReconciliationChecks(unittest.TestCase):
         return intent, digest, version
 
     def exercise(self, *, version_change=None, prior=False, receipts=None, delete_error=None,
-                 absent=False, changed_final=False, deletion_remains=False, active=True,
-                 indexed=False, existing_child=False, tagged_child=False):
+                 absent=False, no_new_versions=False, changed_final=False, deletion_remains=False, active=True,
+                 indexed=False, existing_child=False, tagged_child=False, shared_index=False):
         intent, digest, version = self.fixtures()
         if version_change:
             version.update(version_change)
@@ -614,6 +614,8 @@ class ReconciliationChecks(unittest.TestCase):
         if tagged_child:
             versions[-1]["metadata"]["container"]["tags"] = ["shared-live"]
         calls, deleted = [], set()
+        inventory = versions + ([{**deepcopy(version), "id": 6, "name": "sha256:" + "6" * 64,
+                                  "metadata": {"container": {"tags": ["retained-alias"]}}}] if shared_index else [])
 
         def api(image, path, method="GET"):
             calls.append((image, path, method))
@@ -635,7 +637,8 @@ class ReconciliationChecks(unittest.TestCase):
                 patch.object(transfer, "uploaded_payload", return_value=None, side_effect=receipts), \
                 patch.object(transfer, "package_id", return_value=321), \
                 patch.object(transfer, "registry_publication", return_value=None if absent else [digest, *[item["name"] for item in versions[1:]]]), \
-                patch.object(transfer, "package_versions", return_value=versions), \
+                patch.object(transfer, "package_versions", side_effect=lambda image: [] if no_new_versions else
+                             [item for item in inventory if item["id"] not in deleted]), \
                 patch.object(transfer, "require_absent_registry_tag"), \
                 patch.object(transfer, "package_api", side_effect=api), patch.object(transfer, "command") as docker, \
                 patch.object(transfer, "admit", side_effect=AssertionError("cleanup must not re-admit")):
@@ -670,6 +673,16 @@ class ReconciliationChecks(unittest.TestCase):
                 self.exercise(indexed=True, **options)
             self.assertFalse(any(method == "DELETE" for _, _, method in self.calls))
 
+    def test_another_new_index_prevents_deleting_its_shared_untagged_child(self):
+        with self.assertRaisesRegex(ValueError, "outside the owned graph"):
+            self.exercise(indexed=True, shared_index=True)
+        self.assertFalse(any(method == "DELETE" for _, _, method in self.calls))
+
+    def test_absent_root_does_not_hide_partially_pushed_versions(self):
+        with self.assertRaisesRegex(ValueError, "new package versions require ownership review"):
+            self.exercise(absent=True, indexed=True)
+        self.assertFalse(any(method == "DELETE" for _, _, method in self.calls))
+
     def test_lost_delete_response_is_reconciled_without_retry(self):
         result, calls = self.exercise(delete_error=TimeoutError("synthetic lost response"))
         self.assertTrue(result)
@@ -690,7 +703,7 @@ class ReconciliationChecks(unittest.TestCase):
     def test_receipt_or_authenticated_tag_absence_preserves_registry(self):
         intent, digest, _ = self.fixtures()
         receipt = transfer.publication_receipt(expected(), intent["producer"], digest)
-        for options in ({"receipts": [receipt]}, {"absent": True}):
+        for options in ({"receipts": [receipt]}, {"absent": True, "no_new_versions": True}):
             with self.subTest(options=options):
                 result, calls = self.exercise(**options)
                 self.assertFalse(result)
