@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Remove current-attempt CI intermediates after all validation jobs have passed."""
+"""Remove current-attempt CI intermediates after all validation jobs finish."""
 
 from datetime import datetime, timedelta, timezone
 import json
@@ -14,6 +14,10 @@ KINDS = {"EndurantDevs/healthcare-mrf-api": "healthcare", "EndurantDevs/drug-api
 CLEANUP_JOB = "CI artifact cleanup"
 RUN_FIELDS = ("id", "run_attempt", "path", "event", "head_sha", "head_branch")
 ARTIFACT_FIELDS = ("id", "name", "size_in_bytes", "expired", "created_at", "expires_at", "updated_at", "digest")
+TERMINAL_CONCLUSIONS = {
+    "success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required", "stale",
+    "startup_failure",
+}
 
 
 def current_run(run, expected, repository):
@@ -41,9 +45,10 @@ def completed_consumers(repository, run):
                 and job.get("run_id") == run["id"] and job.get("run_attempt") == run["run_attempt"]
                 and job.get("head_sha") == run["head_sha"]
                 and job.get("status") == ("in_progress" if own_job else "completed")
-                and job.get("conclusion") == (None if own_job else "success")):
-            raise ValueError("retained intermediates: cleanup must be the sole active job after successful validation")
-    return sorted((job["id"], job["name"]) for job in jobs)
+                and (job.get("conclusion") is None if own_job
+                     else job.get("conclusion") in TERMINAL_CONCLUSIONS)):
+            raise ValueError("retained intermediates: cleanup must be the sole active job after validation")
+    return sorted((job["id"], job["name"], job.get("conclusion")) for job in jobs)
 
 
 def temporary_names(kind, run):
@@ -107,15 +112,19 @@ def cleanup(repository, expected):
     if not candidates:
         print("No current-attempt intermediates to remove.")
         return 0
-    if len(finals) != 1 or not durable(finals[0], expected):
-        raise ValueError("retained intermediates: exact durable public measurement is missing or invalid")
-    final = finals[0]
-    proofs = [final]
-    if any(item["name"] == f"{kind}-public-image-staging-{expected['id']}-{expected['run_attempt']}" for item in candidates):
-        receipts = [item for item in artifacts if item.get("name") == f"{kind}-public-image-{expected['id']}-{expected['run_attempt']}"]
-        if len(receipts) != 1 or not durable(receipts[0], expected):
-            raise ValueError("retained image archive: durable publication receipt is missing or invalid")
-        proofs.append(receipts[0])
+    successful = all(conclusion == "success" for _, name, conclusion in consumers if name != CLEANUP_JOB)
+    proofs = []
+    if successful:
+        if len(finals) != 1 or not durable(finals[0], expected):
+            raise ValueError("retained intermediates: exact durable public measurement is missing or invalid")
+        proofs.append(finals[0])
+        image_name = f"{kind}-public-image-staging-{expected['id']}-{expected['run_attempt']}"
+        if any(item["name"] == image_name for item in candidates):
+            receipt_name = f"{kind}-public-image-{expected['id']}-{expected['run_attempt']}"
+            receipts = [item for item in artifacts if item.get("name") == receipt_name]
+            if len(receipts) != 1 or not durable(receipts[0], expected):
+                raise ValueError("retained image archive: durable publication receipt is missing or invalid")
+            proofs.append(receipts[0])
     deleted = 0
     for artifact in candidates:
         # Refresh consumer completion, immutable artifacts, and run before each delete.

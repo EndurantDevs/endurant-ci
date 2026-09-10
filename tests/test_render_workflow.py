@@ -73,7 +73,7 @@ class RenderWorkflowChecks(unittest.TestCase):
                 self.assertEqual(cleanup_job, {
                     "name": RENDERER.job_name("CI artifact cleanup"), "runs-on": "ubuntu-latest", "timeout-minutes": 10,
                     "needs": ["dev-image-publication"],
-                    "if": "${{ " + RENDERER.GUARD + "success()) }}",
+                    "if": "${{ " + RENDERER.GUARD + "always()) }}",
                     "permissions": {"contents": "read", "actions": "write"},
                     "steps": [{"name": "Check out trusted cleanup helper",
                                "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
