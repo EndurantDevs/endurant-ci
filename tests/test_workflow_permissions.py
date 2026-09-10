@@ -13,6 +13,14 @@ COMPOSITE_PATH = ROOT / "scripts/healthcare/setup/action.yml"
 class PublicWorkflowPermissions(unittest.TestCase):
     def check_steps(self, steps, *, composite=False):
         for index, step in enumerate(steps):
+            run = step.get("run", "")
+            if "uv==0.12.12" in run:
+                self.assertIn("--only-binary=:all: --require-hashes -r /dev/stdin", run)
+                self.assertIn(
+                    "uv==0.12.12 --hash=sha256:fa5df02fc619a3cc7a58810d6ffeb80c"
+                    "a1e01404b8ef7239bd1cf2103c02cacf",
+                    run,
+                )
             if "uses" not in step:
                 continue
             action = step["uses"]

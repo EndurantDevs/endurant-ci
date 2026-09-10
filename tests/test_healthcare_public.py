@@ -29,7 +29,12 @@ class HealthcarePublicChecks(unittest.TestCase):
         check = (ROOT / "scripts/healthcare/check").read_text()
         installer = (ROOT / "scripts/healthcare/install_python_lock").read_text()
         self.assertIn("actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97", setup)
-        self.assertIn("--only-binary=:all: 'uv==0.12.12'", setup)
+        self.assertIn("--only-binary=:all: --require-hashes -r /dev/stdin", setup)
+        self.assertIn(
+            "uv==0.12.12 --hash=sha256:fa5df02fc619a3cc7a58810d6ffeb80c"
+            "a1e01404b8ef7239bd1cf2103c02cacf",
+            setup,
+        )
         self.assertNotIn("astral-sh/setup-uv@", setup)
         generator = (ROOT / "scripts/healthcare/compile_python_lock").read_text()
         self.assertIn("uv --no-config venv --python 3.14.7", check)
