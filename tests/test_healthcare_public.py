@@ -24,6 +24,41 @@ IMAGE_VALIDATORS = (
 
 
 class HealthcarePublicChecks(unittest.TestCase):
+    def test_tennessee_native_selection_is_optional_and_has_database_dsn(self):
+        tennessee_paths = (
+            "tests/test_tennessee_profile_registry.py",
+            "tests/test_tennessee_profile_store.py",
+        )
+        for present in (False, True):
+            with self.subTest(present=present), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / "tests").mkdir()
+                retained_path = "tests/test_provider_profile_massachusetts_postgres.py"
+                for relative in (retained_path, *(tennessee_paths if present else ())):
+                    (root / relative).touch()
+                command = root / "timeout"
+                command.write_text(
+                    '#!/bin/sh\n'
+                    'printf "%s\\0" "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_POSTGRES_DSN:-}" "$@" >> "$CAPTURE"\n'
+                    'printf "\\n" >> "$CAPTURE"\n'
+                )
+                command.chmod(0o755)
+                capture = root / "calls"
+                environment = {**os.environ, "SOURCE_ROOT": str(root), "CI_ROOT": str(ROOT),
+                    "PATH": str(root) + os.pathsep + os.environ["PATH"], "CAPTURE": str(capture)}
+                environment.pop("HLTHPRT_PROVIDER_DIRECTORY_PROFILE_POSTGRES_DSN", None)
+                subprocess.run(
+                    ["bash", "-euc", CHECK_FUNCTIONS + "\nrun_provider_profile_postgres postgresql://synthetic/test\n"],
+                    env=environment, capture_output=True, text=True, check=True,
+                )
+                calls = [line.rstrip("\0").split("\0") for line in capture.read_text().splitlines()]
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(calls[1][0], "postgresql://synthetic/test")
+                self.assertEqual(calls[1].count(retained_path), 1)
+                for relative in tennessee_paths:
+                    self.assertNotIn(relative, calls[0])
+                    self.assertEqual(calls[1].count(relative), int(present))
+
     def test_validation_uses_pinned_uv(self):
         setup = (ROOT / "scripts/healthcare/setup/action.yml").read_text()
         check = (ROOT / "scripts/healthcare/check").read_text()

@@ -1015,7 +1015,9 @@ run_provider_profile_postgres() {
     tests/test_massachusetts_profile_acquisition.py \
     tests/test_massachusetts_profile_store.py \
     tests/test_massachusetts_profile_completion.py \
-    tests/test_provider_profile_massachusetts_postgres.py; do
+    tests/test_provider_profile_massachusetts_postgres.py \
+    tests/test_tennessee_profile_registry.py \
+    tests/test_tennessee_profile_store.py; do
     if [ -f "$repository_root/$profile_test" ]; then
       set -- "$@" "$profile_test"
     fi
