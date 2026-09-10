@@ -121,11 +121,11 @@ class ArtifactCleanupChecks(unittest.TestCase):
             with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "stopped after 0 deletions"):
                 self.exercise(items, refresh=changes)
 
-    def test_consumers_must_all_finish_successfully_in_the_same_attempt_before_each_delete(self):
+    def test_consumers_must_all_finish_in_the_same_attempt_before_each_delete(self):
         items = [artifact(1, "mrf-rust-coverage-123-2"), artifact(2, "healthcare-public-measurement-123-2", 90)]
-        for changes in ({"status": "in_progress", "conclusion": None}, {"conclusion": "failure"},
-                        {"conclusion": "cancelled"}, {"conclusion": "skipped"}, {"run_attempt": 1},
-                        {"run_id": 999}, {"head_sha": "c" * 40}):
+        for changes in ({"status": "in_progress", "conclusion": None}, {"status": "queued", "conclusion": None},
+                        {"conclusion": None}, {"conclusion": "unknown"}, {"run_attempt": 1}, {"run_id": 999},
+                        {"head_sha": "c" * 40}):
             changed = jobs()
             changed[0].update(changes)
             for option in ("job_inventory", "refreshed_jobs"):
@@ -139,6 +139,13 @@ class ArtifactCleanupChecks(unittest.TestCase):
         changed[0]["id"] = 999
         with self.assertRaises(ValueError):
             self.exercise(items, refreshed_jobs=changed)
+
+    def test_failed_validation_removes_known_intermediates_without_a_final_measurement(self):
+        failed_jobs = jobs()
+        failed_jobs[0]["conclusion"] = "failure"
+        temporary = artifact(1, "mrf-rust-coverage-123-2")
+        unknown = artifact(2, "unknown")
+        self.assertEqual(self.exercise([temporary, unknown], job_inventory=failed_jobs)[0], [1])
 
     def test_final_measurement_must_exist_and_remain_durable(self):
         temporary = artifact(1, "mrf-rust-coverage-123-2")
@@ -171,6 +178,10 @@ class ArtifactCleanupChecks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "publication changed"):
             self.exercise([archive, measurement, publication], expected, changed_artifact=(3, {"digest": "sha256:" + "c" * 64}))
         self.assertEqual(self.exercise([archive, measurement, publication], run("EndurantDevs/drug-api"))[0], [])
+
+        failed_jobs = jobs()
+        failed_jobs[0]["conclusion"] = "failure"
+        self.assertEqual(self.exercise([archive], expected, job_inventory=failed_jobs)[0], [1])
 
     def test_delete_api_requires_confirmed_204_and_propagates_errors(self):
         with patch.dict("os.environ", {"GH_TOKEN": "synthetic"}), patch.object(
