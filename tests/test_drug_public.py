@@ -102,7 +102,12 @@ class PublicDrugTests(unittest.TestCase):
         self.assertIn("uv_lock_sha256=", gate)
         self.assertNotIn("-m pip install", gate)
         self.assertIn("actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97", workflow)
-        self.assertIn("--only-binary=:all: 'uv==0.12.12'", workflow)
+        self.assertIn("--only-binary=:all: --require-hashes -r /dev/stdin", workflow)
+        self.assertIn(
+            "uv==0.12.12 --hash=sha256:fa5df02fc619a3cc7a58810d6ffeb80c"
+            "a1e01404b8ef7239bd1cf2103c02cacf",
+            workflow,
+        )
         self.assertNotIn("astral-sh/setup-uv@", workflow)
 
     def test_cleanup_verifies_absence_and_preserves_original_failure(self):
