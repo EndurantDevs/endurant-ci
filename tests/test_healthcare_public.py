@@ -24,6 +24,70 @@ IMAGE_VALIDATORS = (
 
 
 class HealthcarePublicChecks(unittest.TestCase):
+    def test_fast_quality_preserves_checks_without_reinstalling_the_runtime(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = {**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT), "BASE_SHA": "a" * 40}
+            script = CHECK_FUNCTIONS + r'''
+commit_message_policy() { printf 'commit policy\n'; }
+prepare_python_environment() { printf 'quality environment\n'; }
+install_python_dependencies() { printf 'runtime dependencies\n'; return 17; }
+uv() { printf 'uv %s\n' "$*"; }
+ruff() { printf 'ruff %s\n' "$*"; }
+pylint() { printf 'pylint %s\n' "$*"; }
+python() { printf 'python %s\n' "$*"; }
+run_quality
+'''
+            result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for retained in ("commit policy", "requirements-python-quality.lock", "--require-hashes",
+                         "ruff check --no-cache", "python_format.py", "compileall", "coverage_reports.py --check",
+                         "request_time_external_call_guard.py"):
+            self.assertIn(retained, result.stdout)
+        for moved in ("runtime dependencies", "readability_budget.py", "test_coverage_forecast.py",
+                      "provider_directory_runtime_contract.py", "generate_provider_directory_support_docs.py"):
+            self.assertNotIn(moved, result.stdout)
+
+    def test_runtime_contracts_remain_mandatory_in_the_api_lane(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = {**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT)}
+            script = CHECK_FUNCTIONS + r'''
+install_python_dependencies() { printf 'runtime dependencies\n'; }
+run_python_inference() { printf 'runtime-aware Pylint inference\n'; }
+python() { printf 'python %s\n' "$*"; }
+timeout() { printf 'timeout %s\n' "$*"; }
+run_api_contract
+'''
+            result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for retained in ("runtime dependencies", "runtime-aware Pylint inference", "provider_directory_runtime_contract.py",
+                         "generate_provider_directory_support_docs.py --check", "tests/test_openapi_spec.py",
+                         "tests/test_formulary_fhir_openapi.py", "tests/test_api_init_and_utils.py", "tests/test_healthcheck.py"):
+            self.assertIn(retained, result.stdout)
+        workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
+        self.assertIn("measurement", workflow["jobs"]["source-validation"]["needs"])
+        self.assertIn("readability-preflight", workflow["jobs"]["measurement"]["needs"])
+        self.assertIn("api-contract", workflow["jobs"]["measurement"]["needs"])
+        main = CHECK_FUNCTIONS.split("run_python_main() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertNotIn("test_coverage_forecast.py", main)
+        self.assertIn("--ci-shard-count 4", main)
+
+    def test_inference_environment_creation_failure_keeps_runtime_and_cleans_its_child(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            runtime = root / "runtime"
+            runtime.mkdir()
+            environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                           "RUNNER_TEMP": str(root), "VIRTUAL_ENV": str(runtime)}
+            script = CHECK_FUNCTIONS + '\nuv() { return 19; }\nrun_python_inference\n'
+            result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 19, result.stderr)
+            self.assertEqual(set(root.iterdir()), {source, runtime})
+        self.assertIn("sys.path.extend", CHECK_FUNCTIONS)
+        self.assertIn("orjson.quality_probe_missing_member", CHECK_FUNCTIONS)
+        self.assertIn("client.quality_probe_missing_member", CHECK_FUNCTIONS)
+
     def test_tennessee_native_selection_is_optional_and_has_database_dsn(self):
         tennessee_paths = (
             "tests/test_tennessee_profile_registry.py",
