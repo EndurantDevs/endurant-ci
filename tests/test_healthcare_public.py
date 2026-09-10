@@ -28,11 +28,9 @@ class HealthcarePublicChecks(unittest.TestCase):
         setup = (ROOT / "scripts/healthcare/setup/action.yml").read_text()
         check = (ROOT / "scripts/healthcare/check").read_text()
         installer = (ROOT / "scripts/healthcare/install_python_lock").read_text()
-        self.assertIn(
-            "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d",
-            setup,
-        )
-        self.assertIn("version: 0.12.12", setup)
+        self.assertIn("actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97", setup)
+        self.assertIn("--only-binary=:all: 'uv==0.12.12'", setup)
+        self.assertNotIn("astral-sh/setup-uv@", setup)
         generator = (ROOT / "scripts/healthcare/compile_python_lock").read_text()
         self.assertIn("uv --no-config venv --python 3.14.7", check)
         self.assertIn("uv --no-config pip sync", installer)

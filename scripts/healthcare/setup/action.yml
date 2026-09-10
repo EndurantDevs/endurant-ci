@@ -42,10 +42,14 @@ runs:
       printf 'CI_ARTIFACT_ROOT=%s\n' "$artifact_directory" >> "$GITHUB_ENV"
     shell: bash
     working-directory: source
-  - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+  - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
     with:
-      version: 0.12.12
       python-version: 3.14.7
+  - name: Install pinned uv
+    run: |
+      python -m pip install --disable-pip-version-check --no-deps --only-binary=:all: 'uv==0.12.12'
+      test "$(uv --version | awk '{print $2}')" = 0.12.12
+    shell: bash
   - name: Install exact Rust toolchain
     if: inputs.rust == 'true'
     shell: bash
