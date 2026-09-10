@@ -1,16 +1,15 @@
 """Enforce Ruff formatting and import order on newly added Python files."""
 
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 
 def check_new_files(base: str) -> None:
     """Check added files against the exact target, preserving legacy readability debt."""
     changed = subprocess.check_output(
-        ["git", "diff", "--no-renames", "--diff-filter=A", "--name-only", "-z",
-         base, "HEAD", "--", "*.py", "*.pyi"]
+        ["git", "diff", "--no-renames", "--diff-filter=A", "--name-only", "-z", base, "HEAD", "--", "*.py", "*.pyi"]
     )
     paths = [os.fsdecode(path) for path in changed.split(b"\0") if path]
     if not paths:
