@@ -287,6 +287,13 @@ docker() {
 
     def test_public_gate_retains_existing_execution_lanes(self):
         gate = (ROOT / "scripts/drug/check").read_text()
+        self.assertIn("-m ruff check --no-cache --select E9,F api db process scripts tests main.py", gate)
+        self.assertIn("-m ruff check --no-cache --select I api db process tests main.py", gate)
+        self.assertIn("-m pylint --errors-only api db process main.py", gate)
+        self.assertIn("-m pylint --source-roots=. --errors-only --disable=no-member tests", gate)
+        self.assertNotIn("-m flake8", gate)
+        self.assertNotIn("-m isort", gate)
+        self.assertIn('scripts/python_format.py" "$(base_sha)"', gate)
         measure = gate.split("\nmeasure() {", 1)[1].split("\ncase ", 1)[0]
         for command in ("require_frozen_candidate", "install", "require_python", "public_hygiene", "quality",
                         "test_run", "coverage_report", "coverage_provenance", "coverage_measurement",

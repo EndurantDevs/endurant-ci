@@ -149,9 +149,11 @@ quality() {
         readability_arguments+=(--base "$(base_sha)")
         "$python_bin" scripts/coverage_reports.py --check
     fi
-    "$python_bin" -m isort --check-only api db process tests main.py
-    "$python_bin" -m flake8 api db process tests main.py
-    "$python_bin" -m pylint --errors-only --disable=no-member api db process tests main.py
+    "$python_bin" -m ruff check --no-cache --select E9,F api db process scripts tests main.py
+    "$python_bin" -m ruff check --no-cache --select I api db process tests main.py
+    "$python_bin" "$CI_ROOT/scripts/python_format.py" "$(base_sha)"
+    "$python_bin" -m pylint --errors-only api db process main.py
+    "$python_bin" -m pylint --source-roots=. --errors-only --disable=no-member tests
     "$python_bin" -m compileall api process db scripts main.py
     "$python_bin" scripts/readability_budget.py "${readability_arguments[@]}"
     "$python_bin" scripts/ci/request_time_external_call_guard.py

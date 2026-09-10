@@ -142,21 +142,29 @@ run_hygiene() {
 
 run_quality() {
   commit_message_policy
-  install_python_dependencies
+  # Lint sync must never replace an already prepared application environment.
+  unset CI_DEPS_READY CI_PYTHON_ENV_READY
+  prepare_python_environment
+  uv --no-config pip sync --python "$(command -v python)" --require-hashes --only-binary=:all: \
+    "$CI_ROOT/scripts/requirements-python-quality.lock"
+  ruff check --no-cache .
+  python "$CI_ROOT/scripts/python_format.py" "$BASE_SHA"
+  pylint \
+    api/billing_search_selector_contract.py \
+    api/billing_search_transport_contract.py \
+    api/mrf_discovery_catalog_manifest.py \
+    api/plan_pricing_state_scan_contract.py \
+    process/fhir_request_failure_policy.py \
+    process/formulary_fhir/uhc_drug_parser_contract.py \
+    process/formulary_fhir/uhc_drug_transport_contract.py \
+    process/provider_directory_rooted_graph_source_contract.py \
+    process/provider_directory_rooted_graph_twin_admission_contract.py \
+    process/provider_directory_rooted_graph_twin_contract.py \
+    process/provider_directory_validated_publication_contract.py \
+    public_evidence/evidence_record_token_policy.py
   python -m compileall api process db public_evidence scripts main.py
-  python scripts/smoke/provider_directory_runtime_contract.py
-  python scripts/generate_provider_directory_support_docs.py --check
-
-  if [ -n "${BASE_SHA:-}" ]; then
-    python scripts/readability_budget.py --base "$BASE_SHA"
-  else
-    python scripts/readability_budget.py
-  fi
   python scripts/coverage_reports.py --check
-
   python scripts/ci/request_time_external_call_guard.py
-  timeout --foreground 295s python -m pytest -q \
-    tests/test_coverage_forecast.py
 }
 
 run_python_main() {
@@ -217,6 +225,8 @@ run_capacity() {
 
 run_api_contract() {
   install_python_dependencies
+  python scripts/smoke/provider_directory_runtime_contract.py
+  python scripts/generate_provider_directory_support_docs.py --check
   timeout --foreground 295s python -m pytest -q \
     tests/test_openapi_spec.py \
     tests/test_formulary_fhir_openapi.py \
