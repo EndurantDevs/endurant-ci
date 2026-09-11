@@ -373,6 +373,7 @@ class ArchiveChecks(unittest.TestCase):
     def test_slsa_statement_must_be_valid_and_bound_to_the_native_image(self):
         valid = json.loads(SLSA_BYTES)
         invalid = [b"{", json.dumps({**valid, "predicateType": "https://slsa.dev/provenance/v1"}).encode(),
+                   json.dumps({**valid, "_type": "https://in-toto.io/Statement/v9"}).encode(),
                    json.dumps({**valid, "subject": [{"digest": {"sha256": "0" * 64}}]}).encode()]
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "image.tar.gz"

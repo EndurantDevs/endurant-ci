@@ -140,8 +140,8 @@ def archive_identity(path, identity=None, *, require_provenance=False):
                     except (json.JSONDecodeError, UnicodeDecodeError) as error:
                         raise ValueError("image archive SLSA provenance statement is invalid") from error
                     subjects = statement.get("subject", []) if isinstance(statement, dict) else []
-                    if (not isinstance(statement, dict)
-                            or statement.get("_type") != "https://in-toto.io/Statement/v1"
+                    if (not isinstance(statement, dict) or statement.get("_type") not in
+                            ("https://in-toto.io/Statement/v0.1", "https://in-toto.io/Statement/v1")
                             or statement.get("predicateType") != SLSA_PREDICATE or len(subjects) != 1
                             or not isinstance(subjects[0], dict)
                             or subjects[0].get("digest") != {"sha256": native[0]["digest"][7:]}):
