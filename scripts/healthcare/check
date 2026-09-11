@@ -1102,7 +1102,9 @@ run_provider_profile_postgres() {
     fi
   done
   local native_profile
-  for native_profile in rhode_island_profile_registry rhode_island_profile_store new_york_profile_registry; do
+  for native_profile in \
+    rhode_island_profile_registry rhode_island_profile_store \
+    new_york_profile_registry new_york_profile_store; do
     if [ -f "$repository_root/process/$native_profile.py" ]; then
       if [ ! -f "$repository_root/tests/test_${native_profile}_postgres.py" ]; then
         printf 'Missing native profile test: tests/test_%s_postgres.py\n' "$native_profile" >&2
