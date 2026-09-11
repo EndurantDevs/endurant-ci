@@ -88,18 +88,31 @@ run_api_contract
         self.assertIn("orjson.quality_probe_missing_member", CHECK_FUNCTIONS)
         self.assertIn("client.quality_probe_missing_member", CHECK_FUNCTIONS)
 
-    def test_tennessee_native_selection_is_optional_and_has_database_dsn(self):
+    def test_state_profile_native_selection_is_source_aware_and_has_database_dsn(self):
         tennessee_paths = (
             "tests/test_tennessee_profile_registry.py",
             "tests/test_tennessee_profile_store.py",
         )
-        for present in (False, True):
-            with self.subTest(present=present), tempfile.TemporaryDirectory() as temporary:
+        native_modules = (
+            "rhode_island_profile_registry",
+            "rhode_island_profile_store",
+            "new_york_profile_registry",
+        )
+        native_paths = tuple(f"tests/test_{name}_postgres.py" for name in native_modules)
+        cases = [((), (), None), (tennessee_paths, (), None)]
+        cases += [((path,), (name,), None) for name, path in zip(native_modules, native_paths)]
+        cases.append((tennessee_paths + native_paths, native_modules, None))
+        cases += [((), (name,), name) for name in native_modules]
+        for present_paths, present_modules, missing_test in cases:
+            with self.subTest(modules=present_modules, missing=missing_test), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 (root / "tests").mkdir()
+                (root / "process").mkdir()
                 retained_path = "tests/test_provider_profile_massachusetts_postgres.py"
-                for relative in (retained_path, *(tennessee_paths if present else ())):
+                for relative in (retained_path, *present_paths):
                     (root / relative).touch()
+                for name in present_modules:
+                    (root / "process" / f"{name}.py").touch()
                 command = root / "timeout"
                 command.write_text(
                     '#!/bin/sh\n'
@@ -112,19 +125,25 @@ run_api_contract
                     "PATH": str(root) + os.pathsep + os.environ["PATH"], "CAPTURE": str(capture),
                     "HLTHPRT_DB_PASSWORD": "synthetic"}
                 environment.pop("HLTHPRT_PROVIDER_DIRECTORY_PROFILE_POSTGRES_DSN", None)
-                subprocess.run(
+                result = subprocess.run(
                     ["bash", "-euc", CHECK_FUNCTIONS + "\ncreate_test_database() { :; }\n"
                      "drop_test_database() { :; }\nrun_provider_profile_postgres postgresql://synthetic/test\n"],
-                    env=environment, capture_output=True, text=True, check=True,
+                    env=environment, capture_output=True, text=True,
                 )
                 calls = [line.rstrip("\0").split("\0") for line in capture.read_text().splitlines()]
                 calls = calls[3:]  # The three isolated batches precede the retained/profile batches.
+                if missing_test:
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn(f"Missing native profile test: tests/test_{missing_test}_postgres.py", result.stderr)
+                    self.assertEqual(len(calls), 1)
+                    continue
+                self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(len(calls), 2)
                 self.assertEqual(calls[1][0], "postgresql://synthetic/test")
                 self.assertEqual(calls[1].count(retained_path), 1)
-                for relative in tennessee_paths:
+                for relative in tennessee_paths + native_paths:
                     self.assertNotIn(relative, calls[0])
-                    self.assertEqual(calls[1].count(relative), int(present))
+                    self.assertEqual(calls[1].count(relative), int(relative in present_paths))
 
     def test_rebalanced_isolated_databases_preserve_arguments_and_cleanup_on_failure(self):
         batches = (
