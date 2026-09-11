@@ -305,6 +305,41 @@ docker() {
         self.assertIn('scripts/coverage_ratchet.py --self-test', gate)
         self.assertNotIn('coverage_forecast.py forecast', gate)
 
+    def test_offline_scan_skips_version_lookup_and_preserves_failure_status(self):
+        gate = (ROOT / "scripts/drug/check").read_text()
+        security = "security() {" + gate.split("\nsecurity() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
+        image_setting = next(line for line in gate.splitlines() if line.startswith("readonly SEMGREP_IMAGE="))
+        stub = r'''
+python_bin=fixture_python
+semgrep_name=synthetic-scan
+uv() { :; }
+fixture_python() {
+  [ "$1 $2" = '-m pip_audit' ]
+}
+docker() {
+  printf '%s\0' "$@" > "$RUNNER_TEMP/scan-arguments"
+  return "$SCAN_STATUS"
+}
+security
+'''
+        for status in (0, 17):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary).resolve()
+                result = subprocess.run(
+                    ["bash", "-euc", image_setting + "\n" + security + stub], cwd=directory,
+                    env={**os.environ, "RUNNER_TEMP": str(directory), "SCAN_STATUS": str(status)},
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertEqual(list(directory.glob("drug-audit-lock.*")), [])
+                arguments = directory / "scan-arguments"
+                self.assertEqual(arguments.read_bytes().decode().split("\0")[:-1], [
+                    "run", "--rm", "--name", "synthetic-scan", "--network", "none",
+                    "--volume", f"{directory}:/src:ro", "--workdir", "/src",
+                    "returntocorp/semgrep@sha256:51c9f53a4fce0d55e9abd08d7b96968654248a4b1122e77f20e0a49c0072446c",
+                    "semgrep", "--disable-version-check", "--config", ".semgrep.yml", "--no-git-ignore", ".",
+                ])
+
     def test_security_overlaps_checks_and_joins_before_cleanup_on_every_failure(self):
         gate = (ROOT / "scripts/drug/check").read_text()
         functions = gate[gate.index("resource_suffix="):gate.index('\ncase "$mode" in')]
