@@ -115,6 +115,7 @@ class PublicDrugTests(unittest.TestCase):
         functions = source[source.index("resource_suffix="):source.index("require_coverage_protocol()")]
         stub = r'''
 python_bin=python3
+ci_phase_end() { :; }
 sleep() { [ "$*" = 1 ]; }
 docker() {
   printf '%s\n' "$*" >> "$STUB_ROOT/calls"
@@ -171,6 +172,7 @@ docker() {
         services = source[source.index("local_services()"):source.index("write_receipt()")]
         stub = r'''
 python_bin=python3
+ci_phase_end() { :; }
 POSTGRES_IMAGE=postgres
 REDIS_IMAGE=redis
 postgres18() { :; }; redis() { :; }
@@ -297,10 +299,81 @@ docker() {
         measure = gate.split("\nmeasure() {", 1)[1].split("\ncase ", 1)[0]
         for command in ("require_frozen_candidate", "install", "require_python", "public_hygiene", "quality",
                         "test_run", "coverage_report", "coverage_provenance", "coverage_measurement",
-                        "security", "runtime_image", "local_services", "write_receipt"):
+                        "wait_security", "runtime_image", "local_services", "write_receipt"):
             self.assertIn(f"\n    {command}", measure)
+        self.assertIn("\n        security\n", measure)
         self.assertIn('scripts/coverage_ratchet.py --self-test', gate)
         self.assertNotIn('coverage_forecast.py forecast', gate)
+
+    def test_security_overlaps_checks_and_joins_before_cleanup_on_every_failure(self):
+        gate = (ROOT / "scripts/drug/check").read_text()
+        functions = gate[gate.index("resource_suffix="):gate.index('\ncase "$mode" in')]
+        stub = r'''
+record() { printf '%s\n' "$1" >> "$STUB_ROOT/events"; }
+wait_file() {
+  for attempt in {1..500}; do
+    [ ! -f "$STUB_ROOT/$1" ] || return 0
+    sleep 0.01
+  done
+  return 99
+}
+git() { printf '%040d\n' 1; }
+prepare_artifact_root() { artifact_root="$STUB_ROOT"; }
+require_frozen_candidate() { :; }
+install() { :; }; require_python() { :; }; public_hygiene() { :; }
+source "$TIMING_HELPER"
+security() {
+  trap 'status=$?; touch "$STUB_ROOT/security-ended"; ci_phase_end "$status"' EXIT
+  record security-start
+  touch "$STUB_ROOT/security-started"
+  wait_file quality-started
+  sleep 0.03
+  bash -c 'exit "$SECURITY_STATUS"'
+  record security-passed
+}
+quality() {
+  wait_file security-started
+  record quality-start
+  touch "$STUB_ROOT/quality-started"
+  bash -c 'exit "$QUALITY_STATUS"'
+  record quality-passed
+}
+test_run() { record tests; bash -c 'exit "$TEST_STATUS"'; }
+coverage_report() { record coverage-report; }
+coverage_provenance() { record coverage-provenance; }
+coverage_measurement() { record coverage-measurement; }
+runtime_image() { [ -f "$STUB_ROOT/security-ended" ]; record image; }
+local_services() { record services; }
+cleanup() { [ -f "$STUB_ROOT/security-ended" ]; record cleanup; }
+write_receipt() { record receipt; }
+measure
+'''
+        for quality, security, tests, expected in ((0, 0, 0, 0), (0, 17, 0, 17), (23, 0, 0, 23),
+                                                   (23, 17, 0, 23), (0, 0, 29, 29)):
+            with self.subTest(quality=quality, security=security, tests=tests):
+                with tempfile.TemporaryDirectory() as directory:
+                    environment = {**os.environ, "STUB_ROOT": directory, "BASE_SHA": "1" * 40,
+                                   "TIMING_HELPER": str(ROOT / "scripts/phase_timing.sh"),
+                                   "QUALITY_STATUS": str(quality), "SECURITY_STATUS": str(security),
+                                   "TEST_STATUS": str(tests)}
+                    result = subprocess.run(["bash", "-euc", "python_bin=python3\n" + functions + stub],
+                                            env=environment, capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    self.assertRegex(result.stdout,
+                                     rf"CI_PHASE end name=security elapsed_seconds=\d+ exit_code={security}")
+                    self.assertRegex(result.stdout,
+                                     rf"CI_PHASE end name=quality elapsed_seconds=\d+ exit_code={quality}")
+                    events = (Path(directory) / "events").read_text().splitlines()
+                    self.assertIn("cleanup", events)
+                    self.assertEqual("security-passed" in events, security == 0)
+                    self.assertEqual("quality-passed" in events, quality == 0)
+                    self.assertEqual("receipt" in events, expected == 0)
+                    if expected == 0:
+                        for phase in ("tests", "coverage-report", "coverage-provenance",
+                                      "coverage-measurement", "image", "services"):
+                            self.assertIn(phase, events)
+                    else:
+                        self.assertNotIn("image", events)
 
     def test_publisher_emits_exact_hashed_data_and_rejects_forgery(self):
         identity = {"repository": REPOSITORY, "source_sha": SOURCE, "base_sha": BASE,

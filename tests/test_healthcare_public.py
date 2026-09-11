@@ -352,16 +352,98 @@ RUNTIME_BASE_IMAGE=synthetic
                        "PREPUSH_DEPS_READY": "0", "PREPUSH_PYTHON_ENV_READY": "0"}
                 result = subprocess.run(
                     ["bash", "-euc", 'uv() { [ "$1 $2" = "--no-config --version" ] && { echo "uv 0.12.12"; return; }; return "$VENV_STATUS"; };\n'
-                     'rm() { [ "$REMOVE_STATUS" = 0 ] || return "$REMOVE_STATUS"; command rm "$@"; };\n' + function +
-                     "\nprepare_python_environment\n"], env=env, capture_output=True, text=True,
+                     'rm() { [ "$REMOVE_STATUS" = 0 ] || return "$REMOVE_STATUS"; command rm "$@"; };\n' +
+                     (ROOT / "scripts/phase_timing.sh").read_text() + "\n" + function +
+                     "\nci_phase_begin python-environment\nprepare_python_environment\n"], env=env, capture_output=True, text=True,
                 )
                 self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertRegex(result.stdout, rf"CI_PHASE end name=python-environment elapsed_seconds=\d+ exit_code={expected}")
                 self.assertEqual(bool(list(Path(directory).iterdir())), bool(remove))
                 if remove:
                     leftover = next(Path(directory).iterdir())
                     self.assertIn(f"Unable to remove CI Python environment: {leftover}", result.stderr)
                 else:
                     self.assertNotIn("Unable to remove CI Python environment:", result.stderr)
+
+    def test_rust_phase_failures_stop_later_work_and_keep_environment_cleanup(self):
+        phases = ("rust-lint", "rust-coverage", "rust-audit", "rust-release-build",
+                  "rust-native-tests", "rust-wheel-build", "rust-wheel-install", "rust-wheel-tests")
+        for failure in (*phases, "none"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source, runner = root / "source", root / "runner"
+                binary = source / "support/ptg2_scanner/target/release/ptg2_scanner"
+                binary.parent.mkdir(parents=True)
+                binary.write_text('#!/bin/sh\nif [ "$1" = --canon-version ]; then\n'
+                                  '  echo \'{"ruleset_version":4}\'\nelse\n  cp "$2" "$3"\nfi\n')
+                binary.chmod(0o755)
+                runner.mkdir()
+                environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                               "RUNNER_TEMP": str(runner), "FAIL_PHASE": failure,
+                               "COVERAGE_BASE_SHA": "a" * 40}
+                script = CHECK_FUNCTIONS + r'''
+install_python_dependencies() { prepare_python_environment; }
+cargo() {
+  case "$*" in
+    'llvm-cov --version') echo 'cargo-llvm-cov 0.8.7'; return ;;
+    'audit --version') echo 'cargo-audit-audit 0.22.2'; return ;;
+  esac
+  [ "$ci_phase_name" != "$FAIL_PHASE" ] || return 17
+}
+rustc() { echo 'rustc 1.98.1'; }
+timeout() { [ "$ci_phase_name" != "$FAIL_PHASE" ] || return 17; }
+uv() {
+  case "$*" in
+    '--no-config --version') echo 'uv 0.12.12'; return ;;
+    '--no-config venv '*) mkdir -p "${!#}/bin"; return ;;
+  esac
+  [ "$ci_phase_name" != "$FAIL_PHASE" ] || return 17
+}
+python() {
+  if [ "$1" = -c ]; then command python3 "$@"; return; fi
+  [ "$ci_phase_name" != "$FAIL_PHASE" ] || return 17
+  touch "${!#}/synthetic.whl"
+}
+run_rust
+'''
+                result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0 if failure == "none" else 17, result.stderr)
+                ends = re.findall(r"CI_PHASE end name=([a-z-]+) elapsed_seconds=\d+ exit_code=(\d+)", result.stdout)
+                expected = [(name, "0") for name in phases]
+                if failure != "none":
+                    expected = expected[:phases.index(failure)] + [(failure, "17")]
+                self.assertEqual(ends, expected, result.stdout)
+                self.assertEqual(list(runner.iterdir()), [])
+
+    def test_postgres_parallel_preparation_reports_each_failure_without_starting_tests(self):
+        for failure in ("python-dependencies", "rust-debug-build", "postgres-prepare", "postgres-tests"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                environment = {**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT),
+                               "FAIL_PHASE": failure, "CI_DEPS_READY": "0"}
+                script = CHECK_FUNCTIONS + r'''
+prepare_python_environment() { :; }
+install_python_dependencies() {
+  ci_phase_begin python-dependencies
+  [ "$ci_phase_name" != "$FAIL_PHASE" ] || return 17
+  ci_phase_end
+}
+prepare_debug_rust_binaries() {
+  ci_phase_begin rust-debug-build
+  [ "$ci_phase_name" != "$FAIL_PHASE" ] || return 17
+  ci_phase_end
+}
+wait_for_service() { [ "$ci_phase_name" != "$FAIL_PHASE" ] || return 17; }
+prepare_postgres() { :; }
+run_core_postgres() { [ "$ci_phase_name" != "$FAIL_PHASE" ] || return 17; }
+run_postgres core
+echo unexpected-continuation
+'''
+                result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 17, result.stderr)
+                self.assertRegex(result.stdout, rf"CI_PHASE end name={failure} elapsed_seconds=\d+ exit_code=17")
+                self.assertNotIn("unexpected-continuation", result.stdout)
+                if failure != "postgres-tests":
+                    self.assertNotIn("CI_PHASE start name=postgres-tests", result.stdout)
 
     def test_exact_image_cleanup_covers_failure_and_unavailable_docker(self):
         for build, remove, listing, expected in (

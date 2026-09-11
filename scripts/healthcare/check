@@ -3,6 +3,8 @@ set -euo pipefail
 
 repository_root=${SOURCE_ROOT:?SOURCE_ROOT must name the exact public checkout}
 CI_ROOT=${CI_ROOT:?CI_ROOT must name the pinned public CI checkout}
+source "$CI_ROOT/scripts/phase_timing.sh"
+trap 'ci_phase_end "$?"' EXIT
 cd "$repository_root"
 export PYTHONPATH="$repository_root${PYTHONPATH:+:$PYTHONPATH}"
 
@@ -53,6 +55,7 @@ prepare_python_environment() {
       printf 'Unable to remove CI Python environment: %s\n' "$python_environment_root" >&2
       [ "$status" -ne 0 ] || status=1
     fi
+    ci_phase_end "$status"
     exit "$status"
   }
   trap cleanup_python_environment EXIT
@@ -68,16 +71,21 @@ install_python_dependencies() {
   if [ "${CI_DEPS_READY:-0}" = 1 ]; then
     return
   fi
+  ci_phase_begin python-dependencies
   prepare_python_environment
   "$CI_ROOT/scripts/healthcare/install_python_lock" "$@"
+  ci_phase_end
 }
 
 prepare_debug_rust_binaries() {
   if [ "${CI_RUST_BINARIES+x}" != x ]; then
+    ci_phase_begin rust-debug-build
     "$@"
+    ci_phase_end
     return
   fi
 
+  ci_phase_begin rust-debug-reuse
   local source_directory=$CI_RUST_BINARIES
   local target_directory="$repository_root/support/ptg2_scanner/target/debug"
   local binaries=(
@@ -103,6 +111,7 @@ prepare_debug_rust_binaries() {
   for binary in "${binaries[@]}"; do
     install -m 0755 "$source_directory/$binary" "$target_directory/$binary"
   done
+  ci_phase_end
 }
 
 wait_for_service() {
@@ -144,14 +153,18 @@ run_quality() {
   commit_message_policy
   # Lint sync must never replace an already prepared application environment.
   unset CI_DEPS_READY CI_PYTHON_ENV_READY
+  ci_phase_begin python-quality-dependencies
   prepare_python_environment
   uv --no-config pip sync --python "$(command -v python)" --require-hashes --only-binary=:all: \
     "$CI_ROOT/scripts/requirements-python-quality.lock"
+  ci_phase_end
+  ci_phase_begin python-quality
   ruff check --no-cache .
   python "$CI_ROOT/scripts/python_format.py" "$BASE_SHA"
   python -m compileall api process db public_evidence scripts main.py
   python scripts/coverage_reports.py --check
   python scripts/ci/request_time_external_call_guard.py
+  ci_phase_end
 }
 
 run_python_main() {
@@ -161,9 +174,9 @@ run_python_main() {
     prepare_debug_rust_binaries cargo build --locked --bins --manifest-path support/ptg2_scanner/Cargo.toml
   else
     prepare_python_environment
-    install_python_dependencies &
+    { trap 'ci_phase_end "$?"' EXIT; install_python_dependencies; } &
     local install_pid=$!
-    prepare_debug_rust_binaries cargo build --locked --bins --manifest-path support/ptg2_scanner/Cargo.toml &
+    { trap 'ci_phase_end "$?"' EXIT; prepare_debug_rust_binaries cargo build --locked --bins --manifest-path support/ptg2_scanner/Cargo.toml; } &
     local cargo_pid=$!
     wait "$install_pid"
     wait "$cargo_pid"
@@ -176,12 +189,14 @@ run_python_main() {
     collection_args+=(--ignore "$test_path")
   done
   export COVERAGE_FILE=${COVERAGE_FILE:-$(artifact_path ".coverage.main.${shard}")}
+  ci_phase_begin python-tests
   timeout --foreground 420s python -m pytest -q -n 1 --dist loadscope --durations=20 \
     -p scripts.ci.shard_pytest_nodeids --ci-shard-count 4 --ci-shard-index "$shard" \
     --cov-config=test-coverage.ini \
     --cov=api --cov=db --cov=process --cov=public_evidence --cov=service --cov=main \
     --cov-branch --cov-report= \
     "${collection_args[@]}"
+  ci_phase_end
   require_base_sha
   timeout --foreground 295s python scripts/coverage_forecast.py write-shard-provenance \
     --base "$COVERAGE_BASE_SHA" \
@@ -195,11 +210,13 @@ run_capacity() {
   install_python_dependencies
   mapfile -t capacity_tests <<< "$capacity_test_paths"
   export COVERAGE_FILE=${COVERAGE_FILE:-$(artifact_path .coverage.capacity)}
+  ci_phase_begin capacity-tests
   timeout --foreground 295s python -m pytest -q -n 4 --dist worksteal --durations=20 \
     --cov-config=test-coverage.ini \
     --cov=api --cov=db --cov=process --cov=public_evidence --cov=service --cov=main \
     --cov-branch --cov-report= \
     "${capacity_tests[@]}"
+  ci_phase_end
   require_base_sha
   timeout --foreground 295s python scripts/coverage_forecast.py write-shard-provenance \
     --base "$COVERAGE_BASE_SHA" \
@@ -219,12 +236,16 @@ run_python_inference() (
       printf 'Unable to remove Python inference environment: %s\n' "$inference_root" >&2
       [ "$status" -ne 0 ] || status=1
     fi
+    ci_phase_end "$status"
     exit "$status"
   }
   trap cleanup_python_inference EXIT
+  ci_phase_begin python-inference-dependencies
   uv --no-config venv --python "$(command -v python)" --no-python-downloads "$inference_root/venv"
   uv --no-config pip sync --python "$inference_root/venv/bin/python" --require-hashes --only-binary=:all: \
     "$CI_ROOT/scripts/requirements-python-quality.lock"
+  ci_phase_end
+  ci_phase_begin python-inference
   # Infer against the verified application dependencies, after the pinned lint packages.
   runtime_hook=$(python -c 'import site; print("import sys; sys.path.extend(" + repr(site.getsitepackages()) + ")")')
   probe_status=0
@@ -248,11 +269,13 @@ run_python_inference() (
     process/provider_directory_rooted_graph_twin_contract.py \
     process/provider_directory_validated_publication_contract.py \
     public_evidence/evidence_record_token_policy.py
+  ci_phase_end
 )
 
 run_api_contract() {
   install_python_dependencies
   run_python_inference
+  ci_phase_begin api-contract-tests
   python scripts/smoke/provider_directory_runtime_contract.py
   python scripts/generate_provider_directory_support_docs.py --check
   timeout --foreground 295s python -m pytest -q \
@@ -260,14 +283,18 @@ run_api_contract() {
     tests/test_formulary_fhir_openapi.py \
     tests/test_api_init_and_utils.py \
     tests/test_healthcheck.py
+  ci_phase_end
 }
 
 run_rust() {
   local rust_artifacts
   rust_artifacts=$(artifact_path coverage-artifacts/rust)
   install_python_dependencies
+  ci_phase_begin rust-lint
   cargo fmt --manifest-path support/ptg2_scanner/Cargo.toml -- --check
   cargo clippy --manifest-path support/ptg2_scanner/Cargo.toml --all-targets -- -D warnings
+  ci_phase_end
+  ci_phase_begin rust-coverage
   mkdir -p "$rust_artifacts"
   test "$(cargo llvm-cov --version)" = "cargo-llvm-cov 0.8.7"
   LLVM_COV_FLAGS="${LLVM_COV_FLAGS:+$LLVM_COV_FLAGS }-compilation-dir=support/ptg2_scanner" \
@@ -282,20 +309,29 @@ run_rust() {
     --output "$rust_artifacts/coverage-provenance-rust.json" \
     --cargo-llvm-cov-version "$(cargo llvm-cov --version | awk '{print $2}')" \
     --rust-version "$(rustc --version | awk '{print $2}')"
+  ci_phase_end
+  ci_phase_begin rust-audit
   test "$(cargo audit --version)" = "cargo-audit-audit 0.22.2"
   (cd support/ptg2_scanner && cargo audit)
+  ci_phase_end
+  ci_phase_begin rust-release-build
   cargo build --release --bins --manifest-path support/ptg2_scanner/Cargo.toml
+  ci_phase_end
+  ci_phase_begin rust-native-tests
   HLTHPRT_PROVIDER_DIRECTORY_PROJECTION_NATIVE_TEST_BIN="$repository_root/support/ptg2_scanner/target/release/ptg2_scanner" \
   HLTHPRT_PROVIDER_DIRECTORY_PROJECTION_NATIVE_BIN="$repository_root/support/ptg2_scanner/target/release/ptg2_scanner" \
     timeout --foreground 295s python -m pytest -q \
       tests/test_provider_directory_projection_native_copy.py \
       tests/test_provider_directory_projection_native_cli_parity.py \
       tests/test_provider_directory_projection_native_copy_adversarial.py
+  ci_phase_end
   (
-    local wheel_directory
+    local wheel_directory cleanup_command
     wheel_directory=$(mktemp -d "${RUNNER_TEMP:-/tmp}/healthcare-ptg2-wheel.XXXXXX")
-    trap 'rm -rf -- "$wheel_directory"' EXIT
+    printf -v cleanup_command 'ci_phase_end "$?"; rm -rf -- %q' "$wheel_directory"
+    trap "$cleanup_command" EXIT
     cd support/ptg2_scanner
+    ci_phase_begin rust-wheel-build
     python -m maturin build --release --features python-extension --out "$wheel_directory"
     shopt -s nullglob
     local wheels=("$wheel_directory"/*.whl)
@@ -306,10 +342,15 @@ run_rust() {
         "$(basename "${wheels[0]}")" \
         > "$(artifact_path ptg2-address-canon-wheel.sha256)"
     fi
+    ci_phase_end
+    ci_phase_begin rust-wheel-install
     uv --no-config pip install --python "$(command -v python)" --no-build --no-deps "${wheels[0]}"
     uv --no-config pip check --python "$(command -v python)"
+    ci_phase_end
   )
+  ci_phase_begin rust-wheel-tests
   timeout --foreground 295s python -m pytest -q tests/test_address_canon_pyo3.py
+  ci_phase_end
   (
     local tmp
     tmp=$(mktemp -d)
@@ -336,6 +377,7 @@ cleanup_container_image() {
     printf 'Unable to verify CI image cleanup: %s\n' "$image" >&2
     [ "$status" -ne 0 ] || status=1
   fi
+  ci_phase_end "$status"
   exit "$status"
 }
 
@@ -1094,9 +1136,9 @@ run_postgres() {
     prepare_debug_rust_binaries cargo build --manifest-path support/ptg2_scanner/Cargo.toml
   else
     prepare_python_environment
-    install_python_dependencies &
+    { trap 'ci_phase_end "$?"' EXIT; install_python_dependencies; } &
     local install_pid=$!
-    prepare_debug_rust_binaries cargo build --manifest-path support/ptg2_scanner/Cargo.toml &
+    { trap 'ci_phase_end "$?"' EXIT; prepare_debug_rust_binaries cargo build --manifest-path support/ptg2_scanner/Cargo.toml; } &
     local cargo_pid=$!
     wait "$install_pid"
     wait "$cargo_pid"
@@ -1114,6 +1156,7 @@ run_postgres() {
   export PYTEST_ADDOPTS=${PYTEST_ADDOPTS:-'--cov-config=test-coverage.ini --cov=api --cov=db --cov=process --cov=public_evidence --cov=service --cov=main --cov-branch --cov-report= --cov-append'}
   export COVERAGE_FILE=${COVERAGE_FILE:-$(artifact_path ".coverage.postgres.${shard}")}
 
+  ci_phase_begin postgres-prepare
   wait_for_service PostgreSQL 30 \
     pg_isready \
       --host "$HLTHPRT_DB_HOST" \
@@ -1122,12 +1165,15 @@ run_postgres() {
       --dbname "$HLTHPRT_DB_DATABASE" \
       --timeout=1
   prepare_postgres
+  ci_phase_end
+  ci_phase_begin postgres-tests
   local dsn="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@${HLTHPRT_DB_HOST}:${HLTHPRT_DB_PORT}/${HLTHPRT_DB_DATABASE}"
   case "$shard" in
     core) run_core_postgres "$dsn" ;;
     provider-directory) run_provider_directory_postgres "$dsn" ;;
     provider-profile) run_provider_profile_postgres "$dsn" ;;
   esac
+  ci_phase_end
 
   require_base_sha
   timeout --foreground 295s python scripts/coverage_forecast.py write-shard-provenance \

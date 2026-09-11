@@ -42,7 +42,7 @@ jobs:
           python scripts/healthcare/test_measurement.py
       - name: Check shell syntax
         run: |
-          for script in scripts/drug/check scripts/healthcare/check scripts/healthcare/{compile,install}_python_lock; do
+          for script in scripts/phase_timing.sh scripts/drug/check scripts/healthcare/check scripts/healthcare/{compile,install}_python_lock; do
             bash -n "$script"
           done
       - name: Check workflow syntax
