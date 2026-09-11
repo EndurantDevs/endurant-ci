@@ -323,13 +323,13 @@ require_frozen_candidate() { :; }
 install() { :; }; require_python() { :; }; public_hygiene() { :; }
 source "$TIMING_HELPER"
 security() {
-  trap 'status=$?; touch "$STUB_ROOT/security-ended"; ci_phase_end "$status"' EXIT
   record security-start
   touch "$STUB_ROOT/security-started"
   wait_file quality-started
   sleep 0.03
-  bash -c 'exit "$SECURITY_STATUS"'
-  record security-passed
+  if [ "$SECURITY_STATUS" = 0 ]; then record security-passed; fi
+  touch "$STUB_ROOT/security-ended"
+  return "$SECURITY_STATUS"
 }
 quality() {
   wait_file security-started
