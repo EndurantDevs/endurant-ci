@@ -32,6 +32,7 @@ UPLOAD = "Upload tested DEV image"
 INTENT_UPLOAD = "Upload DEV image publication intent"
 RECEIPT_UPLOAD = "Upload DEV image receipt"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+SLSA_PREDICATE = "https://slsa.dev/provenance/v0.2"
 IDENTITY_FIELDS = ("repository", "source_sha", "base_sha", "source_branch", "pr_number")
 
 
@@ -118,12 +119,15 @@ def archive_identity(path, identity=None, *, require_provenance=False):
                         raise ValueError("image archive contains another OCI runtime image")
                     attestation = descriptor(item)
                     layers = attestation.get("layers", [])
-                    subject = attestation.get("subject", {})
-                    if (attestation.get("artifactType") != "application/vnd.docker.attestation.manifest.v1+json"
-                            or subject.get("digest") != native[0]["digest"] or len(layers) != 1
+                    artifact_type = attestation.get("artifactType")
+                    subject = attestation.get("subject")
+                    if (artifact_type not in (None, "application/vnd.docker.attestation.manifest.v1+json")
+                            or (subject is not None and (not isinstance(subject, dict)
+                                                        or subject.get("digest") != native[0]["digest"]))
+                            or len(layers) != 1
                             or layers[0].get("mediaType") != "application/vnd.in-toto+json"
                             or layers[0].get("annotations", {}).get("in-toto.io/predicate-type")
-                            != "https://slsa.dev/provenance/v1"):
+                            != SLSA_PREDICATE):
                         raise ValueError("image archive attestation is not native SLSA provenance")
                     layer = members.get("blobs/sha256/" + layers[0].get("digest", "")[7:])
                     if (not DIGEST.fullmatch(layers[0].get("digest", "")) or layer is None or not layer.isfile()

@@ -350,7 +350,7 @@ run_container_package() {
   local build_command=(docker build)
   if [[ "${PUBLIC_CI_EXPORT_IMAGE:-0}" == 1 ]]; then
     python3 "$CI_ROOT/scripts/source_image.py" prepare-engine
-    build_command=(docker buildx build --provenance=mode=max --load)
+    build_command=(docker buildx build --attest=type=provenance,mode=max,version=v0.2 --load)
     build_args+=(--label "org.endurantdevs.public-ci.repository=${GITHUB_REPOSITORY:?}"
                  --label "org.endurantdevs.public-ci.run=${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}")
   fi

@@ -36,7 +36,7 @@ NATIVE_BYTES = json.dumps({"schemaVersion": 2, "mediaType": "application/vnd.oci
                            "config": {"digest": CONFIG}, "layers": []}).encode()
 NATIVE = "sha256:" + hashlib.sha256(NATIVE_BYTES).hexdigest()
 SLSA_BYTES = json.dumps({"_type": "https://in-toto.io/Statement/v1",
-                         "predicateType": "https://slsa.dev/provenance/v1",
+                         "predicateType": "https://slsa.dev/provenance/v0.2",
                          "subject": [{"digest": {"sha256": NATIVE[7:]}}], "predicate": {}}).encode()
 SLSA = "sha256:" + hashlib.sha256(SLSA_BYTES).hexdigest()
 ATTESTATION_BYTES = json.dumps({
@@ -44,7 +44,7 @@ ATTESTATION_BYTES = json.dumps({
     "artifactType": "application/vnd.docker.attestation.manifest.v1+json",
     "config": {"digest": "sha256:" + hashlib.sha256(b"{}").hexdigest()},
     "layers": [{"mediaType": "application/vnd.in-toto+json", "digest": SLSA, "size": len(SLSA_BYTES),
-                "annotations": {"in-toto.io/predicate-type": "https://slsa.dev/provenance/v1"}}],
+                "annotations": {"in-toto.io/predicate-type": "https://slsa.dev/provenance/v0.2"}}],
     "subject": {"digest": NATIVE}}).encode()
 ATTESTATION = "sha256:" + hashlib.sha256(ATTESTATION_BYTES).hexdigest()
 ROOT_BYTES = json.dumps({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json",
@@ -325,7 +325,7 @@ class TransferChecks(unittest.TestCase):
             script = (root / "scripts" / kind / "check").read_text().split(start, 1)[1].split(end, 1)[0]
             self.assertLess(script.index("{{.Id}}"), script.index("docker run"))
             self.assertIn("docker buildx build", script)
-            self.assertIn("--provenance=mode=max", script)
+            self.assertIn("--attest=type=provenance,mode=max,version=v0.2", script)
             self.assertIn("prepare-engine", script)
             self.assertIn(f'export "${variable}"', script)
             for invocation in script.split("docker run")[1:]:
@@ -781,7 +781,8 @@ class NativeArchiveCompatibility(unittest.TestCase):
                 (directory / "Dockerfile").write_text("FROM scratch\nCOPY payload /payload\n")
                 (directory / "payload").write_text(uuid.uuid4().hex)
                 transfer.command("docker", "buildx", "build", "--platform", "linux/amd64",
-                                 "--provenance=mode=max", "--load", "--tag", tag, str(directory))
+                                 "--attest=type=provenance,mode=max,version=v0.2", "--load", "--tag", tag,
+                                 str(directory))
                 captured = transfer.image_identity(tag)["Id"]
                 owned.add(captured)
                 archive = directory / "image.tar.gz"
