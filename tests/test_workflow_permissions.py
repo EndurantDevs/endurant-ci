@@ -112,6 +112,17 @@ class PublicWorkflowPermissions(unittest.TestCase):
         self.assertEqual(sum(len(job.get("strategy", {}).get("matrix", {}).get("include", [None]))
                              for job in jobs.values()), 18)
 
+    def test_cheap_lint_blocks_heavy_jobs_without_changing_measurement_producers(self):
+        jobs = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())["jobs"]
+        roots = ("public-hygiene", "capacity-evidence", "api-contract", "rust-scanner",
+                 "container-package", "security", "worker-queue-smoke")
+        for job in roots:
+            self.assertIn("python-quality", jobs[job]["needs"], job)
+            if job != "public-hygiene":
+                self.assertIn("readability-preflight", jobs[job]["needs"], job)
+        for job in ("python-tests", "address-canonical-db-tests"):
+            self.assertIn("public-hygiene", jobs[job]["needs"])
+
 
 if __name__ == "__main__":
     unittest.main()

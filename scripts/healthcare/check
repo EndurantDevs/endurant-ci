@@ -269,9 +269,7 @@ run_rust() {
   cargo fmt --manifest-path support/ptg2_scanner/Cargo.toml -- --check
   cargo clippy --manifest-path support/ptg2_scanner/Cargo.toml --all-targets -- -D warnings
   mkdir -p "$rust_artifacts"
-  if [ "$(cargo llvm-cov --version 2>/dev/null || true)" != "cargo-llvm-cov 0.8.7" ]; then
-    cargo install cargo-llvm-cov --version 0.8.7 --locked
-  fi
+  test "$(cargo llvm-cov --version)" = "cargo-llvm-cov 0.8.7"
   LLVM_COV_FLAGS="${LLVM_COV_FLAGS:+$LLVM_COV_FLAGS }-compilation-dir=support/ptg2_scanner" \
     timeout --foreground 295s cargo llvm-cov --manifest-path support/ptg2_scanner/Cargo.toml \
     --all-targets --features python --remap-path-prefix --json \
@@ -284,9 +282,7 @@ run_rust() {
     --output "$rust_artifacts/coverage-provenance-rust.json" \
     --cargo-llvm-cov-version "$(cargo llvm-cov --version | awk '{print $2}')" \
     --rust-version "$(rustc --version | awk '{print $2}')"
-  if [ "$(cargo audit --version 2>/dev/null || true)" != "cargo-audit-audit 0.22.2" ]; then
-    cargo install cargo-audit --version 0.22.2 --locked
-  fi
+  test "$(cargo audit --version)" = "cargo-audit-audit 0.22.2"
   (cd support/ptg2_scanner && cargo audit)
   cargo build --release --bins --manifest-path support/ptg2_scanner/Cargo.toml
   HLTHPRT_PROVIDER_DIRECTORY_PROJECTION_NATIVE_TEST_BIN="$repository_root/support/ptg2_scanner/target/release/ptg2_scanner" \
@@ -726,45 +722,7 @@ run_core_postgres() {
   HLTHPRT_MRF_DISCOVERY_CHECKPOINT_POSTGRES_DSN=$dsn \
     timeout --foreground 295s python -m pytest -q tests/test_mrf_discovery_checkpoints_postgres.py
 
-  local database=control_imports_test_ci_runner
-  create_test_database "$database"
-  if ! HLTHPRT_DB_DATABASE=$database \
-    PGPASSWORD="$HLTHPRT_DB_PASSWORD" \
-    timeout --foreground 295s python -m pytest -q \
-    tests/test_control_imports_db.py \
-    tests/test_import_run_idempotency_scope_postgres.py \
-    tests/test_plan_pricing_idempotency_postgres.py \
-    tests/test_control_npi_db.py \
-    tests/test_control_import_attempt_fence_db.py; then
-    drop_test_database "$database"
-    return 1
-  fi
-  drop_test_database "$database"
-
-  database=uhc_retained_admission_test_ci_runner
-  create_test_database "$database"
-  if ! HLTHPRT_UHC_RETAINED_ADMISSION_POSTGRES_DSN="${dsn%/*}/$database" \
-  HLTHPRT_PTG2_RUST_SCANNER_BIN="$repository_root/support/ptg2_scanner/target/debug/ptg2_scanner" \
-  PGPASSWORD="$HLTHPRT_DB_PASSWORD" \
-    timeout --foreground 295s python -m pytest -q \
-      tests/test_uhc_retained_admission_postgres.py \
-      tests/test_uhc_retained_admission_concurrency_postgres.py; then
-    drop_test_database "$database"
-    return 1
-  fi
-  drop_test_database "$database"
-
-  database=ptg_frozen_binding_test_ci_runner
-  create_test_database "$database"
-  if ! HLTHPRT_PTG_FROZEN_BINDING_POSTGRES_DSN="${dsn%/*}/$database" \
-    PGPASSWORD="$HLTHPRT_DB_PASSWORD" \
-    timeout --foreground 295s python -m pytest -q tests/test_ptg_frozen_binding_postgres.py; then
-    drop_test_database "$database"
-    return 1
-  fi
-  drop_test_database "$database"
-
-  database=ptg_import_wave_recovery_test_ci_runner
+  local database=ptg_import_wave_recovery_test_ci_runner
   create_test_database "$database"
   if ! HLTHPRT_PTG_IMPORT_WAVE_RECOVERY_POSTGRES_DSN="${dsn%/*}/$database" \
     PGPASSWORD="$HLTHPRT_DB_PASSWORD" \
@@ -997,6 +955,44 @@ run_provider_directory_postgres() {
 
 run_provider_profile_postgres() {
   local dsn=$1
+  local database=control_imports_test_ci_runner
+  create_test_database "$database"
+  if ! HLTHPRT_DB_DATABASE=$database \
+    PGPASSWORD="$HLTHPRT_DB_PASSWORD" \
+    timeout --foreground 295s python -m pytest -q \
+    tests/test_control_imports_db.py \
+    tests/test_import_run_idempotency_scope_postgres.py \
+    tests/test_plan_pricing_idempotency_postgres.py \
+    tests/test_control_npi_db.py \
+    tests/test_control_import_attempt_fence_db.py; then
+    drop_test_database "$database"
+    return 1
+  fi
+  drop_test_database "$database"
+
+  database=uhc_retained_admission_test_ci_runner
+  create_test_database "$database"
+  if ! HLTHPRT_UHC_RETAINED_ADMISSION_POSTGRES_DSN="${dsn%/*}/$database" \
+  HLTHPRT_PTG2_RUST_SCANNER_BIN="$repository_root/support/ptg2_scanner/target/debug/ptg2_scanner" \
+  PGPASSWORD="$HLTHPRT_DB_PASSWORD" \
+    timeout --foreground 295s python -m pytest -q \
+      tests/test_uhc_retained_admission_postgres.py \
+      tests/test_uhc_retained_admission_concurrency_postgres.py; then
+    drop_test_database "$database"
+    return 1
+  fi
+  drop_test_database "$database"
+
+  database=ptg_frozen_binding_test_ci_runner
+  create_test_database "$database"
+  if ! HLTHPRT_PTG_FROZEN_BINDING_POSTGRES_DSN="${dsn%/*}/$database" \
+    PGPASSWORD="$HLTHPRT_DB_PASSWORD" \
+    timeout --foreground 295s python -m pytest -q tests/test_ptg_frozen_binding_postgres.py; then
+    drop_test_database "$database"
+    return 1
+  fi
+  drop_test_database "$database"
+
   # Keep the retained/projection tail in a separate serial batch on this lane.
   local common_env=(
     "HLTHPRT_RETAINED_ARTIFACT_POSTGRES_DSN=$dsn"
