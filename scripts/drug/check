@@ -4,6 +4,7 @@ set -euo pipefail
 
 cd "${SOURCE_ROOT:?SOURCE_ROOT must name the exact public checkout}"
 : "${CI_ROOT:?CI_ROOT must name the pinned public CI checkout}"
+source "$CI_ROOT/scripts/phase_timing.sh"
 
 readonly PYTHON_VERSION='3.14.7'
 readonly UV_VERSION='0.12.12'
@@ -29,6 +30,16 @@ semgrep_name="drug-ci-semgrep-$resource_suffix"
 runtime_name="drug-ci-runtime-$resource_suffix"
 runtime_tag="drug-ci-runtime:$resource_suffix"
 cleanup_required=0
+security_pid=''
+wait_security() {
+    local result=0
+    if [[ -n "$security_pid" ]]; then
+        wait "$security_pid" || result=$?
+        security_pid=''
+    fi
+    return "$result"
+}
+
 cleanup() {
     [[ "$cleanup_required" == 1 ]] || return 0
     cleanup_required=0
@@ -58,6 +69,10 @@ cleanup() {
 finish() {
     local result=$?
     trap - EXIT
+    ci_phase_end "$result"
+    local security_result=0
+    wait_security || security_result=$?
+    [[ "$result" != 0 ]] || result=$security_result
     if ! cleanup; then
         printf '%s\n' 'Unable to verify exact CI Docker resource cleanup.' >&2
         [[ "$result" != 0 ]] || result=1
@@ -318,18 +333,44 @@ measure() {
     export BASE_SHA="$resolved_base_sha"
     prepare_artifact_root
     require_frozen_candidate
+    ci_phase_begin install
     install
     require_python
+    ci_phase_end
+    ci_phase_begin public-hygiene
     public_hygiene
+    ci_phase_end
+    # The read-only audit overlaps host checks; join it before changing Docker's image store.
+    cleanup_required=1
+    (
+        trap 'ci_phase_end "$?"' EXIT
+        ci_phase_begin security
+        security
+    ) &
+    security_pid=$!
+    ci_phase_begin quality
     quality
+    ci_phase_end
+    ci_phase_begin unit-tests
     test_run
+    ci_phase_end
+    ci_phase_begin coverage
     coverage_report
     coverage_provenance
     coverage_measurement
-    security
+    ci_phase_end
+    ci_phase_begin security-wait
+    wait_security
+    ci_phase_end
+    ci_phase_begin runtime-image
     runtime_image
+    ci_phase_end
+    ci_phase_begin native-services
     local_services
+    ci_phase_end
+    ci_phase_begin cleanup
     cleanup
+    ci_phase_end
     require_frozen_candidate
     write_receipt "$resolved_base_sha"
     printf 'source validation: passed for %s\n' "$candidate_sha"
