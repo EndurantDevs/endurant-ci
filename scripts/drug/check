@@ -210,7 +210,7 @@ security() {
     cleanup_required=1
     docker run --rm --name "$semgrep_name" --network none --volume "$PWD:/src:ro" --workdir /src \
         "$SEMGREP_IMAGE" \
-        semgrep --config .semgrep.yml --no-git-ignore .
+        semgrep --disable-version-check --config .semgrep.yml --no-git-ignore .
 }
 
 postgres18() {
