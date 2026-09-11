@@ -97,6 +97,7 @@ run_api_contract
             "rhode_island_profile_registry",
             "rhode_island_profile_store",
             "new_york_profile_registry",
+            "new_york_profile_store",
         )
         native_paths = tuple(f"tests/test_{name}_postgres.py" for name in native_modules)
         cases = [((), (), None), (tennessee_paths, (), None)]
