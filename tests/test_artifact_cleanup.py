@@ -38,6 +38,20 @@ def artifact(identifier, name, days=1):
             "digest": "sha256:" + "b" * 64}
 
 
+def durable_artifact(identifier, kind, producer, suffix="measurement"):
+    return {**artifact(identifier, f"{kind}-public-{suffix}-{producer['id']}-{producer['run_attempt']}", 90),
+            "workflow_run": {"id": producer["id"], "head_sha": producer["head_sha"]}}
+
+
+def completed_run(identifier, sha, branch, event="pull_request", conclusion="success",
+                  repository="EndurantDevs/healthcare-mrf-api", created_hours=2):
+    return {"id": identifier, "run_attempt": 1, "workflow_id": 456,
+            "path": ".github/workflows/ci.yml", "event": event, "head_sha": sha,
+            "head_branch": branch, "status": "completed", "conclusion": conclusion,
+            "created_at": (datetime.now(timezone.utc) - timedelta(hours=created_hours)).isoformat(),
+            "repository": {"full_name": repository}, "head_repository": {"full_name": repository}}
+
+
 class ArtifactCleanupChecks(unittest.TestCase):
     def exercise(self, items, expected=None, refresh=None, changed_artifact=None, delete_error=False,
                  job_inventory=None, refreshed_jobs=None):
@@ -197,6 +211,110 @@ class ArtifactCleanupChecks(unittest.TestCase):
             request.side_effect = OSError("synthetic network failure")
             with self.assertRaises(OSError):
                 cleanup.github.api("EndurantDevs/drug-api", "actions/artifacts/1", "DELETE")
+
+    def test_stale_sweep_preserves_active_and_latest_branch_evidence(self):
+        repository = "EndurantDevs/healthcare-mrf-api"
+        main_sha, dev_sha, open_sha = "f" * 40, "d" * 40, "e" * 40
+        expected = {"id": 999, "run_attempt": 1, "workflow_id": 789,
+                    "path": cleanup.STALE_CLEANUP_WORKFLOW, "event": "workflow_dispatch",
+                    "head_sha": main_sha, "head_branch": "main", "status": "in_progress",
+                    "conclusion": None, "repository": {"full_name": repository},
+                    "head_repository": {"full_name": repository}}
+        runs = {
+            101: completed_run(101, "a" * 40, "fix/closed"),
+            102: completed_run(102, open_sha, "fix/open"),
+            103: completed_run(103, main_sha, "main", "push"),
+            104: completed_run(104, "b" * 40, "dev", "push", created_hours=2),
+            105: completed_run(105, dev_sha, "dev", "push", "failure", created_hours=1),
+            106: completed_run(106, "c" * 40, "dev", "push", created_hours=3),
+            107: {**completed_run(107, "9" * 40, "fix/running"), "status": "in_progress", "conclusion": None},
+            108: completed_run(108, "8" * 40, "fix/failed", conclusion="failure"),
+            109: {**completed_run(109, "7" * 40, "fix/rerun"), "run_attempt": 2},
+            110: {**completed_run(110, "6" * 40, "fix/fork"),
+                  "head_repository": {"full_name": "Example/fork"}},
+            111: completed_run(111, "5" * 40, "dev", "push", created_hours=5),
+            112: completed_run(112, "4" * 40, "dev", "push", created_hours=4),
+        }
+        items = [durable_artifact(index, "healthcare", producer)
+                 for index, producer in enumerate(runs.values(), 1)]
+        items[8]["name"] = "healthcare-public-measurement-109-1"
+        items[-2]["name"] = "healthcare-public-image-111-1"
+        items[-1]["name"] = "healthcare-public-image-112-1"
+        items.append(artifact(50, "unknown-durable", 90))
+        deleted = []
+
+        def api(actual_repository, path, method="GET"):
+            self.assertEqual(actual_repository, repository)
+            if method == "DELETE":
+                deleted.append(int(path.rsplit("/", 1)[1]))
+                return None
+            if path == "actions/runs/999":
+                return deepcopy(expected)
+            if path == "":
+                return {"full_name": repository, "private": False, "default_branch": "main"}
+            if path == "branches/main":
+                return {"name": "main", "commit": {"sha": main_sha}}
+            if path == "branches/dev":
+                return {"name": "dev", "commit": {"sha": dev_sha}}
+            if path.startswith("pulls?state=open"):
+                return [{"number": 7, "state": "open", "head": {"sha": open_sha,
+                    "repo": {"full_name": repository}}, "base": {"repo": {"full_name": repository}}}]
+            if path.startswith("actions/artifacts?per_page=100&page="):
+                return {"artifacts": deepcopy(items) if path.endswith("=1") else []}
+            if path.startswith("actions/runs/"):
+                return deepcopy(runs[int(path.rsplit("/", 1)[1])])
+            identifier = int(path.rsplit("/", 1)[1])
+            return deepcopy(next(item for item in items if item["id"] == identifier))
+
+        with patch.object(cleanup.github, "api", side_effect=api), patch.object(cleanup.time, "sleep") as sleep, \
+                patch("sys.stdout", new=io.StringIO()):
+            self.assertEqual(cleanup.stale_cleanup(repository, expected), 4)
+        self.assertEqual(deleted, [1, 6, 8, 11])
+        self.assertEqual(sleep.call_count, 4)
+
+    def test_stale_sweep_rechecks_open_heads_and_rejects_changed_provenance(self):
+        repository = "EndurantDevs/drug-api"
+        main_sha, stale_sha = "f" * 40, "a" * 40
+        expected = {"id": 999, "run_attempt": 1, "workflow_id": 789,
+                    "path": cleanup.STALE_CLEANUP_WORKFLOW, "event": "schedule",
+                    "head_sha": main_sha, "head_branch": "main", "status": "in_progress",
+                    "conclusion": None, "repository": {"full_name": repository},
+                    "head_repository": {"full_name": repository}}
+        producer = completed_run(101, stale_sha, "fix/closed", repository=repository)
+        item = durable_artifact(1, "drug", producer)
+        pr_reads = 0
+
+        def api(actual_repository, path, method="GET"):
+            nonlocal pr_reads
+            self.assertEqual(actual_repository, repository)
+            if method == "DELETE":
+                self.fail("a head that became active must not be deleted")
+            if path == "actions/runs/999": return deepcopy(expected)
+            if path == "": return {"full_name": repository, "private": False, "default_branch": "main"}
+            if path == "branches/main": return {"name": "main", "commit": {"sha": main_sha}}
+            if path == "branches/dev": return {"name": "dev", "commit": {"sha": "d" * 40}}
+            if path.startswith("pulls?state=open"):
+                pr_reads += 1
+                pulls = [] if pr_reads == 1 else [{"number": 7, "state": "open", "head": {
+                    "sha": stale_sha, "repo": {"full_name": repository}},
+                    "base": {"repo": {"full_name": repository}}}]
+                return pulls
+            if path.startswith("actions/artifacts?"): return {"artifacts": [deepcopy(item)]}
+            if path == "actions/runs/101": return deepcopy(producer)
+            if path == "actions/artifacts/1": return deepcopy(item)
+            raise AssertionError(path)
+
+        with patch.object(cleanup.github, "api", side_effect=api), patch("sys.stdout", new=io.StringIO()):
+            self.assertEqual(cleanup.stale_cleanup(repository, expected), 0)
+
+        changed = {**item, "workflow_run": {"id": 999, "head_sha": stale_sha}}
+        with patch.object(cleanup, "artifact_pages", return_value=iter([changed])), \
+                patch.object(cleanup, "active_heads", return_value=({"main": main_sha, "dev": "d" * 40},
+                                                                     {main_sha, "d" * 40})), \
+                patch.object(cleanup.github, "api", side_effect=lambda repo, path, method="GET":
+                    deepcopy(expected) if path == "actions/runs/999" else deepcopy(producer)), \
+                self.assertRaisesRegex(ValueError, "unauthenticated provenance"):
+            cleanup.stale_cleanup(repository, expected)
 
     def test_get_api_retries_only_transient_github_failures(self):
         def failure(code):
