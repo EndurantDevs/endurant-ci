@@ -135,6 +135,17 @@ def archive_identity(path, identity=None, *, require_provenance=False):
                             or "sha256:" + hashlib.file_digest(archive.extractfile(layer), "sha256").hexdigest()
                             != layers[0]["digest"]):
                         raise ValueError("image archive SLSA provenance bytes changed")
+                    try:
+                        statement = json.load(archive.extractfile(layer))
+                    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                        raise ValueError("image archive SLSA provenance statement is invalid") from error
+                    subjects = statement.get("subject", []) if isinstance(statement, dict) else []
+                    if (not isinstance(statement, dict)
+                            or statement.get("_type") != "https://in-toto.io/Statement/v1"
+                            or statement.get("predicateType") != SLSA_PREDICATE or len(subjects) != 1
+                            or not isinstance(subjects[0], dict)
+                            or subjects[0].get("digest") != {"sha256": native[0]["digest"][7:]}):
+                        raise ValueError("image archive SLSA provenance statement is not bound to the native image")
                     has_provenance = True
                 root = descriptor(native[0])
             if (root.get("config", {}).get("digest") != config_digest

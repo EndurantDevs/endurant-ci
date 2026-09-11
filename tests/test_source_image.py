@@ -86,13 +86,22 @@ def docker_archive(*, entries=None, extra=None):
     return output.getvalue()
 
 
-def attested_archive():
-    root = {"schemaVersion": 2, "manifests": [{"digest": ROOT_DIGEST, "size": len(ROOT_BYTES)}]}
+def attested_archive(statement=SLSA_BYTES):
+    slsa = "sha256:" + hashlib.sha256(statement).hexdigest()
+    attestation = json.loads(ATTESTATION_BYTES)
+    attestation["layers"][0].update(digest=slsa, size=len(statement))
+    attestation_bytes = json.dumps(attestation).encode()
+    attestation_digest = "sha256:" + hashlib.sha256(attestation_bytes).hexdigest()
+    root_bytes = json.loads(ROOT_BYTES)
+    root_bytes["manifests"][1].update(digest=attestation_digest, size=len(attestation_bytes))
+    root_bytes = json.dumps(root_bytes).encode()
+    root_digest = "sha256:" + hashlib.sha256(root_bytes).hexdigest()
+    root = {"schemaVersion": 2, "manifests": [{"digest": root_digest, "size": len(root_bytes)}]}
     extra = {"oci-layout": b'{"imageLayoutVersion":"1.0.0"}', "index.json": json.dumps(root).encode(),
-             "blobs/sha256/" + ROOT_DIGEST[7:]: ROOT_BYTES,
+             "blobs/sha256/" + root_digest[7:]: root_bytes,
              "blobs/sha256/" + NATIVE[7:]: NATIVE_BYTES,
-             "blobs/sha256/" + ATTESTATION[7:]: ATTESTATION_BYTES,
-             "blobs/sha256/" + SLSA[7:]: SLSA_BYTES,
+             "blobs/sha256/" + attestation_digest[7:]: attestation_bytes,
+             "blobs/sha256/" + slsa[7:]: statement,
              "blobs/sha256/" + CONFIG[7:]: CONFIG_BYTES}
     return docker_archive(extra=extra)
 
@@ -360,6 +369,18 @@ class ArchiveChecks(unittest.TestCase):
                       [{**index["manifests"][0], "annotations": {"io.containerd.image.name": "unrelated:latest"}}]):
             with self.subTest(roots=roots), self.assertRaises(ValueError):
                 self.inspect(docker_archive(extra={**extra, "index.json": json.dumps({"manifests": roots}).encode()}))
+
+    def test_slsa_statement_must_be_valid_and_bound_to_the_native_image(self):
+        valid = json.loads(SLSA_BYTES)
+        invalid = [b"{", json.dumps({**valid, "predicateType": "https://slsa.dev/provenance/v1"}).encode(),
+                   json.dumps({**valid, "subject": [{"digest": {"sha256": "0" * 64}}]}).encode()]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "image.tar.gz"
+            for statement in invalid:
+                with self.subTest(statement=statement):
+                    path.write_bytes(attested_archive(statement))
+                    with self.assertRaisesRegex(ValueError, "provenance statement"):
+                        transfer.archive_identity(path, require_provenance=True)
 
     def test_extra_images_tags_unsafe_members_and_wrong_configuration_are_rejected(self):
         entry = {"Config": CONFIG[7:] + ".json", "RepoTags": None, "Layers": []}
