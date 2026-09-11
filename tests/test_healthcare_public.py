@@ -109,19 +109,72 @@ run_api_contract
                 command.chmod(0o755)
                 capture = root / "calls"
                 environment = {**os.environ, "SOURCE_ROOT": str(root), "CI_ROOT": str(ROOT),
-                    "PATH": str(root) + os.pathsep + os.environ["PATH"], "CAPTURE": str(capture)}
+                    "PATH": str(root) + os.pathsep + os.environ["PATH"], "CAPTURE": str(capture),
+                    "HLTHPRT_DB_PASSWORD": "synthetic"}
                 environment.pop("HLTHPRT_PROVIDER_DIRECTORY_PROFILE_POSTGRES_DSN", None)
                 subprocess.run(
-                    ["bash", "-euc", CHECK_FUNCTIONS + "\nrun_provider_profile_postgres postgresql://synthetic/test\n"],
+                    ["bash", "-euc", CHECK_FUNCTIONS + "\ncreate_test_database() { :; }\n"
+                     "drop_test_database() { :; }\nrun_provider_profile_postgres postgresql://synthetic/test\n"],
                     env=environment, capture_output=True, text=True, check=True,
                 )
                 calls = [line.rstrip("\0").split("\0") for line in capture.read_text().splitlines()]
+                calls = calls[3:]  # The three isolated batches precede the retained/profile batches.
                 self.assertEqual(len(calls), 2)
                 self.assertEqual(calls[1][0], "postgresql://synthetic/test")
                 self.assertEqual(calls[1].count(retained_path), 1)
                 for relative in tennessee_paths:
                     self.assertNotIn(relative, calls[0])
                     self.assertEqual(calls[1].count(relative), int(present))
+
+    def test_rebalanced_isolated_databases_preserve_arguments_and_cleanup_on_failure(self):
+        batches = (
+            ("control_imports_test_ci_runner", "HLTHPRT_DB_DATABASE", (
+                "test_control_imports_db.py", "test_import_run_idempotency_scope_postgres.py",
+                "test_plan_pricing_idempotency_postgres.py", "test_control_npi_db.py",
+                "test_control_import_attempt_fence_db.py")),
+            ("uhc_retained_admission_test_ci_runner", "HLTHPRT_UHC_RETAINED_ADMISSION_POSTGRES_DSN", (
+                "test_uhc_retained_admission_postgres.py", "test_uhc_retained_admission_concurrency_postgres.py")),
+            ("ptg_frozen_binding_test_ci_runner", "HLTHPRT_PTG_FROZEN_BINDING_POSTGRES_DSN", (
+                "test_ptg_frozen_binding_postgres.py",)),
+        )
+        for failure in (None, 0, 1, 2):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                command = root / "timeout"
+                command.write_text(f"#!{sys.executable}\n" + '''import json, os, sys
+with open(os.environ["CAPTURE"], "a") as output:
+    output.write(json.dumps([sys.argv[1:], {key: value for key, value in os.environ.items()
+        if key.startswith("HLTHPRT_") or key == "PGPASSWORD"}]) + "\\n")
+sys.exit(int(os.environ.get("FAIL_FILE", "") in sys.argv[1:]))
+''')
+                command.chmod(0o755)
+                capture, lifecycle = root / "calls", root / "lifecycle"
+                environment = {**os.environ, "SOURCE_ROOT": str(root), "CI_ROOT": str(ROOT),
+                    "PATH": str(root) + os.pathsep + os.environ["PATH"], "CAPTURE": str(capture),
+                    "LIFECYCLE": str(lifecycle), "HLTHPRT_DB_PASSWORD": "synthetic",
+                    "FAIL_FILE": "" if failure is None else "tests/" + batches[failure][2][0]}
+                script = CHECK_FUNCTIONS + r'''
+create_test_database() { printf 'create:%s\n' "$1" >> "$LIFECYCLE"; }
+drop_test_database() { printf 'drop:%s\n' "$1" >> "$LIFECYCLE"; }
+run_provider_profile_postgres postgresql://synthetic/original
+'''
+                result = subprocess.run(["bash", "-euc", script], env=environment,
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, int(failure is not None), result.stderr)
+                count = 3 if failure is None else failure + 1
+                calls = [json.loads(line) for line in capture.read_text().splitlines()]
+                self.assertEqual(len(calls), 5 if failure is None else count)
+                self.assertEqual(lifecycle.read_text().splitlines(), [event + ":" + database
+                    for database, _, _ in batches[:count] for event in ("create", "drop")])
+                for (arguments, env), (database, key, files) in zip(calls, batches[:count]):
+                    self.assertEqual(arguments, ["--foreground", "295s", "python", "-m", "pytest", "-q",
+                                                 *("tests/" + name for name in files)])
+                    self.assertEqual(env[key], database if key == "HLTHPRT_DB_DATABASE"
+                                     else "postgresql://synthetic/" + database)
+                    self.assertEqual(env["PGPASSWORD"], "synthetic")
+                    if key == "HLTHPRT_UHC_RETAINED_ADMISSION_POSTGRES_DSN":
+                        self.assertEqual(env["HLTHPRT_PTG2_RUST_SCANNER_BIN"],
+                                         str(root / "support/ptg2_scanner/target/debug/ptg2_scanner"))
 
     def test_validation_uses_pinned_uv(self):
         setup = (ROOT / "scripts/healthcare/setup/action.yml").read_text()
