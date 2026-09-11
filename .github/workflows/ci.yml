@@ -32,7 +32,7 @@ jobs:
           tools_directory=$(mktemp -d "$RUNNER_TEMP/rust-ci-tools.XXXXXX")
           trap 'rm -rf -- "$tools_directory"' EXIT
           python scripts/healthcare/install_rust_tools.py "$tools_directory"
-          test "$("$tools_directory/cargo-llvm-cov" --version)" = 'cargo-llvm-cov 0.8.7'
+          test "$("$tools_directory/cargo-llvm-cov" llvm-cov --version)" = 'cargo-llvm-cov 0.8.7'
           test "$("$tools_directory/cargo-audit" audit --version)" = 'cargo-audit-audit 0.22.2'
       - name: Check public workflow and helper contracts
         env:
