@@ -241,13 +241,15 @@ run_provider_profile_postgres postgresql://synthetic/original
             for export in ("0", "1"):
                 with self.subTest(kind=kind, export=export), tempfile.TemporaryDirectory() as temporary:
                     output = Path(temporary) / "args"
-                    environment = {**os.environ, "SOURCE_SHA": "a" * 40, "GITHUB_REPOSITORY": repository,
+                    environment = {**os.environ, "SOURCE_SHA": "a" * 40, "CI_ROOT": str(ROOT),
+                                   "GITHUB_REPOSITORY": repository,
                                    "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
                                    "PUBLIC_CI_EXPORT_IMAGE": export, "BUILD_ARGS": str(output)}
                     script = body + r'''
 git() { printf '%s\n' "$SOURCE_SHA"; }
 grep() { return 0; }
 docker() { printf '%s\0' "$@" > "$BUILD_ARGS"; return 17; }
+python3() { return 0; }
 cleanup_container_image() { exit "$1"; }
 runtime_tag=test-local:synthetic
 RUNTIME_BASE_IMAGE=synthetic
@@ -255,7 +257,7 @@ RUNTIME_BASE_IMAGE=synthetic
                     result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
                     self.assertEqual(result.returncode, 17, result.stderr)
                     args = output.read_bytes().decode().rstrip("\0").split("\0")
-                    self.assertEqual(args[0], "build")
+                    self.assertEqual(args[:2], ["buildx", "build"] if export == "1" else ["build", "--build-arg"])
                     labels = [args[index + 1] for index, value in enumerate(args) if value == "--label"]
                     self.assertEqual(labels, ["org.endurantdevs.public-ci.repository=" + repository,
                                               "org.endurantdevs.public-ci.run=123-2"] if export == "1" else [])
@@ -444,7 +446,7 @@ docker() {
   esac
   return 0
 }
-python3() { log_call python3 "$@"; }
+python3() { [ "${2:-}" = prepare-engine ] || log_call python3 "$@"; }
 run_container_package
 '''
                 result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)

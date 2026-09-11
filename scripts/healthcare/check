@@ -347,11 +347,14 @@ run_container_package() {
   printf -v cleanup_command 'cleanup_container_image $? %q' "$image"
   trap "$cleanup_command" EXIT
   local build_args=(--build-arg "HLTHPRT_SOURCE_COMMIT=${source_commit}")
+  local build_command=(docker build)
   if [[ "${PUBLIC_CI_EXPORT_IMAGE:-0}" == 1 ]]; then
+    python3 "$CI_ROOT/scripts/source_image.py" prepare-engine
+    build_command=(docker buildx build --provenance=mode=max --load)
     build_args+=(--label "org.endurantdevs.public-ci.repository=${GITHUB_REPOSITORY:?}"
                  --label "org.endurantdevs.public-ci.run=${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}")
   fi
-  docker build \
+  "${build_command[@]}" \
     "${build_args[@]}" \
     --platform linux/amd64 \
     --tag "$image" \
