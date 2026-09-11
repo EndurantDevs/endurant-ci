@@ -32,6 +32,7 @@ UPLOAD = "Upload tested DEV image"
 INTENT_UPLOAD = "Upload DEV image publication intent"
 RECEIPT_UPLOAD = "Upload DEV image receipt"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+SLSA_PREDICATE = "https://slsa.dev/provenance/v0.2"
 IDENTITY_FIELDS = ("repository", "source_sha", "base_sha", "source_branch", "pr_number")
 
 
@@ -45,7 +46,7 @@ def require_labels(configuration, identity):
         raise ValueError("tested image labels do not belong to this exact source run and attempt")
 
 
-def archive_identity(path, identity=None):
+def archive_identity(path, identity=None, *, require_provenance=False):
     """Read bounded metadata only; Docker and OCI loaders must select the same untagged image."""
     with tarfile.open(path, "r:gz") as archive:
         members = {}
@@ -79,6 +80,7 @@ def archive_identity(path, identity=None):
                 or len(layers) != len(configuration["rootfs"]["diff_ids"])):
             raise ValueError("image archive layer inventory differs from its configuration")
         identifiers = {config_digest}
+        has_provenance = False
         if "index.json" in members or "oci-layout" in members:
             if json.loads(contents("oci-layout")) != {"imageLayoutVersion": "1.0.0"}:
                 raise ValueError("unsupported image archive OCI layout")
@@ -115,11 +117,42 @@ def archive_identity(path, identity=None):
                             or item.get("annotations", {}).get("vnd.docker.reference.type") != "attestation-manifest"
                             or item["annotations"].get("vnd.docker.reference.digest") != native[0]["digest"]):
                         raise ValueError("image archive contains another OCI runtime image")
-                    descriptor(item)
+                    attestation = descriptor(item)
+                    layers = attestation.get("layers", [])
+                    artifact_type = attestation.get("artifactType")
+                    subject = attestation.get("subject")
+                    if (artifact_type not in (None, "application/vnd.docker.attestation.manifest.v1+json")
+                            or (subject is not None and (not isinstance(subject, dict)
+                                                        or subject.get("digest") != native[0]["digest"]))
+                            or len(layers) != 1
+                            or layers[0].get("mediaType") != "application/vnd.in-toto+json"
+                            or layers[0].get("annotations", {}).get("in-toto.io/predicate-type")
+                            != SLSA_PREDICATE):
+                        raise ValueError("image archive attestation is not native SLSA provenance")
+                    layer = members.get("blobs/sha256/" + layers[0].get("digest", "")[7:])
+                    if (not DIGEST.fullmatch(layers[0].get("digest", "")) or layer is None or not layer.isfile()
+                            or layer.size != layers[0].get("size") or not 0 < layer.size <= 8 * 1024 * 1024
+                            or "sha256:" + hashlib.file_digest(archive.extractfile(layer), "sha256").hexdigest()
+                            != layers[0]["digest"]):
+                        raise ValueError("image archive SLSA provenance bytes changed")
+                    try:
+                        statement = json.load(archive.extractfile(layer))
+                    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                        raise ValueError("image archive SLSA provenance statement is invalid") from error
+                    subjects = statement.get("subject", []) if isinstance(statement, dict) else []
+                    if (not isinstance(statement, dict) or statement.get("_type") not in
+                            ("https://in-toto.io/Statement/v0.1", "https://in-toto.io/Statement/v1")
+                            or statement.get("predicateType") != SLSA_PREDICATE or len(subjects) != 1
+                            or not isinstance(subjects[0], dict)
+                            or subjects[0].get("digest") != {"sha256": native[0]["digest"][7:]}):
+                        raise ValueError("image archive SLSA provenance statement is not bound to the native image")
+                    has_provenance = True
                 root = descriptor(native[0])
             if (root.get("config", {}).get("digest") != config_digest
                     or contents("blobs/sha256/" + config_digest[7:]) != config):
                 raise ValueError("Docker and OCI archive configurations differ")
+        if require_provenance and not has_provenance:
+            raise ValueError("image archive must preserve native SLSA provenance")
         return config_digest, identifiers
 
 
@@ -146,6 +179,33 @@ def image_identity(image):
             or values[0].get("Os") != "linux" or values[0].get("Architecture") != "amd64"):
         raise ValueError("the tested image must have one exact native linux/amd64 configuration")
     return values[0]
+
+
+def configure_containerd_store():
+    if (os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
+            or sys.platform != "linux"):
+        raise ValueError("attested image transport requires a fresh GitHub-hosted Linux runner")
+    expected = ["driver-type", "io.containerd.snapshotter.v1"]
+    if expected in json.loads(command("docker", "info", "--format", "{{json .DriverStatus}}")):
+        return
+    daemon = Path("/etc/docker/daemon.json")
+    if daemon.is_symlink():
+        raise ValueError("Docker daemon configuration cannot be a symlink")
+    configuration = json.loads(command("sudo", "cat", str(daemon))) if daemon.exists() else {}
+    if not isinstance(configuration, dict) or not isinstance(configuration.get("features", {}), dict):
+        raise ValueError("Docker daemon configuration is malformed")
+    configuration.setdefault("features", {})["containerd-snapshotter"] = True
+    with tempfile.NamedTemporaryFile("w", dir=os.environ["RUNNER_TEMP"], delete=False) as output:
+        json.dump(configuration, output, sort_keys=True)
+        candidate = Path(output.name)
+    try:
+        command("sudo", "dockerd", "--validate", "--config-file", str(candidate))
+        command("sudo", "install", "-o", "root", "-g", "root", "-m", "0644", str(candidate), str(daemon))
+        command("sudo", "systemctl", "restart", "docker")
+    finally:
+        candidate.unlink()
+    if expected not in json.loads(command("docker", "info", "--format", "{{json .DriverStatus}}")):
+        raise ValueError("Docker did not activate the containerd image store")
 
 
 def context():
@@ -207,7 +267,7 @@ def export_image(image):
             shutil.copyfileobj(save.stdout, compressed)
             if save.wait() != 0:
                 raise ValueError("tested image export failed")
-    config_digest, identifiers = archive_identity(archive, identity)
+    config_digest, identifiers = archive_identity(archive, identity, require_provenance=True)
     if image not in identifiers:
         raise ValueError("exported archive differs from the tested immutable image")
     record = {"schema": "public-source-image-staging-v1", **identity,
@@ -476,7 +536,8 @@ def transfer_record(expected, directory):
             or not re.fullmatch(r"[0-9a-f]{64}", record.get("archive_sha256", ""))
             or file_digest(directory / "image.tar.gz") != record["archive_sha256"]):
         raise ValueError("image archive is not bound to this exact source and producer")
-    config_digest, identifiers = archive_identity(directory / "image.tar.gz", expected["identity"])
+    config_digest, identifiers = archive_identity(
+        directory / "image.tar.gz", expected["identity"], require_provenance=True)
     if record["config_digest"] != config_digest or record["image_id"] not in identifiers:
         raise ValueError("archive configuration differs from the tested immutable image")
     return record, identifiers
@@ -537,6 +598,7 @@ def publish(expected, directory):
     intent, _, _ = authenticated_intent(expected)
     if intent["producer"] != record:
         raise ValueError("tested image differs from its durable pre-push intent")
+    configure_containerd_store()
     repository = expected["identity"]["repository"]
     target = expected["image"]
     for name in (*sorted(identifiers), target):
@@ -567,9 +629,9 @@ def publish(expected, directory):
             command("docker", "image", "push", target, env=environment)
             digest = command("docker", "buildx", "imagetools", "inspect", target,
                              "--format", '{{printf "%s" .Manifest.Digest}}', env=environment).decode().strip()
-            if not DIGEST.fullmatch(digest):
-                raise ValueError("published registry digest is missing")
-            # Config digest binds runtime bytes even when Docker creates a new registry manifest.
+            if digest != record["image_id"]:
+                raise ValueError("published registry graph differs from the tested image")
+            # The exact root retains the native manifest and its SLSA child; config binds runtime bytes.
             if registry_config(IMAGES[repository], digest, environment) != record["config_digest"]:
                 raise ValueError("published registry image differs from the tested configuration")
         if admit() != expected:
@@ -722,6 +784,8 @@ def main():
     path = Path(os.environ["RUNNER_TEMP"]) / "public-image-publication.json"
     if mode == "export":
         export_image(sys.argv[2])
+    elif mode == "prepare-engine":
+        configure_containerd_store()
     elif mode == "prepare":
         expected = admit()
         with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:

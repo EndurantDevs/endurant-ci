@@ -32,6 +32,30 @@ LABELS = {"org.endurantdevs.public-ci.repository": REPOSITORY, "org.endurantdevs
 CONFIG_BYTES = json.dumps({"os": "linux", "architecture": "amd64", "config": {"Labels": LABELS},
                            "rootfs": {"type": "layers", "diff_ids": []}}).encode()
 CONFIG = "sha256:" + hashlib.sha256(CONFIG_BYTES).hexdigest()
+NATIVE_BYTES = json.dumps({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                           "config": {"digest": CONFIG}, "layers": []}).encode()
+NATIVE = "sha256:" + hashlib.sha256(NATIVE_BYTES).hexdigest()
+SLSA_BYTES = json.dumps({"_type": "https://in-toto.io/Statement/v1",
+                         "predicateType": "https://slsa.dev/provenance/v0.2",
+                         "subject": [{"digest": {"sha256": NATIVE[7:]}}], "predicate": {}}).encode()
+SLSA = "sha256:" + hashlib.sha256(SLSA_BYTES).hexdigest()
+ATTESTATION_BYTES = json.dumps({
+    "schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "artifactType": "application/vnd.docker.attestation.manifest.v1+json",
+    "config": {"digest": "sha256:" + hashlib.sha256(b"{}").hexdigest()},
+    "layers": [{"mediaType": "application/vnd.in-toto+json", "digest": SLSA, "size": len(SLSA_BYTES),
+                "annotations": {"in-toto.io/predicate-type": "https://slsa.dev/provenance/v0.2"}}],
+    "subject": {"digest": NATIVE}}).encode()
+ATTESTATION = "sha256:" + hashlib.sha256(ATTESTATION_BYTES).hexdigest()
+ROOT_BYTES = json.dumps({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json",
+                         "manifests": [
+                             {"digest": NATIVE, "size": len(NATIVE_BYTES),
+                              "platform": {"os": "linux", "architecture": "amd64"}},
+                             {"digest": ATTESTATION, "size": len(ATTESTATION_BYTES),
+                              "platform": {"os": "unknown", "architecture": "unknown"},
+                              "annotations": {"vnd.docker.reference.type": "attestation-manifest",
+                                              "vnd.docker.reference.digest": NATIVE}}]}).encode()
+ROOT_DIGEST = "sha256:" + hashlib.sha256(ROOT_BYTES).hexdigest()
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 
@@ -60,6 +84,26 @@ def docker_archive(*, entries=None, extra=None):
             item.size = len(data)
             archive.addfile(item, io.BytesIO(data))
     return output.getvalue()
+
+
+def attested_archive(statement=SLSA_BYTES):
+    slsa = "sha256:" + hashlib.sha256(statement).hexdigest()
+    attestation = json.loads(ATTESTATION_BYTES)
+    attestation["layers"][0].update(digest=slsa, size=len(statement))
+    attestation_bytes = json.dumps(attestation).encode()
+    attestation_digest = "sha256:" + hashlib.sha256(attestation_bytes).hexdigest()
+    root_bytes = json.loads(ROOT_BYTES)
+    root_bytes["manifests"][1].update(digest=attestation_digest, size=len(attestation_bytes))
+    root_bytes = json.dumps(root_bytes).encode()
+    root_digest = "sha256:" + hashlib.sha256(root_bytes).hexdigest()
+    root = {"schemaVersion": 2, "manifests": [{"digest": root_digest, "size": len(root_bytes)}]}
+    extra = {"oci-layout": b'{"imageLayoutVersion":"1.0.0"}', "index.json": json.dumps(root).encode(),
+             "blobs/sha256/" + root_digest[7:]: root_bytes,
+             "blobs/sha256/" + NATIVE[7:]: NATIVE_BYTES,
+             "blobs/sha256/" + attestation_digest[7:]: attestation_bytes,
+             "blobs/sha256/" + slsa[7:]: statement,
+             "blobs/sha256/" + CONFIG[7:]: CONFIG_BYTES}
+    return docker_archive(extra=extra)
 
 
 class AdmissionChecks(unittest.TestCase):
@@ -145,17 +189,16 @@ class AdmissionChecks(unittest.TestCase):
 
 class TransferChecks(unittest.TestCase):
     def setup_artifact(self, directory):
-        (directory / "image.tar.gz").write_bytes(docker_archive())
+        (directory / "image.tar.gz").write_bytes(attested_archive())
         record = {"schema": "public-source-image-staging-v1", **expected()["identity"], "platform": "linux/amd64",
-                  "image_id": CONFIG, "config_digest": CONFIG,
+                  "image_id": ROOT_DIGEST, "config_digest": CONFIG,
                   "archive_sha256": transfer.file_digest(directory / "image.tar.gz")}
         (directory / "producer.json").write_text(json.dumps(record))
         return record
 
-    def exercise(self, directory, record, *, loaded_config=CONFIG, failure=None, stale=False, cleanup_failure=False):
+    def exercise(self, directory, record, *, loaded_config=ROOT_DIGEST, failure=None, stale=False, cleanup_failure=False):
         calls, images = [], set()
-        raw = json.dumps({"schemaVersion": 2, "config": {"digest": CONFIG}}).encode()
-        digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+        digest = ROOT_DIGEST
 
         def command(*args, **kwargs):
             calls.append(args)
@@ -187,7 +230,7 @@ class TransferChecks(unittest.TestCase):
             if args[:4] == ("docker", "buildx", "imagetools", "inspect"):
                 self.assertIn("DOCKER_CONFIG", kwargs["env"])
                 if args[-1] == "--raw":
-                    return raw  # Buildx prints p.raw with %s and deliberately adds no newline.
+                    return NATIVE_BYTES if args[4].endswith("@" + NATIVE) else ROOT_BYTES
                 self.assertEqual(args[-1], '{{printf "%s" .Manifest.Digest}}')
                 return digest.encode()
             raise AssertionError(args)
@@ -197,6 +240,7 @@ class TransferChecks(unittest.TestCase):
         with patch.dict(os.environ, environment), patch.object(transfer, "command", side_effect=command), \
                 patch.object(transfer, "admit", return_value=expected(), side_effect=values), \
                 patch.object(transfer, "authenticated_intent", return_value=({"producer": record}, {}, {})), \
+                patch.object(transfer, "configure_containerd_store"), \
                 patch.object(transfer, "require_absent_registry_tag"):
 
             try:
@@ -206,7 +250,7 @@ class TransferChecks(unittest.TestCase):
                                  "cleanup must attempt every owned image even after one removal fails")
                 self.assertFalse(list(directory.parent.glob("public-image-auth-*")), "credentials must be removed")
                 self.assertFalse(any(command[1] in {"run", "build", "exec"} for command in calls))
-                if loaded_config != CONFIG or stale:
+                if loaded_config != record["image_id"] or stale:
                     self.assertFalse(any(command[:2] == ("docker", "login") for command in calls))
         return calls, digest
 
@@ -252,10 +296,13 @@ class TransferChecks(unittest.TestCase):
             record = self.setup_artifact(directory)
             with patch.object(transfer, "admit", return_value=expected()), \
                     patch.object(transfer, "authenticated_intent", return_value=({"producer": record}, {}, {})), \
+                    patch.object(transfer, "configure_containerd_store"), \
                     patch.object(transfer, "command", return_value=(CONFIG + "\n").encode()) as docker:
                 with self.assertRaisesRegex(ValueError, "pre-existing"):
                     transfer.publish(expected(), directory)
-                self.assertEqual(docker.call_args_list, [(("docker", "image", "ls", "--all", "--quiet", "--no-trunc"),)])
+                self.assertTrue(docker.call_args_list)
+                self.assertTrue(all(call.args == ("docker", "image", "ls", "--all", "--quiet", "--no-trunc")
+                                    for call in docker.call_args_list))
 
     def test_export_uses_existing_tested_image_without_a_second_build(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -264,15 +311,16 @@ class TransferChecks(unittest.TestCase):
             with patch.dict(os.environ, {"RUNNER_TEMP": temporary, "SOURCE_ROOT": temporary}), \
                     patch.object(transfer, "context", return_value=(IDENTITY, {"event": "push"})), \
                     patch.object(transfer, "command", side_effect=command), \
-                    patch.object(transfer, "image_identity", return_value={"Id": CONFIG, "Config": {"Labels": LABELS}}), \
+                    patch.object(transfer, "image_identity", return_value={"Id": ROOT_DIGEST, "Config": {"Labels": LABELS}}), \
                     patch.object(transfer.subprocess, "Popen") as save:
                 process = save.return_value.__enter__.return_value
-                process.stdout = io.BytesIO(gzip.decompress(docker_archive()))
+                process.stdout = io.BytesIO(gzip.decompress(attested_archive()))
                 process.wait.return_value = 0
-                transfer.export_image(CONFIG)
-                save.assert_called_once_with(["docker", "image", "save", CONFIG], stdout=subprocess.PIPE)
+                transfer.export_image(ROOT_DIGEST)
+                save.assert_called_once_with(["docker", "image", "save", ROOT_DIGEST], stdout=subprocess.PIPE)
             directory = Path(temporary) / "drug-public-image-staging-123-2"
-            self.assertEqual(transfer.archive_identity(directory / "image.tar.gz"), (CONFIG, {CONFIG}))
+            self.assertEqual(transfer.archive_identity(directory / "image.tar.gz", require_provenance=True),
+                             (CONFIG, {CONFIG, ROOT_DIGEST}))
             self.assertEqual(json.loads((directory / "producer.json").read_text())["config_digest"], CONFIG)
 
     def test_retagged_source_cannot_change_exported_test_identity(self):
@@ -285,6 +333,9 @@ class TransferChecks(unittest.TestCase):
                                           ("drug", "runtime_image() {", "local_services() {", "runtime_image_id")):
             script = (root / "scripts" / kind / "check").read_text().split(start, 1)[1].split(end, 1)[0]
             self.assertLess(script.index("{{.Id}}"), script.index("docker run"))
+            self.assertIn("docker buildx build", script)
+            self.assertIn("--attest=type=provenance,mode=max,version=v0.2", script)
+            self.assertIn("prepare-engine", script)
             self.assertIn(f'export "${variable}"', script)
             for invocation in script.split("docker run")[1:]:
                 self.assertIn(f'"${variable}"', invocation)
@@ -299,6 +350,15 @@ class ArchiveChecks(unittest.TestCase):
 
     def test_exact_single_image_accepts_classic_and_oci_ids(self):
         self.assertEqual(self.inspect(docker_archive()), (CONFIG, {CONFIG}))
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "image.tar.gz"
+            path.write_bytes(attested_archive())
+            self.assertEqual(transfer.archive_identity(path, require_provenance=True),
+                             (CONFIG, {CONFIG, ROOT_DIGEST}))
+            classic = Path(temporary) / "classic.tar.gz"
+            classic.write_bytes(docker_archive())
+            with self.assertRaisesRegex(ValueError, "SLSA provenance"):
+                transfer.archive_identity(classic, require_provenance=True)
         raw = json.dumps({"schemaVersion": 2, "config": {"digest": CONFIG}, "layers": []}).encode()
         digest = "sha256:" + hashlib.sha256(raw).hexdigest()
         index = {"schemaVersion": 2, "manifests": [{"digest": digest, "size": len(raw)}]}
@@ -309,6 +369,19 @@ class ArchiveChecks(unittest.TestCase):
                       [{**index["manifests"][0], "annotations": {"io.containerd.image.name": "unrelated:latest"}}]):
             with self.subTest(roots=roots), self.assertRaises(ValueError):
                 self.inspect(docker_archive(extra={**extra, "index.json": json.dumps({"manifests": roots}).encode()}))
+
+    def test_slsa_statement_must_be_valid_and_bound_to_the_native_image(self):
+        valid = json.loads(SLSA_BYTES)
+        invalid = [b"{", json.dumps({**valid, "predicateType": "https://slsa.dev/provenance/v1"}).encode(),
+                   json.dumps({**valid, "_type": "https://in-toto.io/Statement/v9"}).encode(),
+                   json.dumps({**valid, "subject": [{"digest": {"sha256": "0" * 64}}]}).encode()]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "image.tar.gz"
+            for statement in invalid:
+                with self.subTest(statement=statement):
+                    path.write_bytes(attested_archive(statement))
+                    with self.assertRaisesRegex(ValueError, "provenance statement"):
+                        transfer.archive_identity(path, require_provenance=True)
 
     def test_extra_images_tags_unsafe_members_and_wrong_configuration_are_rejected(self):
         entry = {"Config": CONFIG[7:] + ".json", "RepoTags": None, "Layers": []}
@@ -719,7 +792,8 @@ class ReconciliationChecks(unittest.TestCase):
 @unittest.skipUnless(os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("PUBLIC_CI_DOCKER_COMPATIBILITY") == "1",
                      "native Docker compatibility runs only in the package's GitHub CI")
 class NativeArchiveCompatibility(unittest.TestCase):
-    def test_standard_runner_preserves_captured_image_and_archive_configuration(self):
+    def test_standard_runner_preserves_captured_attested_image_graph(self):
+        transfer.configure_containerd_store()
         tag = "endurant-ci-transfer:" + uuid.uuid4().hex
         owned = {tag}
         self.assertFalse(transfer.image_present(tag))
@@ -728,14 +802,17 @@ class NativeArchiveCompatibility(unittest.TestCase):
                 directory = Path(temporary)
                 (directory / "Dockerfile").write_text("FROM scratch\nCOPY payload /payload\n")
                 (directory / "payload").write_text(uuid.uuid4().hex)
-                transfer.command("docker", "build", "--platform", "linux/amd64", "--tag", tag, str(directory))
+                transfer.command("docker", "buildx", "build", "--platform", "linux/amd64",
+                                 "--attest=type=provenance,mode=max,version=v0.2", "--load", "--tag", tag,
+                                 str(directory))
                 captured = transfer.image_identity(tag)["Id"]
                 owned.add(captured)
                 archive = directory / "image.tar.gz"
                 archive.write_bytes(gzip.compress(transfer.command("docker", "image", "save", captured)))
-                config, identifiers = transfer.archive_identity(archive)
+                config, identifiers = transfer.archive_identity(archive, require_provenance=True)
                 owned.update(identifiers)
                 self.assertIn(captured, identifiers)
+                self.assertNotEqual(captured, config)
                 transfer.remove_image(tag)
                 output = transfer.command("docker", "image", "load", "--quiet", "--input", str(archive))
                 prefix = b"Loaded image ID: "
@@ -745,7 +822,7 @@ class NativeArchiveCompatibility(unittest.TestCase):
                 self.assertEqual(transfer.image_identity(restored)["Id"], restored)
                 repeated = directory / "restored.tar.gz"
                 repeated.write_bytes(gzip.compress(transfer.command("docker", "image", "save", restored)))
-                self.assertEqual(transfer.archive_identity(repeated)[0], config)
+                self.assertEqual(transfer.archive_identity(repeated, require_provenance=True)[0], config)
         finally:
             failed = []
             for image in [tag, *sorted(owned - {tag})]:
