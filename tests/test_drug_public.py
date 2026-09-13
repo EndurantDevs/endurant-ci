@@ -92,6 +92,62 @@ class DrugNativeSelectionTests(unittest.TestCase):
         self.assertNotIn("<(", postgres)
 
 
+class DrugHandoffNativeSelectionTests(unittest.TestCase):
+    @staticmethod
+    def write_source_set(root, names):
+        for name in names:
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("raise AssertionError('source files must not execute during selection')\n")
+
+    def test_complete_handoff_adds_native_proof_once_without_removing_existing_tests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_source_set(root, NATIVE_TESTS.NDC_SOURCE_SET)
+            existing = NATIVE_TESTS.postgres_test_paths(root)
+            self.write_source_set(root, NATIVE_TESTS.NDC_HANDOFF_SOURCE_SET)
+            self.assertEqual(NATIVE_TESTS.postgres_test_paths(root), (
+                *existing, "tests/process/test_ndc_handoff_postgres.py",
+            ))
+
+    def test_every_partial_handoff_source_set_is_rejected(self):
+        for present in range(1, 7):
+            with self.subTest(present=present), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.write_source_set(root, NATIVE_TESTS.NDC_SOURCE_SET)
+                self.write_source_set(root, tuple(
+                    name for index, name in enumerate(NATIVE_TESTS.NDC_HANDOFF_SOURCE_SET)
+                    if present & (1 << index)
+                ))
+                with self.assertRaisesRegex(ValueError, "NDC handoff source requires its native proof"):
+                    NATIVE_TESTS.postgres_test_paths(root)
+
+    def test_each_nonregular_handoff_source_path_is_rejected(self):
+        for name in NATIVE_TESTS.NDC_HANDOFF_SOURCE_SET:
+            for kind in ("directory", "symlink", "dangling-symlink"):
+                with self.subTest(name=name, kind=kind), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    self.write_source_set(root, (*NATIVE_TESTS.NDC_SOURCE_SET, *NATIVE_TESTS.NDC_HANDOFF_SOURCE_SET))
+                    invalid = root / name
+                    invalid.unlink()
+                    if kind == "directory":
+                        invalid.mkdir()
+                    else:
+                        target = root / "synthetic-source.py"
+                        if kind == "symlink":
+                            target.touch()
+                        invalid.symlink_to(target)
+                    with self.assertRaisesRegex(ValueError, "NDC handoff source requires.*regular files"):
+                        NATIVE_TESTS.postgres_test_paths(root)
+
+    def test_handoff_cannot_omit_its_publication_dependency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_source_set(root, NATIVE_TESTS.NDC_HANDOFF_SOURCE_SET)
+            with self.assertRaisesRegex(ValueError, "handoff requires the complete NDC publication"):
+                NATIVE_TESTS.postgres_test_paths(root)
+
+
 class PublicDrugTests(unittest.TestCase):
     def test_validation_uses_pinned_uv_and_lockfile_provenance(self):
         gate = (ROOT / "scripts/drug/check").read_text()
