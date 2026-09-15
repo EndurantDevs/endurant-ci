@@ -123,6 +123,18 @@ class PublicWorkflowPermissions(unittest.TestCase):
         for job in ("python-tests", "address-canonical-db-tests"):
             self.assertIn("public-hygiene", jobs[job]["needs"])
 
+    def test_native_archive_clients_match_the_postgresql_service_major(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
+        database_job = workflow["jobs"]["address-canonical-db-tests"]
+        self.assertIn("postgis/postgis:18-", database_job["services"]["postgres"]["image"])
+        installer = next(step for step in database_job["steps"] if step.get("name") == "Install PostgreSQL client")
+        command = installer["run"]
+        self.assertIn("https://apt.postgresql.org/pub/repos/apt", command)
+        self.assertIn("postgresql-client-18", command)
+        self.assertIn('>> "$GITHUB_PATH"', command)
+        self.assertIn("for tool in psql pg_dump pg_restore; do", command)
+        self.assertIn('"/usr/lib/postgresql/18/bin/$tool" --version', command)
+
 
 if __name__ == "__main__":
     unittest.main()
