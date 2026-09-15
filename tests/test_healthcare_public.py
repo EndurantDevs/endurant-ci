@@ -839,6 +839,54 @@ run_container_package
                 self.assertEqual(portable[2][-2:], ["/run/healthporta-validation/cutover-ready.py", "--help"])
 
 
+    def test_optional_npi_archive_postgres_test_uses_only_the_core_postgres_lane(self):
+        test_path = "tests/test_npi_result_archive_postgres.py"
+        dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
+        for present in (False, True):
+            with self.subTest(present=present), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "source"
+                (source / "tests").mkdir(parents=True)
+                if present:
+                    (source / test_path).write_text("# optional PostgreSQL test\n")
+                call_log = root / "calls"
+                env = {
+                    **os.environ,
+                    "SOURCE_ROOT": str(source),
+                    "CI_ROOT": str(ROOT),
+                    "CI_DEPS_READY": "1",
+                    "COVERAGE_BASE_SHA": "a" * 40,
+                    "HLTHPRT_DB_PASSWORD": "postgres",
+                    "HLTHPRT_NPI_RESULT_ARCHIVE_TEST_DSN": "",
+                    "CALL_LOG": str(call_log),
+                }
+                script = CHECK_FUNCTIONS + r'''
+mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
+prepare_debug_rust_binaries() { :; }
+create_test_database() { :; }
+drop_test_database() { :; }
+python() {
+  printf '%s\t%s\n' "${HLTHPRT_NPI_RESULT_ARCHIVE_TEST_DSN:-}" "$*" >> "$CALL_LOG"
+}
+timeout() {
+  shift 2
+  "$@"
+}
+run_python_main 0
+run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
+'''
+                subprocess.run(["bash", "-euc", script], cwd=source, env=env, check=True)
+                calls = call_log.read_text().splitlines()
+                matching = [call for call in calls if test_path in call]
+                if not present:
+                    self.assertEqual(matching, [])
+                    continue
+                ignored = [call for call in matching if f"--ignore {test_path}" in call]
+                executed = [call for call in matching if f"--ignore {test_path}" not in call]
+                self.assertEqual(len(ignored), 1)
+                self.assertTrue(ignored[0].startswith("\t"))
+                self.assertEqual(executed, [f"{dsn}\t-m pytest -q {test_path}"])
+
 
 if __name__ == "__main__":
     unittest.main()

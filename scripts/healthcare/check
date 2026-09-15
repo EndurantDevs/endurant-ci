@@ -187,6 +187,9 @@ run_python_main() {
   for test_path in "${capacity_tests[@]}"; do
     collection_args+=(--ignore "$test_path")
   done
+  if [ -f "$repository_root/tests/test_npi_result_archive_postgres.py" ]; then
+    collection_args+=(--ignore tests/test_npi_result_archive_postgres.py)
+  fi
   export COVERAGE_FILE=${COVERAGE_FILE:-$(artifact_path ".coverage.main.${shard}")}
   ci_phase_begin python-tests
   timeout --foreground 420s python -m pytest -q -n 1 --dist loadscope --durations=20 \
@@ -761,6 +764,12 @@ run_core_postgres() {
     tests/test_formulary_fhir_serving_index_postgres.py \
     tests/test_formulary_fhir_collections_postgres.py \
     tests/test_process_mrf_address_summary_db.py
+
+  if [ -f "$repository_root/tests/test_npi_result_archive_postgres.py" ]; then
+    HLTHPRT_NPI_RESULT_ARCHIVE_TEST_DSN=$dsn \
+      timeout --foreground 295s python -m pytest -q \
+        tests/test_npi_result_archive_postgres.py
+  fi
 
   HLTHPRT_PTG2_V3_LIFECYCLE_POSTGRES_DSN=$dsn \
   HLTHPRT_PTG2_ROLLBACK_POSTGRES_DSN=$dsn \
