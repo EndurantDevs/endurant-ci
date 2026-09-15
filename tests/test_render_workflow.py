@@ -191,8 +191,9 @@ class RenderWorkflowChecks(unittest.TestCase):
             "deadline=$((SECONDS + 2400))\n"
             "while :; do\n"
             "  if ! validation_state=\"$(\n"
-            "    gh api \"repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=pull_request&head_sha=$SOURCE_SHA&per_page=100\" \\\n"
-            "      --jq '[.workflow_runs[]\n"
+            "    set -o pipefail\n"
+            "    gh api --paginate --slurp \\\n"
+            "      \"repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=pull_request&head_sha=$SOURCE_SHA&per_page=100\" | jq --raw-output '[.[] | .workflow_runs[]\n"
             "        | select(.name == \"CI\" and .display_title == \"CI\")\n"
             "        | select(any(.pull_requests[]?; .number == (env.PR_NUMBER | tonumber) and .head.sha == env.SOURCE_SHA and .base.sha == env.BASE_SHA))\n"
             "        | {run_started_at, created_at, id, run_attempt, status, conclusion}]\n"
@@ -236,7 +237,7 @@ class RenderWorkflowChecks(unittest.TestCase):
             caller.write_text(yaml.safe_dump(original))
             workflow = yaml.safe_load(RENDERER.render_workflow("healthcare", "1" * 40, caller))
         run = workflow["jobs"]["source-validation"]["steps"][0]["run"]
-        query = re.search(r"--jq '(.+?)'\n\s+\)\"", run, re.DOTALL).group(1)
+        query = re.search(r"jq --raw-output '(.+?)'\n\s+\)\"", run, re.DOTALL).group(1)
 
         def full_run(*, started_at, identifier, attempt=1, status="completed", conclusion="success",
                      title="CI", number=17, head="source", base="base", created_at=None):
@@ -247,9 +248,10 @@ class RenderWorkflowChecks(unittest.TestCase):
                 "pull_requests": [{"number": number, "head": {"sha": head}, "base": {"sha": base}}],
             }
 
-        def state(workflow_runs):
+        def state(*pages):
             result = subprocess.run(
-                ["jq", "--raw-output", query], input=json.dumps({"workflow_runs": workflow_runs}),
+                ["jq", "--raw-output", query],
+                input=json.dumps([{"workflow_runs": page} for page in pages]),
                 text=True, capture_output=True, check=False,
                 env={**os.environ, "PR_NUMBER": "17", "SOURCE_SHA": "source", "BASE_SHA": "base"},
             )
@@ -276,6 +278,11 @@ class RenderWorkflowChecks(unittest.TestCase):
             self.assertEqual(state([old_success, in_progress]), "pending")
         with self.subTest("metadata run is ignored"):
             self.assertEqual(state([old_success, metadata]), "success")
+        with self.subTest("full validation remains visible beyond a metadata-only page"):
+            metadata_page = [full_run(started_at="2026-01-01T14:00:00Z", identifier=100 + index,
+                                      title="CI metadata update", conclusion="failure")
+                             for index in range(100)]
+            self.assertEqual(state(metadata_page, [old_success]), "success")
         with self.subTest("wrong identity is ignored"):
             self.assertEqual(state([wrong_pr, wrong_head, wrong_base]), "pending")
         with self.subTest("no full run waits"):
@@ -303,11 +310,13 @@ class RenderWorkflowChecks(unittest.TestCase):
                 "if [ -f \"$FAKE_GH_COUNT\" ]; then count=$(cat \"$FAKE_GH_COUNT\"); fi\n"
                 "count=$((count + 1))\n"
                 "printf '%s' \"$count\" > \"$FAKE_GH_COUNT\"\n"
+                "case \"$*\" in *--paginate*--slurp*) ;; *) exit 2;; esac\n"
+                "case \"$*\" in *--jq*) exit 2;; esac\n"
                 "if [ \"$count\" -eq 1 ]; then\n"
                 "  printf '%s\\n' 'synthetic API failure' >&2\n"
                 "  exit 1\n"
                 "fi\n"
-                "printf '%s\\n' success\n"
+                "printf '%s\\n' '[{\"workflow_runs\":[{\"name\":\"CI\",\"display_title\":\"CI\",\"id\":1,\"run_attempt\":1,\"status\":\"completed\",\"conclusion\":\"success\",\"pull_requests\":[{\"number\":17,\"head\":{\"sha\":\"source\"},\"base\":{\"sha\":\"base\"}}]}]}]'\n"
             )
             sleep = commands / "sleep"
             sleep.write_text("#!/bin/sh\nexit 0\n")

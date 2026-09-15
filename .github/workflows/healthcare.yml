@@ -611,8 +611,9 @@ jobs:
         deadline=$((SECONDS + 2400))
         while :; do
           if ! validation_state="$(
-            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=pull_request&head_sha=$SOURCE_SHA&per_page=100" \
-              --jq '[.workflow_runs[]
+            set -o pipefail
+            gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=pull_request&head_sha=$SOURCE_SHA&per_page=100" | jq --raw-output '[.[] | .workflow_runs[]
                 | select(.name == "CI" and .display_title == "CI")
                 | select(any(.pull_requests[]?; .number == (env.PR_NUMBER | tonumber) and .head.sha == env.SOURCE_SHA and .base.sha == env.BASE_SHA))
                 | {run_started_at, created_at, id, run_attempt, status, conclusion}]
