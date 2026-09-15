@@ -190,7 +190,7 @@ class RenderWorkflowChecks(unittest.TestCase):
             "fi\n\n"
             "deadline=$((SECONDS + 2400))\n"
             "while :; do\n"
-            "  validation_state=\"$(\n"
+            "  if ! validation_state=\"$(\n"
             "    gh api \"repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=pull_request&head_sha=$SOURCE_SHA&per_page=100\" \\\n"
             "      --jq '[.workflow_runs[]\n"
             "        | select(.name == \"CI\" and .display_title == \"CI\")\n"
@@ -203,7 +203,9 @@ class RenderWorkflowChecks(unittest.TestCase):
             "          elif .conclusion == \"success\" then \"success\"\n"
             "          else \"failed\"\n"
             "          end'\n"
-            "  )\"\n"
+            "  )\"; then\n"
+            "    validation_state=pending\n"
+            "  fi\n"
             "  case \"$validation_state\" in\n"
             "    success) exit 0 ;;\n"
             "    failed)\n"
@@ -222,7 +224,7 @@ class RenderWorkflowChecks(unittest.TestCase):
             "      exit 1\n"
             "      ;;\n"
             "  esac\n"
-            "fi\n"
+            "done\n"
         ))
 
     def test_healthcare_metadata_validation_uses_the_latest_matching_full_run(self):
@@ -278,6 +280,50 @@ class RenderWorkflowChecks(unittest.TestCase):
             self.assertEqual(state([wrong_pr, wrong_head, wrong_base]), "pending")
         with self.subTest("no full run waits"):
             self.assertEqual(state([]), "pending")
+
+    def test_healthcare_metadata_validation_retries_an_api_failure(self):
+        original = {"name": "CI", "on": {"pull_request": {}},
+                    "jobs": {"smoke": {"name": "portable import checks", "runs-on": "ubuntu-latest",
+                                       "steps": [{"run": "echo synthetic"}]}}}
+        with tempfile.TemporaryDirectory() as temporary:
+            caller = Path(temporary) / "ci.yml"
+            caller.write_text(yaml.safe_dump(original))
+            workflow = yaml.safe_load(RENDERER.render_workflow("healthcare", "1" * 40, caller))
+            run = workflow["jobs"]["source-validation"]["steps"][0]["run"]
+            syntax = subprocess.run(["bash", "-n"], input=run, text=True, capture_output=True, check=False)
+            self.assertEqual(syntax.returncode, 0, syntax.stderr)
+
+            commands = Path(temporary) / "commands"
+            commands.mkdir()
+            counter = Path(temporary) / "gh-count"
+            gh = commands / "gh"
+            gh.write_text(
+                "#!/bin/sh\n"
+                "count=0\n"
+                "if [ -f \"$FAKE_GH_COUNT\" ]; then count=$(cat \"$FAKE_GH_COUNT\"); fi\n"
+                "count=$((count + 1))\n"
+                "printf '%s' \"$count\" > \"$FAKE_GH_COUNT\"\n"
+                "if [ \"$count\" -eq 1 ]; then\n"
+                "  printf '%s\\n' 'synthetic API failure' >&2\n"
+                "  exit 1\n"
+                "fi\n"
+                "printf '%s\\n' success\n"
+            )
+            sleep = commands / "sleep"
+            sleep.write_text("#!/bin/sh\nexit 0\n")
+            gh.chmod(0o755)
+            sleep.chmod(0o755)
+            result = subprocess.run(
+                ["bash", "-e", "-o", "pipefail", "-c", run], text=True, capture_output=True, check=False,
+                timeout=10, env={
+                    **os.environ, "PATH": str(commands) + os.pathsep + os.environ["PATH"],
+                    "FAKE_GH_COUNT": str(counter), "GH_TOKEN": "synthetic", "METADATA_ONLY": "true",
+                    "PR_NUMBER": "17", "SOURCE_SHA": "source", "BASE_SHA": "base",
+                    "GITHUB_REPOSITORY": "owner/repository", "RESULTS": "[]",
+                },
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(counter.read_text(), "2")
 
     def test_revision_and_job_labels_cannot_inject_expressions(self):
         for label in ("${{ inputs.name }}", "bad' || true || '"):
