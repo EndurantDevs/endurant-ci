@@ -1,6 +1,8 @@
-"""Changed-file Ruff checks preserve exact-base scope and fail closed."""
+"""Changed-file Ruff checks preserve an exact inherited baseline and fail closed."""
 
 import importlib.util
+import io
+import json
 import subprocess
 import unittest
 from pathlib import Path
@@ -13,79 +15,295 @@ FORMAT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(FORMAT)
 
 
+def _diagnostic(
+    code: str = "F401", message: str = "unused import", row: int = 1
+) -> dict[str, object]:
+    return {
+        "code": code,
+        "message": message,
+        "location": {"row": row, "column": 1},
+        "end_location": {"row": row, "column": 2},
+    }
+
+
+def _ruff_result(
+    diagnostics: list[dict[str, object]], returncode: int = 1
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.CompletedProcess(
+        args=["ruff"],
+        returncode=returncode,
+        stdout=json.dumps(diagnostics).encode("utf-8"),
+        stderr=b"",
+    )
+
+
 class PythonFormattingTests(unittest.TestCase):
-    def test_empty_diff_does_not_expand_to_the_whole_repository(self):
+    def test_exact_commit_rejects_non_sha_input_before_git(self):
         with (
-            patch.object(FORMAT.subprocess, "check_output", return_value=b"") as diff,
-            patch.object(FORMAT.subprocess, "run") as run,
+            patch.object(FORMAT.subprocess, "check_output") as output,
+            self.assertRaisesRegex(ValueError, "full lowercase commit SHA"),
         ):
-            FORMAT.check_changed_files("a" * 40)
-        run.assert_not_called()
-        self.assertEqual(diff.call_count, 1)
+            FORMAT._exact_commit("HEAD")
+        output.assert_not_called()
+
+    def test_exact_commit_resolves_a_full_commit(self):
+        sha = "a" * 40
+        with patch.object(
+            FORMAT.subprocess, "check_output", return_value=(sha + "\n").encode("ascii")
+        ) as output:
+            self.assertEqual(FORMAT._exact_commit(sha), sha)
+        self.assertEqual(
+            output.call_args.args[0],
+            ["git", "rev-parse", "--verify", sha + "^{commit}"],
+        )
+
+    def test_non_ancestor_base_is_rejected(self):
+        with (
+            patch.object(
+                FORMAT.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(["git"], 1, b"", b""),
+            ),
+            self.assertRaisesRegex(ValueError, "ancestor"),
+        ):
+            FORMAT._require_base_ancestor("a" * 40, "b" * 40)
+
+    def test_changed_python_files_uses_nul_safe_exact_range_and_no_rename_detection(
+        self,
+    ):
+        base = "a" * 40
+        head = "b" * 40
+        names = b"has space.py\0-dash.py\0newline\nname.pyi\0"
+        with patch.object(
+            FORMAT.subprocess, "check_output", return_value=names
+        ) as diff:
+            self.assertEqual(
+                FORMAT.changed_python_files(base, head, "A"),
+                ["has space.py", "-dash.py", "newline\nname.pyi"],
+            )
         self.assertEqual(
             diff.call_args.args[0],
-            ["git", "diff", "--no-renames", "--diff-filter=AM", "--name-only", "-z",
-             "a" * 40 + "..HEAD", "--", "*.py", "*.pyi"],
+            [
+                "git",
+                "diff",
+                "--no-renames",
+                "--diff-filter=A",
+                "--name-only",
+                "-z",
+                base + ".." + head,
+                "--",
+                "*.py",
+                "*.pyi",
+            ],
         )
 
-    def test_modified_paths_receive_only_default_lint(self):
+    def test_ruff_configuration_changes_are_guarded_before_lint(self):
+        with (
+            patch.object(FORMAT, "_changed_paths", return_value=["nested/.ruff.toml"]),
+            patch.object(FORMAT, "_source_if_present") as source,
+        ):
+            self.assertTrue(FORMAT._ruff_configuration_changes("a" * 40, "b" * 40))
+        source.assert_not_called()
+
+    def test_pyproject_without_ruff_settings_does_not_trip_the_configuration_guard(
+        self,
+    ):
+        with (
+            patch.object(FORMAT, "_changed_paths", return_value=["pyproject.toml"]),
+            patch.object(
+                FORMAT,
+                "_source_if_present",
+                side_effect=[b"[project]\nname = 'x'\n", b"[project]\nname = 'y'\n"],
+            ),
+        ):
+            self.assertFalse(FORMAT._ruff_configuration_changes("a" * 40, "b" * 40))
+
+    def test_pyproject_with_ruff_settings_trips_the_configuration_guard(self):
+        with (
+            patch.object(FORMAT, "_changed_paths", return_value=["pyproject.toml"]),
+            patch.object(
+                FORMAT,
+                "_source_if_present",
+                side_effect=[b"[tool.ruff]\n", b"[tool.ruff.lint]\n"],
+            ),
+        ):
+            self.assertTrue(FORMAT._ruff_configuration_changes("a" * 40, "b" * 40))
+
+    def test_empty_diff_does_not_expand_to_the_whole_repository(self):
+        sha = "a" * 40
+        with (
+            patch.object(FORMAT, "_exact_commit", return_value=sha),
+            patch.object(FORMAT, "_head_commit", return_value=sha),
+            patch.object(FORMAT, "_require_base_ancestor") as ancestor,
+            patch.object(
+                FORMAT, "_assert_ruff_configuration_unchanged"
+            ) as configuration,
+            patch.object(
+                FORMAT, "changed_python_files", side_effect=[[], []]
+            ) as changed,
+            patch.object(FORMAT, "_check_modified_file") as modified,
+            patch.object(FORMAT, "_check_added_file") as added,
+        ):
+            FORMAT.check_changed_files(sha)
+        ancestor.assert_called_once_with(sha, sha)
+        configuration.assert_called_once_with(sha, sha)
+        self.assertEqual(changed.call_args_list[0].args, (sha, sha, "M"))
+        self.assertEqual(changed.call_args_list[1].args, (sha, sha, "A"))
+        modified.assert_not_called()
+        added.assert_not_called()
+
+    def test_check_routes_modified_and_added_paths_to_blob_only_checks(self):
+        base = "a" * 40
+        head = "b" * 40
+        with (
+            patch.object(FORMAT, "_exact_commit", return_value=base),
+            patch.object(FORMAT, "_head_commit", return_value=head),
+            patch.object(FORMAT, "_require_base_ancestor"),
+            patch.object(FORMAT, "_assert_ruff_configuration_unchanged"),
+            patch.object(
+                FORMAT,
+                "changed_python_files",
+                side_effect=[["changed.py"], ["added.py"]],
+            ),
+            patch.object(FORMAT, "_check_modified_file") as modified,
+            patch.object(FORMAT, "_check_added_file") as added,
+        ):
+            FORMAT.check_changed_files(base)
+        modified.assert_called_once_with(
+            str(Path(FORMAT.sys.executable).with_name("ruff")), base, head, "changed.py"
+        )
+        added.assert_called_once_with(
+            str(Path(FORMAT.sys.executable).with_name("ruff")), head, "added.py"
+        )
+
+    def test_modified_file_accepts_a_moved_preexisting_diagnostic(self):
         with (
             patch.object(
+                FORMAT,
+                "_source_at_revision",
+                side_effect=[b"\nimport unused\n", b"import unused\n"],
+            ),
+            patch.object(
                 FORMAT.subprocess,
-                "check_output",
-                side_effect=[b"has space.py\0-dash.py\0", b""],
-            ) as diff,
-            patch.object(FORMAT.subprocess, "run") as run,
+                "run",
+                side_effect=[
+                    _ruff_result([_diagnostic(row=2)]),
+                    _ruff_result([_diagnostic(row=1)]),
+                ],
+            ) as run,
         ):
-            FORMAT.check_changed_files("a" * 40)
-        self.assertEqual([call.args[0][3] for call in diff.call_args_list], ["--diff-filter=AM", "--diff-filter=A"])
-        self.assertEqual(run.call_count, 1)
+            FORMAT._check_modified_file("ruff", "a" * 40, "b" * 40, "has space.py")
+        self.assertEqual(run.call_count, 2)
         self.assertEqual(
-            run.call_args.args[0][-3:],
-            ["--", "has space.py", "-dash.py"],
+            run.call_args_list[0].args[0][-3:],
+            ["--stdin-filename", "has space.py", "-"],
         )
-        self.assertNotIn("--select", run.call_args.args[0])
-        self.assertIn("--force-exclude", run.call_args.args[0])
-        self.assertTrue(run.call_args.kwargs["check"])
+        self.assertEqual(run.call_args_list[0].kwargs["input"], b"\nimport unused\n")
 
-    def test_added_and_modified_paths_keep_import_order_and_format_additions_only(self):
+    def test_modified_file_rejects_a_new_diagnostic(self):
+        stderr = io.StringIO()
         with (
             patch.object(
+                FORMAT,
+                "_source_at_revision",
+                side_effect=[b"import unused\n", b"import used\n"],
+            ),
+            patch.object(
                 FORMAT.subprocess,
-                "check_output",
-                side_effect=[b"added.py\0changed.py\0", b"added.py\0"],
-            ) as diff,
-            patch.object(FORMAT.subprocess, "run") as run,
+                "run",
+                side_effect=[
+                    _ruff_result([_diagnostic()]),
+                    _ruff_result([], returncode=0),
+                ],
+            ),
+            patch.object(FORMAT.sys, "stderr", stderr),
+            self.assertRaises(subprocess.CalledProcessError),
         ):
-            FORMAT.check_changed_files("a" * 40)
-        self.assertEqual([call.args[0][3] for call in diff.call_args_list], ["--diff-filter=AM", "--diff-filter=A"])
-        self.assertEqual(run.call_count, 3)
-        self.assertEqual(run.call_args_list[0].args[0][-3:], ["--", "added.py", "changed.py"])
-        self.assertEqual(run.call_args_list[1].args[0][-2:], ["--", "added.py"])
-        self.assertEqual(run.call_args_list[2].args[0][-2:], ["--", "added.py"])
-        self.assertEqual(run.call_args_list[1].args[0][1:3], ["check", "--no-cache"])
-        self.assertIn("--select", run.call_args_list[1].args[0])
-        self.assertEqual(run.call_args_list[2].args[0][1:3], ["format", "--check"])
-        for call in run.call_args_list:
-            self.assertIn("--force-exclude", call.args[0])
-            self.assertTrue(call.kwargs["check"])
+            FORMAT._check_modified_file("ruff", "a" * 40, "b" * 40, "changed.py")
+        self.assertIn("changed.py:1:1: F401 unused import", stderr.getvalue())
 
-    def test_bad_base_and_lint_failure_stop_the_check(self):
+    def test_diagnostic_counter_rejects_one_new_duplicate(self):
+        source = b"import unused\nimport unused\n"
+        current = [_diagnostic(row=1), _diagnostic(row=2)]
+        baseline = [_diagnostic(row=1)]
+        self.assertEqual(
+            FORMAT._new_diagnostics(current, source, baseline, source),
+            [_diagnostic(row=2)],
+        )
+
+    def test_file_level_import_diagnostic_retains_only_its_baseline_count(self):
+        baseline = [
+            _diagnostic(code="I001", message="Import block is un-sorted", row=1)
+        ]
+        current = [_diagnostic(code="I001", message="Import block is un-sorted", row=2)]
+        self.assertEqual(
+            FORMAT._new_diagnostics(
+                current, b"import b\nimport a\n", baseline, b"import a\nimport b\n"
+            ),
+            [],
+        )
+
+    def test_diagnostic_identity_rejects_malformed_locations(self):
+        malformed = _diagnostic()
+        malformed["location"] = {"row": 1, "column": 0}
+        with self.assertRaisesRegex(TypeError, "malformed diagnostic"):
+            FORMAT._diagnostic_identity(malformed, b"import unused\n")
+
+        malformed = _diagnostic()
+        malformed["end_location"] = {"row": 2, "column": 1}
+        with self.assertRaisesRegex(ValueError, "malformed diagnostic"):
+            FORMAT._diagnostic_identity(malformed, b"import unused\n")
+
+    def test_log_safe_failure_output_escapes_control_characters(self):
+        stderr = io.StringIO()
         with (
-            patch.object(FORMAT.subprocess, "check_output", side_effect=subprocess.CalledProcessError(128, "git")),
-            patch.object(FORMAT.subprocess, "run") as run,
+            patch.object(FORMAT.sys, "stderr", stderr),
+            self.assertRaises(subprocess.CalledProcessError),
         ):
-            with self.assertRaises(subprocess.CalledProcessError):
-                FORMAT.check_changed_files("missing")
-            run.assert_not_called()
+            FORMAT._fail_for_new_diagnostics(
+                "ruff", "bad\npath.py", [_diagnostic(message="bad\nmessage")]
+            )
+        self.assertEqual(stderr.getvalue(), "bad\\npath.py:1:1: F401 bad\\nmessage\n")
+
+    def test_ruff_json_rejects_malformed_or_inconsistent_results(self):
+        malformed = subprocess.CompletedProcess(["ruff"], 1, b"not-json", b"")
+        inconsistent = _ruff_result([_diagnostic()], returncode=0)
+        with patch.object(
+            FORMAT.subprocess, "run", side_effect=[malformed, inconsistent]
+        ):
+            with self.assertRaisesRegex(RuntimeError, "malformed JSON"):
+                FORMAT._ruff_json_diagnostics("ruff", "changed.py", b"import unused\n")
+            with self.assertRaisesRegex(RuntimeError, "inconsistent diagnostic"):
+                FORMAT._ruff_json_diagnostics("ruff", "changed.py", b"import unused\n")
+
+    def test_added_file_runs_default_import_and_format_checks_on_the_head_blob(self):
+        source = b"import example\n"
         with (
-            patch.object(FORMAT.subprocess, "check_output", return_value=b"new.py\0") as diff,
-            patch.object(FORMAT.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "ruff")) as run,
+            patch.object(FORMAT, "_source_at_revision", return_value=source) as blob,
+            patch.object(
+                FORMAT, "_ruff_json_diagnostics", side_effect=[[], []]
+            ) as lint,
+            patch.object(FORMAT, "_format_added_source") as format_check,
         ):
-            with self.assertRaises(subprocess.CalledProcessError):
-                FORMAT.check_changed_files("a" * 40)
-            self.assertEqual(run.call_count, 1)
-            self.assertEqual(diff.call_count, 1)
+            FORMAT._check_added_file("ruff", "b" * 40, "added.py")
+        blob.assert_called_once_with("b" * 40, "added.py")
+        self.assertEqual(lint.call_args_list[0].kwargs["select"], None)
+        self.assertEqual(lint.call_args_list[1].kwargs["select"], "I")
+        format_check.assert_called_once_with("ruff", "added.py", source)
+
+    def test_format_added_source_passes_blob_bytes_through_standard_input(self):
+        source = b"x = 1\n"
+        with patch.object(
+            FORMAT.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(["ruff"], 0, b"", b""),
+        ) as run:
+            FORMAT._format_added_source("ruff", "-added.py", source)
+        self.assertEqual(
+            run.call_args.args[0][-3:], ["--stdin-filename", "-added.py", "-"]
+        )
+        self.assertEqual(run.call_args.kwargs["input"], source)
+        self.assertFalse(run.call_args.kwargs["check"])
 
 
 if __name__ == "__main__":
