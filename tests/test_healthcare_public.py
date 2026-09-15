@@ -113,6 +113,10 @@ run_api_contract
         self.assertIn("--enable=no-member", probe_segment)
         self.assertNotIn("--enable=no-member", CHECK_FUNCTIONS.split('[[ "$probe_status"', 1)[1])
         self.assertIn("Pylint runtime dependency inference canary failed (status %s)", CHECK_FUNCTIONS)
+        self.assertIn(
+            '"$inference_root/venv/bin/pylint" --errors-only --init-hook "$runtime_hook" "${inference_targets[@]}"',
+            CHECK_FUNCTIONS,
+        )
 
     def test_inference_targets_fail_closed_before_running_pylint(self):
         with tempfile.TemporaryDirectory() as temporary:
