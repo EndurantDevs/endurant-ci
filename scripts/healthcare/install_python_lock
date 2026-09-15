@@ -29,10 +29,10 @@ PY
 
 temporary_directory=$(mktemp -d "${RUNNER_TEMP:-/tmp}/healthcare-uv-install.XXXXXX")
 trap 'rm -rf -- "$temporary_directory"' EXIT
-lock_file="$input_root/requirements-ci.lock"
+lock_file="$source_root/requirements-ci.lock"
 if [ "${1-}" = coverage ]; then
   lock_file="$temporary_directory/coverage.lock"
-  python - "$lock_file" "$input_root/requirements-ci.lock" <<'PY'
+  python - "$lock_file" "$source_root/requirements-ci.lock" <<'PY'
 from pathlib import Path
 import re
 import sys

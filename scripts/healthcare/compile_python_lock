@@ -11,7 +11,7 @@ python_bin=$(uv --no-config python find "$PYTHON_VERSION")
 test "$("$python_bin" -c 'import platform; print(platform.python_version())')" = "$PYTHON_VERSION"
 
 temporary_directory=$(mktemp -d)
-candidate_lock=$(mktemp "$input_root/requirements-ci.lock.candidate.XXXXXX")
+candidate_lock=$(mktemp "$source_root/requirements-ci.lock.candidate.XXXXXX")
 trap 'rm -rf -- "$temporary_directory"; rm -f -- "$candidate_lock"' EXIT
 input_names=(requirements.txt requirements-dev.txt requirements-ci.in)
 mkdir "$temporary_directory/inputs"
@@ -101,5 +101,5 @@ if ! cmp -s \
   echo "Python requirement inputs changed during lock generation" >&2
   exit 1
 fi
-mv -- "$candidate_lock" requirements-ci.lock
-hash_files "$input_root" requirements-ci.lock
+mv -- "$candidate_lock" "$source_root/requirements-ci.lock"
+hash_files "$source_root" requirements-ci.lock
