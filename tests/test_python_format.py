@@ -129,6 +129,23 @@ class PythonFormattingTests(unittest.TestCase):
         ):
             self.assertTrue(FORMAT._ruff_configuration_changes("a" * 40, "b" * 40))
 
+    def test_quoted_or_inline_ruff_pyproject_settings_trip_the_configuration_guard(self):
+        for contents in (
+            b'[tool."ruff".lint]\nignore = ["F821"]\n',
+            b'[tool]\nruff = { lint = { ignore = ["F821"] } }\n',
+        ):
+            with self.subTest(contents=contents), patch.object(
+                FORMAT, "_changed_paths", return_value=["nested/pyproject.toml"]
+            ), patch.object(
+                FORMAT, "_source_if_present", side_effect=[None, contents]):
+                self.assertTrue(FORMAT._ruff_configuration_changes("a" * 40, "b" * 40))
+
+    def test_malformed_changed_pyproject_fails_closed(self):
+        with patch.object(FORMAT, "_changed_paths", return_value=["pyproject.toml"]), patch.object(
+            FORMAT, "_source_if_present", side_effect=[None, b"[tool.ruff\n"]
+        ), self.assertRaisesRegex(ValueError, "not valid TOML"):
+            FORMAT._ruff_configuration_changes("a" * 40, "b" * 40)
+
     def test_empty_diff_does_not_expand_to_the_whole_repository(self):
         sha = "a" * 40
         with (

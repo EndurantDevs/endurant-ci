@@ -5,13 +5,13 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 _FULL_SHA = re.compile(r"[0-9a-f]{40}\Z")
 _RUFF_CONFIG_NAMES = frozenset({".ruff.toml", "ruff.toml", "pyproject.toml"})
-_RUFF_PYPROJECT_SECTION = re.compile(rb"(?m)^[ \t]*\[tool\.ruff(?:[.\]])")
 _FILE_LEVEL_DIAGNOSTIC_CODES = frozenset({"I001"})
 _MAX_LOG_VALUE_BYTES = 500
 
@@ -107,6 +107,19 @@ def _source_if_present(revision: str, path: str) -> bytes | None:
     return _source_at_revision(revision, path)
 
 
+def _has_ruff_pyproject_settings(content: bytes | None) -> bool:
+    """Parse one pyproject blob so quoted TOML keys cannot bypass the policy guard."""
+
+    if content is None:
+        return False
+    try:
+        document = tomllib.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise ValueError("changed pyproject.toml is not valid TOML") from error
+    tool = document.get("tool")
+    return isinstance(tool, dict) and "ruff" in tool
+
+
 def _ruff_configuration_changes(base: str, head: str) -> bool:
     """Identify changed Ruff policy files before running either side under HEAD policy."""
 
@@ -117,10 +130,7 @@ def _ruff_configuration_changes(base: str, head: str) -> bool:
         if name != "pyproject.toml":
             return True
         contents = (_source_if_present(base, path), _source_if_present(head, path))
-        if any(
-            content is not None and _RUFF_PYPROJECT_SECTION.search(content)
-            for content in contents
-        ):
+        if any(_has_ruff_pyproject_settings(content) for content in contents):
             return True
     return False
 
