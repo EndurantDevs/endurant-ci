@@ -575,7 +575,7 @@ run_container_package() {
 
 run_security() {
     install_python_dependencies
-    python -m pip_audit --disable-pip --require-hashes -r "$repository_root/requirements-ci.lock"
+    python -I -m pip_audit --disable-pip --require-hashes -r "$repository_root/requirements-ci.lock"
     local security_git_common_dir
     security_git_common_dir=$(git rev-parse --path-format=absolute --git-common-dir)
     local event_args=(--env GITHUB_EVENT_PATH)

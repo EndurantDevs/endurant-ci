@@ -4,6 +4,7 @@ set -euo pipefail
 input_root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source_root=${SOURCE_ROOT:?SOURCE_ROOT must identify the public source checkout}
 readonly UV_VERSION=0.12.12
+unset PYTHONPATH || true
 
 case "$#:${1-}" in
   0:|1:coverage) ;;
@@ -11,9 +12,9 @@ case "$#:${1-}" in
 esac
 
 test "$(uv --no-config --version | awk '{print $2}')" = "$UV_VERSION"
-python "$input_root/validate_python_lock_inputs" "$source_root"
+python -I "$input_root/validate_python_lock_inputs" "$source_root"
 
-python - <<'PY'
+python -I - <<'PY'
 import platform
 
 
@@ -32,7 +33,7 @@ trap 'rm -rf -- "$temporary_directory"' EXIT
 lock_file="$source_root/requirements-ci.lock"
 if [ "${1-}" = coverage ]; then
   lock_file="$temporary_directory/coverage.lock"
-  python - "$lock_file" "$source_root/requirements-ci.lock" <<'PY'
+  python -I - "$lock_file" "$source_root/requirements-ci.lock" <<'PY'
 from pathlib import Path
 import re
 import sys
@@ -63,8 +64,12 @@ uv --no-config pip sync \
   --require-hashes \
   --strict \
   "$lock_file"
+uv --no-config pip check --python "$(command -v python)"
+if [ "${1-}" != coverage ]; then
+  python -I "$input_root/verify_python_requirements.py" "$source_root"
+fi
 uv --no-config pip freeze --python "$(command -v python)" --strict > "$temporary_directory/installed.lock"
-python - "$lock_file" "$temporary_directory/installed.lock" <<'PY'
+python -I - "$lock_file" "$temporary_directory/installed.lock" <<'PY'
 from pathlib import Path
 import re
 import sys
