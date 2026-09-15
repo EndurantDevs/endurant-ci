@@ -3,12 +3,13 @@ input_root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source_root=${SOURCE_ROOT:?SOURCE_ROOT must identify the public source checkout}
 cd "$input_root"
 set -euo pipefail
+unset PYTHONPATH || true
 
 readonly UV_VERSION=0.12.12
 readonly PYTHON_VERSION=3.14.7
 test "$(uv --no-config --version | awk '{print $2}')" = "$UV_VERSION"
 python_bin=$(uv --no-config python find "$PYTHON_VERSION")
-test "$("$python_bin" -c 'import platform; print(platform.python_version())')" = "$PYTHON_VERSION"
+test "$("$python_bin" -I -c 'import platform; print(platform.python_version())')" = "$PYTHON_VERSION"
 
 temporary_directory=$(mktemp -d)
 candidate_lock=$(mktemp "$source_root/requirements-ci.lock.candidate.XXXXXX")
@@ -19,7 +20,7 @@ mkdir "$temporary_directory/inputs"
 hash_files() {
   local directory=$1
   shift
-  (cd "$directory" && "$python_bin" - "$@" <<'PY'
+  (cd "$directory" && "$python_bin" -I - "$@" <<'PY'
 import hashlib
 from pathlib import Path
 import sys
@@ -53,7 +54,7 @@ uv --no-config pip compile "$temporary_directory/inputs/requirements-ci.in" \
   --output-file "$candidate_lock" \
   --quiet
 
-"$python_bin" - "$temporary_directory/inputs" "$candidate_lock" "$UV_VERSION" <<'PY'
+"$python_bin" -I - "$temporary_directory/inputs" "$candidate_lock" "$UV_VERSION" <<'PY'
 import hashlib
 from pathlib import Path
 import re

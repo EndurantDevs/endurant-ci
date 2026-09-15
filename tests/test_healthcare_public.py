@@ -3,16 +3,16 @@
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
+from importlib import metadata
+from pathlib import Path
 
 import yaml
-
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECK_FUNCTIONS = (ROOT / "scripts/healthcare/check").read_text().rsplit("\ncase ", 1)[0]
@@ -245,11 +245,19 @@ run_provider_profile_postgres postgresql://synthetic/original
         self.assertNotIn("--constraints", generator)
         self.assertNotIn("python -m pip install", check + installer)
         self.assertIn('lock_file="$source_root/requirements-ci.lock"', installer)
-        self.assertIn('python - "$lock_file" "$source_root/requirements-ci.lock"', installer)
+        self.assertIn('python -I - "$lock_file" "$source_root/requirements-ci.lock"', installer)
         self.assertIn('pip_audit --disable-pip --require-hashes -r "$repository_root/requirements-ci.lock"', check)
+        self.assertIn('uv --no-config pip check --python "$(command -v python)"', installer)
+        self.assertIn('unset PYTHONPATH || true', installer)
+        self.assertIn('python -I "$input_root/validate_python_lock_inputs" "$source_root"', installer)
+        self.assertIn('python -I "$input_root/verify_python_requirements.py" "$source_root"', installer)
+        self.assertIn('python -I -m pip_audit', check)
+        self.assertIn('"$python_bin" -I -c', generator)
+        self.assertIn('"$python_bin" -I -', generator)
+        self.assertIn('if [ "${1-}" != coverage ]; then', installer)
         self.assertFalse((ROOT / "scripts/healthcare/requirements-ci.lock").exists())
 
-    def test_source_owned_ci_lock_rejects_cross_source_and_header_mutations(self):
+    def test_source_owned_ci_lock_header_validation_rejects_cross_source_and_header_mutations(self):
         validator = ROOT / "scripts/healthcare/validate_python_lock_inputs"
         ci_input = ROOT / "scripts/healthcare/requirements-ci.in"
 
@@ -274,7 +282,7 @@ run_provider_profile_postgres postgresql://synthetic/original
 
         def validate(source: Path) -> subprocess.CompletedProcess[str]:
             return subprocess.run(
-                [sys.executable, str(validator), str(source)],
+                [sys.executable, "-I", str(validator), str(source)],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -330,9 +338,107 @@ run_provider_profile_postgres postgresql://synthetic/original
             self.assertNotEqual(missing_audit.returncode, 0)
             self.assertIn("must retain", missing_audit.stderr)
 
+            write_source_lock(first)
+            first_lock.write_text(
+                first_lock.read_text(encoding="utf-8") + "--index-url https://example.invalid\n",
+                encoding="utf-8",
+            )
+            directive = validate(first)
+            self.assertNotEqual(directive.returncode, 0)
+            self.assertIn("unsupported content", directive.stderr)
+
+            write_source_lock(first)
+            first_lock.write_text(
+                first_lock.read_text(encoding="utf-8").replace(
+                    "    --hash=sha256:" + "a" * 64,
+                    "    --hash=sha256:" + "a" * 64
+                    + "\n    --hash=sha256:"
+                    + "c" * 64,
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            extra_terminal_hash = validate(first)
+            self.assertNotEqual(extra_terminal_hash.returncode, 0)
+            self.assertIn("unsupported content", extra_terminal_hash.stderr)
+
+            write_source_lock(first)
+            first_lock.write_text(
+                first_lock.read_text(encoding="utf-8").replace(
+                    "    --hash=sha256:" + "a" * 64,
+                    "    --hash=sha256:" + "a" * 64 + " " + "\\",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            unfinished_hash = validate(first)
+            self.assertNotEqual(unfinished_hash.returncode, 0)
+            self.assertIn("unfinished continuation", unfinished_hash.stderr)
+
             missing_lock = validate(missing)
             self.assertNotEqual(missing_lock.returncode, 0)
             self.assertIn("missing from the source checkout", missing_lock.stderr)
+
+    def test_source_lock_verifier_isolated_from_source_pythonpath(self):
+        verifier_source = ROOT / "scripts/healthcare/verify_python_requirements.py"
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            helper = root / "helper"
+            helper.mkdir()
+            verifier = helper / "verify_python_requirements.py"
+            verifier.write_text(verifier_source.read_text(encoding="utf-8"), encoding="utf-8")
+            version = metadata.version("pip")
+            (source / "requirements.txt").write_text(
+                f"pip=={version}\n", encoding="utf-8"
+            )
+            (source / "requirements-dev.txt").write_text(
+                "-r requirements.txt\n", encoding="utf-8"
+            )
+            (helper / "requirements-ci.in").write_text(
+                "-r requirements-dev.txt\n", encoding="utf-8"
+            )
+            (source / "requirements-ci.lock").write_text(
+                f"pip=={version}\n", encoding="utf-8"
+            )
+            marker = root / "source-imported"
+            (source / "sitecustomize.py").write_text(
+                "from pathlib import Path\n"
+                "import os\n"
+                "Path(os.environ['IMPORT_MARKER']).write_text('unexpected', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            fake_package = source / "packaging"
+            fake_package.mkdir()
+            (fake_package / "__init__.py").write_text(
+                "from pathlib import Path\n"
+                "import os\n"
+                "Path(os.environ['IMPORT_MARKER']).write_text('unexpected', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            fake_metadata = source / "pip-999.0.dist-info"
+            fake_metadata.mkdir()
+            (fake_metadata / "METADATA").write_text(
+                "Metadata-Version: 2.1\nName: pip\nVersion: 999.0\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [sys.executable, "-I", str(verifier), str(source)],
+                check=False,
+                capture_output=True,
+                env={
+                    **os.environ,
+                    "PYTHONPATH": str(source),
+                    "IMPORT_MARKER": str(marker),
+                },
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(marker.exists())
 
     def test_installer_coverage_profile_and_exact_set_checks_are_executable(self):
         installer = (ROOT / "scripts/healthcare/install_python_lock").read_text()
