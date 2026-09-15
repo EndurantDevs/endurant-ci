@@ -244,6 +244,26 @@ run_python_inference() (
   uv --no-config pip sync --python "$inference_root/venv/bin/python" --require-hashes --only-binary=:all: \
     "$CI_ROOT/scripts/requirements-python-quality.lock"
   ci_phase_end
+  local -a inference_targets=(
+    api/billing_search_selector_contract.py
+    api/billing_search_transport_contract.py
+    api/mrf_discovery_catalog_manifest.py
+    api/plan_pricing_state_scan_contract.py
+    process/formulary_fhir/uhc_drug_parser_contract.py
+    process/formulary_fhir/uhc_drug_transport_contract.py
+    process/provider_directory_rooted_graph_source_contract.py
+    process/provider_directory_rooted_graph_twin_admission_contract.py
+    process/provider_directory_rooted_graph_twin_contract.py
+    process/provider_directory_validated_publication_contract.py
+    public_evidence/evidence_record_token_policy.py
+  )
+  local inference_target
+  for inference_target in "${inference_targets[@]}"; do
+    [[ -f "$inference_target" ]] || {
+      printf 'Pylint inference target is missing: %s\n' "$inference_target" >&2
+      return 2
+    }
+  done
   ci_phase_begin python-inference
   # Infer against the verified application dependencies, after the pinned lint packages.
   runtime_hook=$(python -c 'import site; print("import sys; sys.path.extend(" + repr(site.getsitepackages()) + ")")')
@@ -255,19 +275,7 @@ run_python_inference() (
     printf 'Pylint runtime dependency inference canary failed (status %s):\n%s\n' "$probe_status" "$probe_output" >&2
     return 2
   }
-  "$inference_root/venv/bin/pylint" --init-hook "$runtime_hook" \
-    api/billing_search_selector_contract.py \
-    api/billing_search_transport_contract.py \
-    api/mrf_discovery_catalog_manifest.py \
-    api/plan_pricing_state_scan_contract.py \
-    process/fhir_request_failure_policy.py \
-    process/formulary_fhir/uhc_drug_parser_contract.py \
-    process/formulary_fhir/uhc_drug_transport_contract.py \
-    process/provider_directory_rooted_graph_source_contract.py \
-    process/provider_directory_rooted_graph_twin_admission_contract.py \
-    process/provider_directory_rooted_graph_twin_contract.py \
-    process/provider_directory_validated_publication_contract.py \
-    public_evidence/evidence_record_token_policy.py
+  "$inference_root/venv/bin/pylint" --init-hook "$runtime_hook" "${inference_targets[@]}"
   ci_phase_end
 )
 

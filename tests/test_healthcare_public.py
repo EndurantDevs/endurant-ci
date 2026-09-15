@@ -114,6 +114,29 @@ run_api_contract
         self.assertNotIn("--enable=no-member", CHECK_FUNCTIONS.split('[[ "$probe_status"', 1)[1])
         self.assertIn("Pylint runtime dependency inference canary failed (status %s)", CHECK_FUNCTIONS)
 
+    def test_inference_targets_fail_closed_before_running_pylint(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT), "RUNNER_TEMP": str(root)}
+            script = CHECK_FUNCTIONS + r'''
+uv() { :; }
+run_python_inference
+'''
+            result = subprocess.run(
+                ["bash", "-euc", script],
+                check=False,
+                cwd=source,
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("Pylint inference target is missing: api/billing_search_selector_contract.py", result.stderr)
+            self.assertEqual(set(root.iterdir()), {source})
+        self.assertNotIn("process/fhir_request_failure_policy.py", CHECK_FUNCTIONS)
+
     def test_state_profile_native_selection_is_source_aware_and_has_database_dsn(self):
         tennessee_paths = (
             "tests/test_tennessee_profile_registry.py",
