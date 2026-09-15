@@ -37,9 +37,9 @@ def render_workflow(kind, revision, caller):
         workflow["env"] = canonical["env"]
     workflow["run-name"] = "${{ " + METADATA_ONLY + " && 'CI metadata update' || 'CI' }}"
     workflow["concurrency"] = {
-        "group": "${{ " + METADATA_ONLY + " && format('ci-metadata-{0}', github.run_id) || "
+        "group": "${{ " + METADATA_ONLY + " && format('ci-metadata-{0}', github.event.pull_request.number) || "
                  "github.event_name == 'push' && format('ci-push-{0}', github.run_id) || format('ci-{0}', github.ref) }}",
-        "cancel-in-progress": "${{ github.event_name == 'pull_request' && !(" + METADATA_ONLY + ") }}",
+        "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
     }
     workflow["jobs"] = {"smoke": workflow["jobs"]["smoke"], **canonical["jobs"]}
     # Source execution remains read-only; privileged jobs execute pinned helpers only.
@@ -120,7 +120,8 @@ def render_workflow(kind, revision, caller):
         if condition.startswith(GUARD) and condition.endswith(")"):
             condition = condition[len(GUARD):-1]
         # Required checks must exist in the latest PR suite, including metadata edits.
-        if job_id == "smoke":
+        metadata_required = job_id == "smoke" or (kind == "healthcare" and job_id == "source-validation")
+        if metadata_required:
             job["name"] = label
             job["if"] = "${{ " + condition + " }}"
         else:

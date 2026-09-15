@@ -587,13 +587,59 @@ jobs:
   source-validation:
     name: Validation complete
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 45
     if: ${{ always() }}
     needs:
     - measurement
-    permissions: {}
+    permissions:
+      actions: read
     steps:
     - name: Require complete public validation
       env:
+        GH_TOKEN: ${{ github.token }}
+        METADATA_ONLY: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.title && !github.event.changes.base }}
+        PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+        SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
         RESULTS: ${{ toJSON(needs.*.result) }}
-      run: jq -e 'length > 0 and all(. == "success")' <<< "$RESULTS"
+      run: |
+        if [ "$METADATA_ONLY" != true ]; then
+          jq -e 'length > 0 and all(. == "success")' <<< "$RESULTS"
+          exit 0
+        fi
+
+        deadline=$((SECONDS + 2400))
+        while :; do
+          validation_state="$(
+            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=pull_request&head_sha=$SOURCE_SHA&per_page=100" \
+              --jq '[.workflow_runs[]
+                | select(.name == "CI" and .display_title == "CI")
+                | select(any(.pull_requests[]?; .number == (env.PR_NUMBER | tonumber) and .head.sha == env.SOURCE_SHA and .base.sha == env.BASE_SHA))
+                | {run_started_at, created_at, id, run_attempt, status, conclusion}]
+                | sort_by([(.run_started_at // .created_at), .id, .run_attempt])
+                | last
+                | if . == null then "pending"
+                  elif .status != "completed" then "pending"
+                  elif .conclusion == "success" then "success"
+                  else "failed"
+                  end'
+          )"
+          case "$validation_state" in
+            success) exit 0 ;;
+            failed)
+              printf 'No successful full validation exists for source %s at base %s.\n' "$SOURCE_SHA" "$BASE_SHA" >&2
+              exit 1
+              ;;
+            pending)
+              if (( SECONDS >= deadline )); then
+                printf 'Timed out waiting for full validation of source %s at base %s.\n' "$SOURCE_SHA" "$BASE_SHA" >&2
+                exit 1
+              fi
+              sleep 15
+              ;;
+            *)
+              printf 'Unexpected full-validation state: %s.\n' "$validation_state" >&2
+              exit 1
+              ;;
+          esac
+        fi
