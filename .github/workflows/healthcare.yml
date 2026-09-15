@@ -610,7 +610,7 @@ jobs:
 
         deadline=$((SECONDS + 2400))
         while :; do
-          validation_state="$(
+          if ! validation_state="$(
             gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=pull_request&head_sha=$SOURCE_SHA&per_page=100" \
               --jq '[.workflow_runs[]
                 | select(.name == "CI" and .display_title == "CI")
@@ -623,7 +623,9 @@ jobs:
                   elif .conclusion == "success" then "success"
                   else "failed"
                   end'
-          )"
+          )"; then
+            validation_state=pending
+          fi
           case "$validation_state" in
             success) exit 0 ;;
             failed)
@@ -642,4 +644,4 @@ jobs:
               exit 1
               ;;
           esac
-        fi
+        done
