@@ -159,7 +159,6 @@ run_quality() {
     "$CI_ROOT/scripts/requirements-python-quality.lock"
   ci_phase_end
   ci_phase_begin python-quality
-  ruff check --no-cache .
   python "$CI_ROOT/scripts/python_format.py" "$BASE_SHA"
   python -m compileall api process db public_evidence scripts main.py
   python scripts/coverage_reports.py --check

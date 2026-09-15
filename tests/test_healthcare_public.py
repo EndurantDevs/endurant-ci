@@ -32,7 +32,6 @@ commit_message_policy() { printf 'commit policy\n'; }
 prepare_python_environment() { printf 'quality environment\n'; }
 install_python_dependencies() { printf 'runtime dependencies\n'; return 17; }
 uv() { printf 'uv %s\n' "$*"; }
-ruff() { printf 'ruff %s\n' "$*"; }
 pylint() { printf 'pylint %s\n' "$*"; }
 python() { printf 'python %s\n' "$*"; }
 run_quality
@@ -40,12 +39,34 @@ run_quality
             result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         for retained in ("commit policy", "requirements-python-quality.lock", "--require-hashes",
-                         "ruff check --no-cache", "python_format.py", "compileall", "coverage_reports.py --check",
+                         "python_format.py", "compileall", "coverage_reports.py --check",
                          "request_time_external_call_guard.py"):
             self.assertIn(retained, result.stdout)
+        self.assertNotIn("ruff check --no-cache .", CHECK_FUNCTIONS)
         for moved in ("runtime dependencies", "readability_budget.py", "test_coverage_forecast.py",
                       "provider_directory_runtime_contract.py", "generate_provider_directory_support_docs.py"):
             self.assertNotIn(moved, result.stdout)
+
+    def test_quality_stops_after_changed_file_lint_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = {**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT), "BASE_SHA": "a" * 40}
+            script = CHECK_FUNCTIONS + r'''
+commit_message_policy() { :; }
+prepare_python_environment() { :; }
+uv() { :; }
+python() {
+  printf 'python %s\n' "$*"
+  case "$1" in
+    */python_format.py) return 23 ;;
+  esac
+}
+run_quality
+'''
+            result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertIn("python_format.py", result.stdout)
+        for later_stage in ("compileall", "coverage_reports.py", "request_time_external_call_guard.py"):
+            self.assertNotIn(later_stage, result.stdout)
 
     def test_runtime_contracts_remain_mandatory_in_the_api_lane(self):
         with tempfile.TemporaryDirectory() as temporary:
