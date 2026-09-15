@@ -2,7 +2,10 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
+import re
+import subprocess
 import tempfile
 import unittest
 
@@ -39,22 +42,27 @@ class RenderWorkflowChecks(unittest.TestCase):
                             continue  # Its complete privilege and execution contract is checked below.
                         template = original["jobs"][job_id] if job_id == "smoke" else canonical["jobs"][job_id]
                         expected = json.loads(json.dumps(template).replace("${{ inputs.ci_revision }}", "1" * 40))
-                        if job_id != "smoke":
+                        metadata_required = job_id == "smoke" or (kind == "healthcare" and job_id == "source-validation")
+                        if not metadata_required:
                             expected["name"] = RENDERER.job_name(expected["name"], job_id)
                         condition = expected.get("if", "success()").removeprefix("${{").removesuffix("}}").strip()
-                        expected["if"] = "${{ success() }}" if job_id == "smoke" else "${{ " + RENDERER.GUARD + condition + ") }}"
+                        expected["if"] = (
+                            "${{ " + condition + " }}"
+                            if metadata_required
+                            else "${{ " + RENDERER.GUARD + condition + ") }}"
+                        )
                         self.assertEqual(job, expected)
                         for step in job.get("steps", []):
                             if step.get("with", {}).get("repository") == "EndurantDevs/endurant-ci":
                                 self.assertEqual(step["with"]["ref"], "1" * 40)
                     self.assertIn(RENDERER.METADATA_ONLY, workflow["run-name"])
-                    self.assertIn("format('ci-metadata-{0}', github.run_id)", workflow["concurrency"]["group"])
+                    self.assertIn("format('ci-metadata-{0}', github.event.pull_request.number)",
+                                  workflow["concurrency"]["group"])
                     self.assertIn("format('ci-{0}', github.ref)", workflow["concurrency"]["group"])
                     self.assertIn("github.event_name == 'push' && format('ci-push-{0}', github.run_id)",
                                   workflow["concurrency"]["group"])
                     self.assertEqual(workflow["concurrency"]["cancel-in-progress"],
-                                     "${{ github.event_name == 'pull_request' && !(" + RENDERER.METADATA_ONLY + ") }}")
-                    self.assertIn(RENDERER.METADATA_ONLY, workflow["concurrency"]["cancel-in-progress"])
+                                     "${{ github.event_name == 'pull_request' }}")
                     caller.write_text(rendered)
                     self.assertEqual(RENDERER.render_workflow(kind, "1" * 40, caller), rendered)
                     refreshed = yaml.safe_load(RENDERER.render_workflow(kind, "2" * 40, caller))
@@ -146,11 +154,130 @@ class RenderWorkflowChecks(unittest.TestCase):
                     self.assertEqual(workflow["permissions"], {"contents": "read", "pull-requests": "read", "actions": "read"})
                     self.assertIn("CI metadata update", workflow["run-name"])
                     for job_id, job in workflow["jobs"].items():
-                        if job_id != "smoke":
+                        metadata_required = job_id == "smoke" or (kind == "healthcare" and job_id == "source-validation")
+                        if not metadata_required:
                             self.assertIn(RENDERER.GUARD, job["if"])
                             self.assertIn("(metadata only)", job["name"])
                     caller.write_text(rendered)
                     self.assertEqual(RENDERER.render_workflow(kind, "1" * 40, caller), rendered)
+
+    def test_healthcare_metadata_edits_keep_required_validation_context(self):
+        original = {"name": "CI", "on": {"pull_request": {}},
+                    "jobs": {"smoke": {"name": "portable import checks", "runs-on": "ubuntu-latest",
+                                       "steps": [{"run": "echo synthetic"}]}}}
+        with tempfile.TemporaryDirectory() as temporary:
+            caller = Path(temporary) / "ci.yml"
+            caller.write_text(yaml.safe_dump(original))
+            workflow = yaml.safe_load(RENDERER.render_workflow("healthcare", "1" * 40, caller))
+        source_validation = workflow["jobs"]["source-validation"]
+        self.assertEqual(source_validation["name"], "Validation complete")
+        self.assertEqual(source_validation["timeout-minutes"], 45)
+        self.assertEqual(source_validation["if"], "${{ always() }}")
+        self.assertEqual(source_validation["permissions"], {"actions": "read"})
+        step = source_validation["steps"][0]
+        self.assertEqual(step["env"], {
+            "GH_TOKEN": "${{ github.token }}",
+            "METADATA_ONLY": "${{ " + RENDERER.METADATA_ONLY + " }}",
+            "PR_NUMBER": "${{ github.event.pull_request.number || '' }}",
+            "SOURCE_SHA": "${{ github.event.pull_request.head.sha || github.sha }}",
+            "BASE_SHA": "${{ github.event.pull_request.base.sha || '' }}",
+            "RESULTS": "${{ toJSON(needs.*.result) }}",
+        })
+        self.assertEqual(step["run"], (
+            "if [ \"$METADATA_ONLY\" != true ]; then\n"
+            "  jq -e 'length > 0 and all(. == \"success\")' <<< \"$RESULTS\"\n"
+            "  exit 0\n"
+            "fi\n\n"
+            "deadline=$((SECONDS + 2400))\n"
+            "while :; do\n"
+            "  validation_state=\"$(\n"
+            "    gh api \"repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=pull_request&head_sha=$SOURCE_SHA&per_page=100\" \\\n"
+            "      --jq '[.workflow_runs[]\n"
+            "        | select(.name == \"CI\" and .display_title == \"CI\")\n"
+            "        | select(any(.pull_requests[]?; .number == (env.PR_NUMBER | tonumber) and .head.sha == env.SOURCE_SHA and .base.sha == env.BASE_SHA))\n"
+            "        | {run_started_at, created_at, id, run_attempt, status, conclusion}]\n"
+            "        | sort_by([(.run_started_at // .created_at), .id, .run_attempt])\n"
+            "        | last\n"
+            "        | if . == null then \"pending\"\n"
+            "          elif .status != \"completed\" then \"pending\"\n"
+            "          elif .conclusion == \"success\" then \"success\"\n"
+            "          else \"failed\"\n"
+            "          end'\n"
+            "  )\"\n"
+            "  case \"$validation_state\" in\n"
+            "    success) exit 0 ;;\n"
+            "    failed)\n"
+            "      printf 'No successful full validation exists for source %s at base %s.\\n' \"$SOURCE_SHA\" \"$BASE_SHA\" >&2\n"
+            "      exit 1\n"
+            "      ;;\n"
+            "    pending)\n"
+            "      if (( SECONDS >= deadline )); then\n"
+            "        printf 'Timed out waiting for full validation of source %s at base %s.\\n' \"$SOURCE_SHA\" \"$BASE_SHA\" >&2\n"
+            "        exit 1\n"
+            "      fi\n"
+            "      sleep 15\n"
+            "      ;;\n"
+            "    *)\n"
+            "      printf 'Unexpected full-validation state: %s.\\n' \"$validation_state\" >&2\n"
+            "      exit 1\n"
+            "      ;;\n"
+            "  esac\n"
+            "fi\n"
+        ))
+
+    def test_healthcare_metadata_validation_uses_the_latest_matching_full_run(self):
+        original = {"name": "CI", "on": {"pull_request": {}},
+                    "jobs": {"smoke": {"name": "portable import checks", "runs-on": "ubuntu-latest",
+                                       "steps": [{"run": "echo synthetic"}]}}}
+        with tempfile.TemporaryDirectory() as temporary:
+            caller = Path(temporary) / "ci.yml"
+            caller.write_text(yaml.safe_dump(original))
+            workflow = yaml.safe_load(RENDERER.render_workflow("healthcare", "1" * 40, caller))
+        run = workflow["jobs"]["source-validation"]["steps"][0]["run"]
+        query = re.search(r"--jq '(.+?)'\n\s+\)\"", run, re.DOTALL).group(1)
+
+        def full_run(*, started_at, identifier, attempt=1, status="completed", conclusion="success",
+                     title="CI", number=17, head="source", base="base", created_at=None):
+            return {
+                "name": "CI", "display_title": title, "head_sha": head,
+                "run_started_at": started_at, "created_at": created_at or started_at,
+                "id": identifier, "run_attempt": attempt, "status": status, "conclusion": conclusion,
+                "pull_requests": [{"number": number, "head": {"sha": head}, "base": {"sha": base}}],
+            }
+
+        def state(workflow_runs):
+            result = subprocess.run(
+                ["jq", "--raw-output", query], input=json.dumps({"workflow_runs": workflow_runs}),
+                text=True, capture_output=True, check=False,
+                env={**os.environ, "PR_NUMBER": "17", "SOURCE_SHA": "source", "BASE_SHA": "base"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.strip()
+
+        old_success = full_run(started_at="2026-01-01T10:00:00Z", identifier=10)
+        later_failure = full_run(started_at="2026-01-01T11:00:00Z", identifier=11, conclusion="failure")
+        rerun_success = full_run(started_at="2026-01-01T12:00:00Z", identifier=10, attempt=2,
+                                 created_at="2026-01-01T09:00:00Z")
+        in_progress = full_run(started_at="2026-01-01T13:00:00Z", identifier=12,
+                               status="in_progress", conclusion=None)
+        metadata = full_run(started_at="2026-01-01T14:00:00Z", identifier=13,
+                            title="CI metadata update", conclusion="failure")
+        wrong_pr = full_run(started_at="2026-01-01T15:00:00Z", identifier=14, number=18)
+        wrong_head = full_run(started_at="2026-01-01T15:00:00Z", identifier=15, head="other-source")
+        wrong_base = full_run(started_at="2026-01-01T15:00:00Z", identifier=16, base="other-base")
+
+        with self.subTest("latest full failure blocks"):
+            self.assertEqual(state([old_success, later_failure]), "failed")
+        with self.subTest("newer rerun succeeds"):
+            self.assertEqual(state([later_failure, rerun_success]), "success")
+        with self.subTest("in-progress full run waits"):
+            self.assertEqual(state([old_success, in_progress]), "pending")
+        with self.subTest("metadata run is ignored"):
+            self.assertEqual(state([old_success, metadata]), "success")
+        with self.subTest("wrong identity is ignored"):
+            self.assertEqual(state([wrong_pr, wrong_head, wrong_base]), "pending")
+        with self.subTest("no full run waits"):
+            self.assertEqual(state([]), "pending")
 
     def test_revision_and_job_labels_cannot_inject_expressions(self):
         for label in ("${{ inputs.name }}", "bad' || true || '"):
