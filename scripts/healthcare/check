@@ -249,10 +249,10 @@ run_python_inference() (
   runtime_hook=$(python -c 'import site; print("import sys; sys.path.extend(" + repr(site.getsitepackages()) + ")")')
   probe_status=0
   probe_output=$(printf 'from aiohttp import client\nimport orjson\nclient.quality_probe_missing_member()\norjson.quality_probe_missing_member()\n' | \
-    "$inference_root/venv/bin/pylint" --init-hook "$runtime_hook" --from-stdin quality_inference_probe.py) || probe_status=$?
+    "$inference_root/venv/bin/pylint" --enable=no-member --init-hook "$runtime_hook" --from-stdin quality_inference_probe.py) || probe_status=$?
   [[ "$probe_status" == 2 && "$probe_output" == *"'aiohttp.client' has no 'quality_probe_missing_member'"* \
     && "$probe_output" == *"'orjson' has no 'quality_probe_missing_member'"* ]] || {
-    echo 'Pylint runtime dependency inference canary failed' >&2
+    printf 'Pylint runtime dependency inference canary failed (status %s):\n%s\n' "$probe_status" "$probe_output" >&2
     return 2
   }
   "$inference_root/venv/bin/pylint" --init-hook "$runtime_hook" \
