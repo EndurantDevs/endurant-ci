@@ -275,7 +275,7 @@ run_python_inference() (
     printf 'Pylint runtime dependency inference canary failed (status %s):\n%s\n' "$probe_status" "$probe_output" >&2
     return 2
   }
-  "$inference_root/venv/bin/pylint" --init-hook "$runtime_hook" "${inference_targets[@]}"
+  "$inference_root/venv/bin/pylint" --errors-only --init-hook "$runtime_hook" "${inference_targets[@]}"
   ci_phase_end
 )
 
