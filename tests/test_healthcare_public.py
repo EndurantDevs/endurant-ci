@@ -108,6 +108,10 @@ run_api_contract
         self.assertIn("sys.path.extend", CHECK_FUNCTIONS)
         self.assertIn("orjson.quality_probe_missing_member", CHECK_FUNCTIONS)
         self.assertIn("client.quality_probe_missing_member", CHECK_FUNCTIONS)
+        probe_segment = CHECK_FUNCTIONS.split("probe_output=", 1)[1].split('[[ "$probe_status"', 1)[0]
+        self.assertIn("--enable=no-member", probe_segment)
+        self.assertNotIn("--enable=no-member", CHECK_FUNCTIONS.split('[[ "$probe_status"', 1)[1])
+        self.assertIn("Pylint runtime dependency inference canary failed (status %s)", CHECK_FUNCTIONS)
 
     def test_state_profile_native_selection_is_source_aware_and_has_database_dsn(self):
         tennessee_paths = (
