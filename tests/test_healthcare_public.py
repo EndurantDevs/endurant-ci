@@ -887,6 +887,64 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                 self.assertTrue(ignored[0].startswith("\t"))
                 self.assertEqual(executed, [f"{dsn}\t-m pytest -q {test_path}"])
 
+    def test_custom_import_postgres_tests_use_only_the_core_postgres_lane(self):
+        test_paths = (
+            "tests/test_custom_import_execution_postgres.py",
+            "tests/test_custom_import_publication_postgres.py",
+        )
+        dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
+        for present_paths in ((), test_paths[:1], test_paths):
+            with self.subTest(present_paths=present_paths), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "source"
+                (source / "tests").mkdir(parents=True)
+                for test_path in present_paths:
+                    (source / test_path).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
+                call_log = root / "calls"
+                env = {
+                    **os.environ,
+                    "SOURCE_ROOT": str(source),
+                    "CI_ROOT": str(ROOT),
+                    "CI_DEPS_READY": "1",
+                    "COVERAGE_BASE_SHA": "a" * 40,
+                    "HLTHPRT_DB_PASSWORD": "postgres",
+                    "HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN": "",
+                    "CALL_LOG": str(call_log),
+                }
+                script = CHECK_FUNCTIONS + r'''
+mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
+prepare_debug_rust_binaries() { :; }
+create_test_database() { :; }
+drop_test_database() { :; }
+python() {
+  printf '%s\t%s\n' "${HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN:-}" "$*" >> "$CALL_LOG"
+}
+timeout() {
+  shift 2
+  "$@"
+}
+run_python_main 0
+run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
+'''
+                subprocess.run(["bash", "-euc", script], cwd=source, env=env, check=True)
+                calls = call_log.read_text().splitlines()
+                main_call = next(call for call in calls if "--ci-shard-count 4" in call)
+                for test_path in test_paths:
+                    if test_path in present_paths:
+                        self.assertIn(f"--ignore {test_path}", main_call)
+                    else:
+                        self.assertNotIn(test_path, main_call)
+                executions = [
+                    call
+                    for call in calls
+                    if call.startswith(f"{dsn}\t-m pytest -q")
+                    and any(test_path in call for test_path in test_paths)
+                ]
+                if present_paths:
+                    self.assertEqual(executions, [f"{dsn}\t-m pytest -q {' '.join(present_paths)}"])
+                else:
+                    self.assertEqual(executions, [])
+
 
 if __name__ == "__main__":
     unittest.main()
