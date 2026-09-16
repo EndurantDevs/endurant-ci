@@ -190,6 +190,13 @@ run_python_main() {
   if [ -f "$repository_root/tests/test_npi_result_archive_postgres.py" ]; then
     collection_args+=(--ignore tests/test_npi_result_archive_postgres.py)
   fi
+  for test_path in \
+    tests/test_custom_import_execution_postgres.py \
+    tests/test_custom_import_publication_postgres.py; do
+    if [ -f "$repository_root/$test_path" ]; then
+      collection_args+=(--ignore "$test_path")
+    fi
+  done
   export COVERAGE_FILE=${COVERAGE_FILE:-$(artifact_path ".coverage.main.${shard}")}
   ci_phase_begin python-tests
   timeout --foreground 420s python -m pytest -q -n 1 --dist loadscope --durations=20 \
@@ -769,6 +776,21 @@ run_core_postgres() {
     HLTHPRT_NPI_RESULT_ARCHIVE_TEST_DSN=$dsn \
       timeout --foreground 295s python -m pytest -q \
         tests/test_npi_result_archive_postgres.py
+  fi
+
+  local custom_import_postgres_tests=()
+  local custom_import_test_path
+  for custom_import_test_path in \
+    tests/test_custom_import_execution_postgres.py \
+    tests/test_custom_import_publication_postgres.py; do
+    if [ -f "$repository_root/$custom_import_test_path" ]; then
+      custom_import_postgres_tests+=("$custom_import_test_path")
+    fi
+  done
+  if [ "${#custom_import_postgres_tests[@]}" -gt 0 ]; then
+    HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN=$dsn \
+      timeout --foreground 295s python -m pytest -q \
+        "${custom_import_postgres_tests[@]}"
   fi
 
   HLTHPRT_PTG2_V3_LIFECYCLE_POSTGRES_DSN=$dsn \
