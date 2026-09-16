@@ -1,5 +1,6 @@
 """Changed-file Ruff checks preserve an exact inherited baseline and fail closed."""
 
+import hashlib
 import importlib.util
 import io
 import json
@@ -146,6 +147,63 @@ class PythonFormattingTests(unittest.TestCase):
         ), self.assertRaisesRegex(ValueError, "not valid TOML"):
             FORMAT._ruff_configuration_changes("a" * 40, "b" * 40)
 
+    def test_exact_reviewed_first_ruff_configuration_is_approved(self):
+        contents = b"[tool.ruff]\nline-length = 120\n"
+        transition = (
+            "example/repository",
+            "a" * 40,
+            "c" * 64,
+            "pyproject.toml",
+            hashlib.sha256(contents).hexdigest(),
+        )
+        with (
+            patch.dict(FORMAT.os.environ, {"GITHUB_REPOSITORY": transition[0]}),
+            patch.object(
+                FORMAT, "_APPROVED_RUFF_CONFIG_BASELINES", frozenset({transition})
+            ),
+            patch.object(FORMAT, "_changed_paths", return_value=[transition[3]]),
+            patch.object(FORMAT, "_source_if_present", side_effect=[None, contents]),
+            patch.object(FORMAT, "_python_change_digest", return_value=transition[2]),
+        ):
+            self.assertTrue(
+                FORMAT._approved_ruff_configuration_baseline("a" * 40, "b" * 40)
+            )
+
+    def test_reviewed_ruff_configuration_transition_fails_closed(self):
+        contents = b"[tool.ruff]\nline-length = 120\n"
+        transition = (
+            "example/repository",
+            "a" * 40,
+            "c" * 64,
+            "pyproject.toml",
+            hashlib.sha256(contents).hexdigest(),
+        )
+        cases = (
+            ("another/repository", [transition[3]], None, contents, transition[2]),
+            (transition[0], [transition[3]], b"[tool.ruff]\n", contents, transition[2]),
+            (transition[0], [transition[3]], None, contents + b"ignore = []\n", transition[2]),
+            (transition[0], [transition[3], ".ruff.toml"], None, contents, transition[2]),
+            (transition[0], [transition[3]], None, contents, "d" * 64),
+        )
+        for repository, paths, before, after, digest in cases:
+            with (
+                self.subTest(repository=repository, paths=paths),
+                patch.dict(
+                    FORMAT.os.environ,
+                    {"GITHUB_REPOSITORY": repository},
+                    clear=True,
+                ),
+                patch.object(
+                    FORMAT, "_APPROVED_RUFF_CONFIG_BASELINES", frozenset({transition})
+                ),
+                patch.object(FORMAT, "_changed_paths", return_value=paths),
+                patch.object(FORMAT, "_source_if_present", side_effect=[before, after]),
+                patch.object(FORMAT, "_python_change_digest", return_value=digest),
+            ):
+                self.assertFalse(
+                    FORMAT._approved_ruff_configuration_baseline("a" * 40, "b" * 40)
+                )
+
     def test_empty_diff_does_not_expand_to_the_whole_repository(self):
         sha = "a" * 40
         with (
@@ -153,7 +211,7 @@ class PythonFormattingTests(unittest.TestCase):
             patch.object(FORMAT, "_head_commit", return_value=sha),
             patch.object(FORMAT, "_require_base_ancestor") as ancestor,
             patch.object(
-                FORMAT, "_assert_ruff_configuration_unchanged"
+                FORMAT, "_assert_ruff_configuration_unchanged", return_value=False
             ) as configuration,
             patch.object(
                 FORMAT, "changed_python_files", side_effect=[[], []]
@@ -176,7 +234,9 @@ class PythonFormattingTests(unittest.TestCase):
             patch.object(FORMAT, "_exact_commit", return_value=base),
             patch.object(FORMAT, "_head_commit", return_value=head),
             patch.object(FORMAT, "_require_base_ancestor"),
-            patch.object(FORMAT, "_assert_ruff_configuration_unchanged"),
+            patch.object(
+                FORMAT, "_assert_ruff_configuration_unchanged", return_value=False
+            ),
             patch.object(
                 FORMAT,
                 "changed_python_files",

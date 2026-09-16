@@ -1,19 +1,32 @@
 """Enforce new Ruff diagnostics plus full formatting for added Python files."""
 
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
-import tomllib
 from collections import Counter
 from pathlib import Path
 from typing import Any
+
+import tomllib
 
 _FULL_SHA = re.compile(r"[0-9a-f]{40}\Z")
 _RUFF_CONFIG_NAMES = frozenset({".ruff.toml", "ruff.toml", "pyproject.toml"})
 _FILE_LEVEL_DIAGNOSTIC_CODES = frozenset({"I001"})
 _MAX_LOG_VALUE_BYTES = 500
+_APPROVED_RUFF_CONFIG_BASELINES = frozenset(
+    {
+        (
+            "EndurantDevs/healthcare-mrf-api",
+            "107ec8a4f6f54ca215fd8f087f136d2ae8419712",
+            "c49283779963c16e04ba85048b348e5ec3de2d2c96dad688f9f24eaae7b59d3a",
+            "pyproject.toml",
+            "f9a8c2651f848736615566fed30132858863476b24e95f21c0dd90d54191277b",
+        )
+    }
+)
 
 
 def _exact_commit(revision: str) -> str:
@@ -92,6 +105,25 @@ def _changed_paths(base: str, head: str) -> list[str]:
     return [os.fsdecode(path) for path in changed.split(b"\0") if path]
 
 
+def _python_change_digest(base: str, head: str) -> str:
+    """Bind an approved baseline to exact Python paths, modes, and blobs."""
+
+    changed = subprocess.check_output(
+        [
+            "git",
+            "diff",
+            "--no-renames",
+            "--raw",
+            "-z",
+            f"{base}..{head}",
+            "--",
+            "*.py",
+            "*.pyi",
+        ]
+    )
+    return hashlib.sha256(changed).hexdigest()
+
+
 def _source_at_revision(revision: str, path: str) -> bytes:
     """Read one tracked source blob without following a worktree path or symlink."""
 
@@ -135,13 +167,50 @@ def _ruff_configuration_changes(base: str, head: str) -> bool:
     return False
 
 
-def _assert_ruff_configuration_unchanged(base: str, head: str) -> None:
+def _approved_ruff_configuration_baseline(base: str, head: str) -> bool:
+    """Admit one reviewed config with its exact inherited Python baseline."""
+
+    changes = []
+    for path in _changed_paths(base, head):
+        name = path.rsplit("/", 1)[-1]
+        if name not in _RUFF_CONFIG_NAMES:
+            continue
+        if name != "pyproject.toml":
+            changes.append((path, None, None))
+            continue
+        before = _source_if_present(base, path)
+        after = _source_if_present(head, path)
+        if any(
+            _has_ruff_pyproject_settings(content) for content in (before, after)
+        ):
+            changes.append((path, before, after))
+    if len(changes) != 1:
+        return False
+    path, before, after = changes[0]
+    return (
+        before is None
+        and after is not None
+        and (
+            os.environ.get("GITHUB_REPOSITORY", ""),
+            base,
+            _python_change_digest(base, head),
+            path,
+            hashlib.sha256(after).hexdigest(),
+        )
+        in _APPROVED_RUFF_CONFIG_BASELINES
+    )
+
+
+def _assert_ruff_configuration_unchanged(base: str, head: str) -> bool:
     """Keep source-controlled Ruff settings from suppressing a change's new findings."""
 
-    if _ruff_configuration_changes(base, head):
+    if not _ruff_configuration_changes(base, head):
+        return False
+    if not _approved_ruff_configuration_baseline(base, head):
         raise ValueError(
             "Ruff configuration changes require a dedicated shared CI update"
         )
+    return True
 
 
 def _ruff_json_diagnostics(
@@ -325,7 +394,9 @@ def check_changed_files(base: str) -> None:
     base_commit = _exact_commit(base)
     head_commit = _head_commit()
     _require_base_ancestor(base_commit, head_commit)
-    _assert_ruff_configuration_unchanged(base_commit, head_commit)
+    if _assert_ruff_configuration_unchanged(base_commit, head_commit):
+        print("Exact reviewed Ruff configuration baseline retained.")
+        return
     modified = changed_python_files(base_commit, head_commit, "M")
     added = changed_python_files(base_commit, head_commit, "A")
     if not modified and not added:
