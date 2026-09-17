@@ -192,7 +192,9 @@ run_python_main() {
   fi
   for test_path in \
     tests/test_custom_import_execution_postgres.py \
-    tests/test_custom_import_publication_postgres.py; do
+    tests/test_custom_import_publication_postgres.py \
+    tests/test_custom_import_materialization_postgres.py \
+    tests/test_custom_import_read_core_postgres.py; do
     if [ -f "$repository_root/$test_path" ]; then
       collection_args+=(--ignore "$test_path")
     fi
@@ -782,7 +784,9 @@ run_core_postgres() {
   local custom_import_test_path
   for custom_import_test_path in \
     tests/test_custom_import_execution_postgres.py \
-    tests/test_custom_import_publication_postgres.py; do
+    tests/test_custom_import_publication_postgres.py \
+    tests/test_custom_import_materialization_postgres.py \
+    tests/test_custom_import_read_core_postgres.py; do
     if [ -f "$repository_root/$custom_import_test_path" ]; then
       custom_import_postgres_tests+=("$custom_import_test_path")
     fi
