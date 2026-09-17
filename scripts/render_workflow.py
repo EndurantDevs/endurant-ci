@@ -84,7 +84,7 @@ def render_workflow(kind, revision, caller):
     workflow["jobs"]["artifact-cleanup"] = {
         "name": "CI artifact cleanup", "runs-on": "ubuntu-latest", "timeout-minutes": 10,
         "needs": ["dev-image-publication"],
-        "if": "always()",
+        "if": "success()",
         "permissions": {"contents": "read", "actions": "write"},
         "steps": [
             {"name": "Check out trusted cleanup helper",
