@@ -191,7 +191,8 @@ def _approved_ruff_configuration_baseline(base: str, head: str) -> bool:
         before is None
         and after is not None
         and (
-            os.environ.get("GITHUB_REPOSITORY", ""),
+            os.environ.get("SOURCE_REPOSITORY")
+            or os.environ.get("GITHUB_REPOSITORY", ""),
             base,
             _python_change_digest(base, head),
             path,
