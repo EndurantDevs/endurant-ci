@@ -888,6 +888,8 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                 self.assertEqual(executed, [f"{dsn}\t-m pytest -q {test_path}"])
 
     def test_custom_import_postgres_tests_use_only_the_core_postgres_lane(self):
+        """Route each optional custom-import database suite through core exactly once."""
+
         test_paths = (
             "tests/test_custom_import_execution_postgres.py",
             "tests/test_custom_import_publication_postgres.py",
