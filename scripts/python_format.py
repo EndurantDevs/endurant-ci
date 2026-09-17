@@ -21,7 +21,7 @@ _APPROVED_RUFF_CONFIG_BASELINES = frozenset(
         (
             "EndurantDevs/healthcare-mrf-api",
             "107ec8a4f6f54ca215fd8f087f136d2ae8419712",
-            "c49283779963c16e04ba85048b348e5ec3de2d2c96dad688f9f24eaae7b59d3a",
+            "1781395447e0560fe27d20e4221a5858acbe7c0bd85604f23620e220d530a4a4",
             "pyproject.toml",
             "f9a8c2651f848736615566fed30132858863476b24e95f21c0dd90d54191277b",
         )
@@ -114,6 +114,7 @@ def _python_change_digest(base: str, head: str) -> str:
             "diff",
             "--no-renames",
             "--raw",
+            "--abbrev=40",
             "-z",
             f"{base}..{head}",
             "--",

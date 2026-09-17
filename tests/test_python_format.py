@@ -106,6 +106,16 @@ class PythonFormattingTests(unittest.TestCase):
             self.assertTrue(FORMAT._ruff_configuration_changes("a" * 40, "b" * 40))
         source.assert_not_called()
 
+    def test_python_change_digest_uses_full_object_ids(self):
+        with patch.object(
+            FORMAT.subprocess, "check_output", return_value=b"exact raw diff"
+        ) as output:
+            self.assertEqual(
+                FORMAT._python_change_digest("a" * 40, "b" * 40),
+                hashlib.sha256(b"exact raw diff").hexdigest(),
+            )
+        self.assertIn("--abbrev=40", output.call_args.args[0])
+
     def test_pyproject_without_ruff_settings_does_not_trip_the_configuration_guard(
         self,
     ):
