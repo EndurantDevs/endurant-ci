@@ -891,9 +891,12 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
         test_paths = (
             "tests/test_custom_import_execution_postgres.py",
             "tests/test_custom_import_publication_postgres.py",
+            "tests/test_custom_import_materialization_postgres.py",
+            "tests/test_custom_import_read_core_postgres.py",
         )
         dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
-        for present_paths in ((), test_paths[:1], test_paths):
+        present_path_sets = ((), *((test_path,) for test_path in test_paths), test_paths)
+        for present_paths in present_path_sets:
             with self.subTest(present_paths=present_paths), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 source = root / "source"
