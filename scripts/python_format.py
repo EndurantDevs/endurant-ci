@@ -39,6 +39,13 @@ _APPROVED_RUFF_CONFIG_BASELINES = frozenset(
             "pyproject.toml",
             "f9a8c2651f848736615566fed30132858863476b24e95f21c0dd90d54191277b",
         ),
+        (
+            "EndurantDevs/healthcare-mrf-api",
+            "107ec8a4f6f54ca215fd8f087f136d2ae8419712",
+            "720f2b4f4dfd9b625cfbe4daeac454833af05568a1a0ad7883aec61ab011c241",
+            "pyproject.toml",
+            "f9a8c2651f848736615566fed30132858863476b24e95f21c0dd90d54191277b",
+        ),
     }
 )
 
