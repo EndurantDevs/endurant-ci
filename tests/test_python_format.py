@@ -157,7 +157,14 @@ class PythonFormattingTests(unittest.TestCase):
             hashlib.sha256(contents).hexdigest(),
         )
         with (
-            patch.dict(FORMAT.os.environ, {"GITHUB_REPOSITORY": transition[0]}),
+            patch.dict(
+                FORMAT.os.environ,
+                {
+                    "SOURCE_REPOSITORY": transition[0],
+                    "GITHUB_REPOSITORY": "example/shared-ci",
+                },
+                clear=True,
+            ),
             patch.object(
                 FORMAT, "_APPROVED_RUFF_CONFIG_BASELINES", frozenset({transition})
             ),
@@ -190,7 +197,7 @@ class PythonFormattingTests(unittest.TestCase):
                 self.subTest(repository=repository, paths=paths),
                 patch.dict(
                     FORMAT.os.environ,
-                    {"GITHUB_REPOSITORY": repository},
+                    {"SOURCE_REPOSITORY": repository},
                     clear=True,
                 ),
                 patch.object(
