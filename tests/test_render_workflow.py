@@ -77,10 +77,12 @@ class RenderWorkflowChecks(unittest.TestCase):
                                        "steps": [{"run": "echo synthetic"}]}}}))
                 workflow = yaml.safe_load(RENDERER.render_workflow(kind, "1" * 40, caller))
                 self.assertEqual(workflow["permissions"], {"contents": "read", "pull-requests": "read", "actions": "read"})
+                producer = "container-package" if kind == "healthcare" else "validate"
+                measurement = "measurement" if kind == "healthcare" else "publish"
                 cleanup_job = workflow["jobs"]["artifact-cleanup"]
                 self.assertEqual(cleanup_job, {
                     "name": RENDERER.job_name("CI artifact cleanup"), "runs-on": "ubuntu-latest", "timeout-minutes": 10,
-                    "needs": ["dev-image-publication"],
+                    "needs": ["dev-image-publication", producer, measurement],
                     "if": "${{ " + RENDERER.GUARD + "success()) }}",
                     "permissions": {"contents": "read", "actions": "write"},
                     "steps": [{"name": "Check out trusted cleanup helper",
@@ -88,7 +90,10 @@ class RenderWorkflowChecks(unittest.TestCase):
                                "with": {"repository": "EndurantDevs/endurant-ci", "ref": "1" * 40,
                                         "path": "ci", "persist-credentials": False}},
                               {"name": "Remove validated CI intermediates",
-                               "env": {"GH_TOKEN": "${{ github.token }}", "PYTHONDONTWRITEBYTECODE": "1"},
+                               "env": {"GH_TOKEN": "${{ github.token }}", "PYTHONDONTWRITEBYTECODE": "1",
+                                       "IMAGE_ARTIFACT_ID": "${{ needs." + producer + ".outputs.image_artifact_id }}",
+                                       "MEASUREMENT_ARTIFACT_ID": "${{ needs." + measurement + ".outputs.measurement_artifact_id }}",
+                                       "IMAGE_RECEIPT_ARTIFACT_ID": "${{ needs.dev-image-publication.outputs.receipt_artifact_id }}"},
                                "run": "python3 ci/scripts/artifact_cleanup.py"}],
                 })
                 ancestors = set()
@@ -106,12 +111,18 @@ class RenderWorkflowChecks(unittest.TestCase):
                         self.assertTrue(all(value == "read" for value in workflow["jobs"][identifier].get("permissions", {}).values()))
                 publisher = workflow["jobs"]["dev-image-publication"]
                 self.assertEqual(publisher["permissions"], {"contents": "read", "pull-requests": "read", "actions": "read", "packages": "write"})
-                self.assertEqual(publisher["needs"], ["smoke", "source-validation" if kind == "healthcare" else "publish"])
+                expected_needs = ["smoke", "source-validation", producer, measurement] if kind == "healthcare" else ["smoke", "publish", producer]
+                self.assertEqual(publisher["needs"], expected_needs)
                 self.assertEqual(publisher["env"], {"CI_REVISION": "1" * 40, "PYTHONDONTWRITEBYTECODE": "1"})
+                self.assertEqual(publisher["outputs"], {"receipt_artifact_id": "${{ steps.receipt-artifact.outputs.artifact-id }}"})
                 self.assertEqual(publisher["steps"][0]["with"], {"repository": "EndurantDevs/endurant-ci", "ref": "1" * 40,
                                  "path": "ci", "persist-credentials": False})
                 self.assertNotIn("if", publisher["steps"][1])
                 self.assertEqual(publisher["steps"][1]["run"], "python3 ci/scripts/source_image.py prepare")
+                self.assertEqual(publisher["steps"][1]["env"], {
+                    "GH_TOKEN": "${{ github.token }}",
+                    "IMAGE_ARTIFACT_ID": "${{ needs." + producer + ".outputs.image_artifact_id }}",
+                    "MEASUREMENT_ARTIFACT_ID": "${{ needs." + measurement + ".outputs.measurement_artifact_id }}"})
                 steps = {step["name"]: step for step in publisher["steps"]}
                 self.assertEqual(len(steps), len(publisher["steps"]))
                 self.assertEqual(steps["Stage DEV image publication intent"]["run"], "python3 ci/scripts/source_image.py stage")
@@ -124,6 +135,7 @@ class RenderWorkflowChecks(unittest.TestCase):
                     "name": kind + "-public-image-${{ github.run_id }}-${{ github.run_attempt }}",
                     "path": "${{ runner.temp }}/public-image-receipt/image.json",
                     "if-no-files-found": "error", "retention-days": 90})
+                self.assertEqual(steps["Upload DEV image receipt"]["id"], "receipt-artifact")
                 self.assertEqual(publisher["if"], "${{ " + RENDERER.GUARD + "success()) }}")
                 self.assertEqual(steps["Upload DEV image publication intent"]["with"], {
                     "name": kind + "-public-image-intent-${{ github.run_id }}-${{ github.run_attempt }}",

@@ -54,8 +54,10 @@ class MeasurementChecks(unittest.TestCase):
             root = Path(temporary)
             staging = root / "staging"
             staging.mkdir()
-            for artifact, (report, provenance) in MEASUREMENT.producer_files().items():
-                directory = staging / f"{artifact}-123-2"
+            producer_attempts = {}
+            for index, (artifact, (report, provenance)) in enumerate(MEASUREMENT.producer_files().items()):
+                producer_attempts[artifact] = 1 + index % 2
+                directory = staging / f"{artifact}-123-{producer_attempts[artifact]}"
                 directory.mkdir()
                 if report.startswith(".coverage."):
                     coverage_file(directory / report)
@@ -70,7 +72,8 @@ class MeasurementChecks(unittest.TestCase):
             MEASUREMENT.publish(staging, output, identity, "123", "2", "c" * 40)
             manifest = json.loads((output / "measurement.json").read_text())
             self.assertEqual(manifest["run_attempt"], 2)
-            self.assertEqual(len(manifest["sha256"]), 18)
+            self.assertEqual(manifest["producer_attempts"], producer_attempts)
+            self.assertEqual(len(manifest["sha256"]), 28)
             self.assertEqual(MEASUREMENT.MAX_FILE_BYTES, 32 * 1024 * 1024)
             self.assertEqual(MEASUREMENT.MAX_TOTAL_BYTES, 128 * 1024 * 1024 - 64 * 1024)
             payload_size = sum(path.stat().st_size for path in staging.glob("*/*"))

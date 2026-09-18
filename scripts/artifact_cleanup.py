@@ -38,34 +38,57 @@ def current_run(run, expected, repository):
 
 
 def completed_consumers(repository, run):
-    jobs = list(github.pages(repository, f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs", "jobs"))
-    if (len(jobs) < 2 or len({job.get("id") for job in jobs}) != len(jobs)
-            or len({job.get("name") for job in jobs}) != len(jobs)
-            or sum(job.get("name") == CLEANUP_JOB for job in jobs) != 1):
+    jobs = effective_jobs(repository, run)
+    if len(jobs) < 2 or sum(job.get("name") == CLEANUP_JOB for job in jobs) != 1:
         raise ValueError("cleanup requires a complete, unique job inventory including itself")
     for job in jobs:
         own_job = job.get("name") == CLEANUP_JOB
         if not (type(job.get("id")) is int and job["id"] > 0
-                and job.get("run_id") == run["id"] and job.get("run_attempt") == run["run_attempt"]
-                and job.get("head_sha") == run["head_sha"]
+                and (not own_job or job.get("run_attempt") == run["run_attempt"])
                 and job.get("status") == ("in_progress" if own_job else "completed")
                 and (job.get("conclusion") is None if own_job
                      else job.get("conclusion") in TERMINAL_CONCLUSIONS)):
             raise ValueError("retained intermediates: cleanup must be the sole active job after validation")
-    return sorted((job["id"], job["name"], job.get("conclusion")) for job in jobs)
+    return sorted((job["id"], job["name"], job["run_attempt"], job.get("conclusion")) for job in jobs)
+
+
+def effective_jobs(repository, run):
+    """Return the latest execution of each named job across failed-only reruns."""
+    jobs = list(github.pages(repository, f"actions/runs/{run['id']}/jobs?filter=all", "jobs"))
+    seen = set()
+    latest = {}
+    for job in jobs:
+        key = (job.get("name"), job.get("run_attempt"))
+        if (not isinstance(key[0], str) or not key[0] or key in seen
+                or type(job.get("id")) is not int or job["id"] <= 0
+                or job.get("run_id") != run["id"] or type(key[1]) is not int
+                or not 1 <= key[1] <= run["run_attempt"] or job.get("head_sha") != run["head_sha"]):
+            raise ValueError("workflow job inventory has ambiguous run-attempt provenance")
+        seen.add(key)
+        if key[1] > latest.get(key[0], {}).get("run_attempt", 0):
+            latest[key[0]] = job
+    return list(latest.values())
 
 
 def temporary_names(kind, run):
-    suffix = f"{run['id']}-{run['run_attempt']}"
-    image = {f"{kind}-public-image-staging-{suffix}"} if run["event"] == "push" and run["head_branch"] == "dev" else set()
+    suffixes = tuple(f"{run['id']}-{attempt}" for attempt in range(1, run["run_attempt"] + 1))
+    image = ({f"{kind}-public-image-staging-{suffix}" for suffix in suffixes}
+             if run["event"] == "push" and run["head_branch"] == "dev" else set())
     if kind == "drug":
-        return image | {f"drug-public-staging-{suffix}"}
+        return image | {f"drug-public-staging-{suffix}" for suffix in suffixes}
     return {f"{name}-{suffix}" for name in (
         "healthcare-rust-debug", "mrf-rust-coverage", "mrf-python-coverage-capacity",
         *(f"mrf-python-coverage-main-{shard}" for shard in range(4)),
         *(f"mrf-python-coverage-postgres-{shard}" for shard in
-          ("core", "provider-directory", "provider-profile")),
-    )} | image
+          ("core-services", "core-imports", "core-ptg", "directory-source", "directory-storage",
+           "directory-address", "profile-storage", "profile-publication")),
+    ) for suffix in suffixes} | image
+
+
+def artifact_attempt(name, prefix, run):
+    match = re.fullmatch(rf"{re.escape(prefix)}-{run['id']}-([1-9][0-9]*)", name or "")
+    attempt = int(match[1]) if match else 0
+    return attempt if 1 <= attempt <= run["run_attempt"] else None
 
 
 def timestamp(value):
@@ -306,26 +329,35 @@ def cleanup(repository, expected):
     # Complete pagination before deletion can shift numbered pages.
     artifacts = list(github.pages(repository, f"{run_path}/artifacts", "artifacts"))
     kind = KINDS[repository]
-    final_name = f"{kind}-public-measurement-{expected['id']}-{expected['run_attempt']}"
-    finals = [artifact for artifact in artifacts if artifact.get("name") == final_name]
+    finals = [artifact for artifact in artifacts
+              if artifact.get("id") == expected.get("measurement_artifact_id")]
     candidates = [artifact for artifact in artifacts
                   if artifact.get("name") in temporary_names(kind, expected) and available(artifact, expected)]
     if not candidates:
-        print("No current-attempt intermediates to remove.")
+        print("No retained intermediates to remove.")
         return 0
-    successful = all(conclusion == "success" for _, name, conclusion in consumers if name != CLEANUP_JOB)
+    successful = all(conclusion == "success" for _, name, _, conclusion in consumers if name != CLEANUP_JOB)
+    if not successful:
+        print("Retained intermediates for a failed-only rerun.")
+        return 0
     proofs = []
-    if successful:
-        if len(finals) != 1 or not durable(finals[0], expected):
-            raise ValueError("retained intermediates: exact durable public measurement is missing or invalid")
-        proofs.append(finals[0])
-        image_name = f"{kind}-public-image-staging-{expected['id']}-{expected['run_attempt']}"
-        if any(item["name"] == image_name for item in candidates):
-            receipt_name = f"{kind}-public-image-{expected['id']}-{expected['run_attempt']}"
-            receipts = [item for item in artifacts if item.get("name") == receipt_name]
-            if len(receipts) != 1 or not durable(receipts[0], expected):
-                raise ValueError("retained image archive: durable publication receipt is missing or invalid")
-            proofs.append(receipts[0])
+    if (len(finals) != 1 or sum(item.get("name") == finals[0].get("name") for item in artifacts) != 1
+            or artifact_attempt(finals[0].get("name"), f"{kind}-public-measurement", expected) is None
+            or not durable(finals[0], expected)):
+        raise ValueError("retained intermediates: exact durable public measurement is missing or invalid")
+    proofs.append(finals[0])
+    image_candidates = [item for item in candidates
+                        if artifact_attempt(item.get("name"), f"{kind}-public-image-staging", expected)]
+    if image_candidates:
+        if sum(item.get("id") == expected.get("image_artifact_id") for item in image_candidates) != 1:
+            raise ValueError("retained image archive: exact tested image artifact is missing")
+        receipts = [item for item in artifacts
+                    if item.get("id") == expected.get("image_receipt_artifact_id")]
+        if (len(receipts) != 1
+                or artifact_attempt(receipts[0].get("name"), f"{kind}-public-image", expected) is None
+                or not durable(receipts[0], expected)):
+            raise ValueError("retained image archive: durable publication receipt is missing or invalid")
+        proofs.append(receipts[0])
     deleted = 0
     for artifact in candidates:
         # Refresh consumer completion, immutable artifacts, and run before each delete.
@@ -373,10 +405,22 @@ def main():
                 and os.environ["GITHUB_SHA"] == payload.get("after") and not payload.get("deleted")):
             raise ValueError("cleanup push identity differs from its source event")
         source, branch = payload["after"], payload["ref"].removeprefix("refs/heads/")
+    identifiers = {name: os.environ.get(variable, "") for name, variable in (
+        ("measurement_artifact_id", "MEASUREMENT_ARTIFACT_ID"),
+        ("image_artifact_id", "IMAGE_ARTIFACT_ID"),
+        ("image_receipt_artifact_id", "IMAGE_RECEIPT_ARTIFACT_ID"),
+    )}
+    if not re.fullmatch(r"[1-9][0-9]*", identifiers["measurement_artifact_id"]):
+        raise ValueError("cleanup requires the exact durable measurement artifact")
+    if event == "push" and branch == "dev" and any(
+            not re.fullmatch(r"[1-9][0-9]*", identifiers[name])
+            for name in ("image_artifact_id", "image_receipt_artifact_id")):
+        raise ValueError("DEV cleanup requires exact image and receipt artifacts")
     cleanup(repository, {"id": int(os.environ["GITHUB_RUN_ID"]),
                          "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
                          "event": event, "head_sha": source, "head_branch": branch,
-                         "path": ".github/workflows/ci.yml"})
+                         "path": ".github/workflows/ci.yml",
+                         **{name: int(value) for name, value in identifiers.items() if value}})
 
 
 if __name__ == "__main__":

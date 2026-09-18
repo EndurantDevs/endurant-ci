@@ -355,6 +355,7 @@ jobs:
 
         test -z "$(git ls-files --others --exclude-standard)"'
     - name: Upload tested DEV image
+      id: image-artifact
       if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
@@ -363,6 +364,8 @@ jobs:
         if-no-files-found: error
         retention-days: 1
         compression-level: 0
+    outputs:
+      image_artifact_id: ${{ steps.image-artifact.outputs.artifact-id }}
   security:
     name: Security scans
     runs-on: ubuntu-latest
@@ -474,10 +477,11 @@ jobs:
       uses: ./ci/scripts/healthcare/setup
     - name: Install PostgreSQL client
       run: |
-        sudo apt-get update -qq
-        sudo apt-get install --yes --no-install-recommends ca-certificates curl
+        sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update -qq
+        sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends ca-certificates curl
         sudo install -d -m 0755 /usr/share/postgresql-common/pgdg
-        sudo curl --fail --location --silent --show-error \
+        sudo curl --fail --location --silent --show-error --retry 3 --retry-delay 2 --retry-all-errors \
+          --connect-timeout 15 --max-time 60 \
           --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
           https://www.postgresql.org/media/keys/ACCC4CF8.asc
         . /etc/os-release
@@ -488,8 +492,8 @@ jobs:
           'Components: main' \
           'Signed-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc' |
           sudo tee /etc/apt/sources.list.d/pgdg.sources >/dev/null
-        sudo apt-get update -qq
-        sudo apt-get install --yes --no-install-recommends postgresql-client-18
+        sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update -qq
+        sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends postgresql-client-18
         printf '%s\n' /usr/lib/postgresql/18/bin >> "$GITHUB_PATH"
         for tool in psql pg_dump pg_restore; do
           "/usr/lib/postgresql/18/bin/$tool" --version | grep -Eq "^$tool \\(PostgreSQL\\) 18\\."
@@ -531,22 +535,42 @@ jobs:
 
         printf ''%s=%s\n'' "$ARTIFACT_OUTPUT" "$ARTIFACT_ID" >> "$GITHUB_OUTPUT"'
     outputs:
-      artifact_core: ${{ steps.coverage-output.outputs.artifact_core }}
-      artifact_provider_directory: ${{ steps.coverage-output.outputs.artifact_provider_directory }}
-      artifact_provider_profile: ${{ steps.coverage-output.outputs.artifact_provider_profile }}
+      artifact_core_services: ${{ steps.coverage-output.outputs.artifact_core_services }}
+      artifact_core_imports: ${{ steps.coverage-output.outputs.artifact_core_imports }}
+      artifact_core_ptg: ${{ steps.coverage-output.outputs.artifact_core_ptg }}
+      artifact_directory_source: ${{ steps.coverage-output.outputs.artifact_directory_source }}
+      artifact_directory_storage: ${{ steps.coverage-output.outputs.artifact_directory_storage }}
+      artifact_directory_address: ${{ steps.coverage-output.outputs.artifact_directory_address }}
+      artifact_profile_storage: ${{ steps.coverage-output.outputs.artifact_profile_storage }}
+      artifact_profile_publication: ${{ steps.coverage-output.outputs.artifact_profile_publication }}
     strategy:
       fail-fast: true
       matrix:
         include:
-        - shard: core
-          label: Database tests (core)
-          output: artifact_core
-        - shard: provider-directory
-          label: Database tests (directory)
-          output: artifact_provider_directory
-        - shard: provider-profile
-          label: Database tests (profiles)
-          output: artifact_provider_profile
+        - shard: core-services
+          label: Database tests (services)
+          output: artifact_core_services
+        - shard: core-imports
+          label: Database tests (imports)
+          output: artifact_core_imports
+        - shard: core-ptg
+          label: Database tests (PTG)
+          output: artifact_core_ptg
+        - shard: directory-source
+          label: Database tests (directory source)
+          output: artifact_directory_source
+        - shard: directory-storage
+          label: Database tests (directory storage)
+          output: artifact_directory_storage
+        - shard: directory-address
+          label: Database tests (directory address)
+          output: artifact_directory_address
+        - shard: profile-storage
+          label: Database tests (profile storage)
+          output: artifact_profile_storage
+        - shard: profile-publication
+          label: Database tests (profile publication)
+          output: artifact_profile_publication
   measurement:
     name: Coverage results
     runs-on: ubuntu-latest
@@ -587,14 +611,17 @@ jobs:
       with:
         artifact-ids: ${{ needs.python-tests.outputs.artifact_0 }},${{ needs.python-tests.outputs.artifact_1 }},${{ needs.python-tests.outputs.artifact_2
           }},${{ needs.python-tests.outputs.artifact_3 }},${{ needs.capacity-evidence.outputs.artifact_id }},${{ needs.rust-scanner.outputs.artifact_id
-          }},${{ needs.address-canonical-db-tests.outputs.artifact_core }},${{ needs.address-canonical-db-tests.outputs.artifact_provider_directory
-          }},${{ needs.address-canonical-db-tests.outputs.artifact_provider_profile }}
+          }},${{ needs.address-canonical-db-tests.outputs.artifact_core_services }},${{ needs.address-canonical-db-tests.outputs.artifact_core_imports
+          }},${{ needs.address-canonical-db-tests.outputs.artifact_core_ptg }},${{ needs.address-canonical-db-tests.outputs.artifact_directory_source
+          }},${{ needs.address-canonical-db-tests.outputs.artifact_directory_storage }},${{ needs.address-canonical-db-tests.outputs.artifact_directory_address
+          }},${{ needs.address-canonical-db-tests.outputs.artifact_profile_storage }},${{ needs.address-canonical-db-tests.outputs.artifact_profile_publication }}
         digest-mismatch: error
         path: ${{ runner.temp }}/healthcare-coverage-staging
         merge-multiple: false
     - name: Validate and bind public measurement
       run: python3 ci/scripts/healthcare/measurement.py
     - name: Upload public measurement
+      id: measurement-artifact
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: healthcare-public-measurement-${{ github.run_id }}-${{ github.run_attempt }}
@@ -602,6 +629,8 @@ jobs:
         include-hidden-files: true
         if-no-files-found: error
         retention-days: 90
+    outputs:
+      measurement_artifact_id: ${{ steps.measurement-artifact.outputs.artifact-id }}
   source-validation:
     name: Validation complete
     runs-on: ubuntu-latest

@@ -20,6 +20,7 @@ jobs:
     timeout-minutes: 60
     outputs:
       staging_artifact_id: ${{ steps.staging.outputs.artifact-id }}
+      image_artifact_id: ${{ steps.image-artifact.outputs.artifact-id }}
     env:
       CI_REVISION: ${{ inputs.ci_revision }}
       CI_ROOT: ${{ github.workspace }}/ci
@@ -66,6 +67,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: bash "$CI_ROOT/scripts/drug/check" measure
       - name: Upload tested DEV image
+        id: image-artifact
         if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -125,6 +127,7 @@ jobs:
           test "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" = "$SOURCE_SHA"
           python3 ci/scripts/drug/measurement.py "$RUNNER_TEMP/drug-staging" "$RUNNER_TEMP/drug-public-measurement"
       - name: Upload public measurement
+        id: measurement-artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: drug-public-measurement-${{ github.run_id }}-${{ github.run_attempt }}
@@ -134,3 +137,5 @@ jobs:
             ${{ runner.temp }}/drug-public-measurement/measurement.json
           if-no-files-found: error
           retention-days: 90
+    outputs:
+      measurement_artifact_id: ${{ steps.measurement-artifact.outputs.artifact-id }}

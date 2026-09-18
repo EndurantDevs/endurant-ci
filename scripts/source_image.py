@@ -243,6 +243,10 @@ def staging_name(identity):
     return f"{artifacts.KINDS[identity['repository']]}-public-image-staging-{identity['run_id']}-{identity['run_attempt']}"
 
 
+def producer_identity(expected):
+    return {**expected["identity"], "run_attempt": expected["producer_run_attempt"]}
+
+
 def export_image(image):
     if not DIGEST.fullmatch(image):
         raise ValueError("export requires the immutable image ID captured before testing")
@@ -285,16 +289,13 @@ def admit():
         raise ValueError("publication requires its own trusted job")
     identity, run = context()
     repository = identity["repository"]
-    jobs = list(github.pages(repository, f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs", "jobs"))
+    jobs = artifacts.effective_jobs(repository, run)
     own = [job for job in jobs if job.get("name") == JOB]
-    if (len(own) != 1 or len({job.get("id") for job in jobs}) != len(jobs)
-            or len({job.get("name") for job in jobs}) != len(jobs)
+    if (len(own) != 1
             or own[0].get("status") != "in_progress" or own[0].get("conclusion") is not None):
         raise ValueError("publication requires a unique active trusted job")
-    for job in jobs:
-        if (type(job.get("id")) is not int or job["id"] <= 0 or job.get("run_id") != run["id"]
-                or job.get("run_attempt") != run["run_attempt"] or job.get("head_sha") != run["head_sha"]):
-            raise ValueError("publication job identity differs from its run attempt")
+    if own[0].get("run_attempt") != run["run_attempt"]:
+        raise ValueError("publication job identity differs from its consumer attempt")
     if run["event"] != "push" or identity["source_branch"] != "dev":
         return None  # Authenticated PR/main no-op, including fork PRs; no Docker or registry access.
     if github.api(repository, "commits/dev").get("sha") != identity["source_sha"]:
@@ -306,21 +307,29 @@ def admit():
             continue
         if job.get("status") != "completed" or job.get("conclusion") != "success":
             raise ValueError("all image consumers must pass before publication")
-    producer = [job for job in jobs if job["name"] == PRODUCERS[repository]]
+    items = list(github.pages(repository, f"actions/runs/{run['id']}/artifacts", "artifacts"))
+    identifiers = (os.environ.get("IMAGE_ARTIFACT_ID", ""), os.environ.get("MEASUREMENT_ARTIFACT_ID", ""))
+    if any(not re.fullmatch(r"[1-9][0-9]*", value) for value in identifiers):
+        raise ValueError("publication requires exact image and measurement artifact outputs")
+    candidates = [item for item in items if item.get("id") == int(identifiers[0])]
+    finals = [item for item in items if item.get("id") == int(identifiers[1])]
+    kind = artifacts.KINDS[repository]
+    producer_attempt = (artifacts.artifact_attempt(candidates[0].get("name"), f"{kind}-public-image-staging", run)
+                        if len(candidates) == 1 else None)
+    measurement_attempt = (artifacts.artifact_attempt(finals[0].get("name"), f"{kind}-public-measurement", run)
+                           if len(finals) == 1 else None)
+    producer = [job for job in jobs if job["name"] == PRODUCERS[repository]
+                and job.get("run_attempt") == producer_attempt]
     if len(producer) != 1:
-        raise ValueError("the exact image producer is missing")
+        raise ValueError("the exact image producer attempt is missing")
     uploads = [step for step in producer[0].get("steps", []) if step.get("name") == UPLOAD]
     if len(uploads) != 1 or uploads[0].get("status") != "completed" or uploads[0].get("conclusion") != "success":
         raise ValueError("the exact image producer upload must succeed")
-    items = list(github.pages(repository, f"actions/runs/{run['id']}/artifacts", "artifacts"))
-    candidates = [item for item in items if item.get("name") == staging_name(identity)]
-    finals = [item for item in items if item.get("name") ==
-              f"{artifacts.KINDS[repository]}-public-measurement-{run['id']}-{run['run_attempt']}"]
     if (len(candidates) != 1 or not artifacts.available(candidates[0], run)
             or not DIGEST.fullmatch(candidates[0].get("digest", "")) or candidates[0].get("size_in_bytes", 0) <= 0
             or not (artifacts.timestamp(uploads[0]["started_at"]) <= artifacts.timestamp(candidates[0]["created_at"])
                     <= artifacts.timestamp(uploads[0]["completed_at"]))
-            or len(finals) != 1 or not artifacts.durable(finals[0], run)):
+            or measurement_attempt is None or not artifacts.durable(finals[0], run)):
         raise ValueError("publication requires its exact completed artifact and durable measurement")
     caller = github.api(repository, f"contents/.github/workflows/ci.yml?ref={identity['source_sha']}").get("sha", "")
     if not github.SHA.fullmatch(caller):
@@ -329,6 +338,7 @@ def admit():
     tag = f"dev-main-{identity['source_sha'][:8]}-{artifacts.timestamp(own[0]['started_at']).astimezone(timezone.utc):%Y%m%d%H%M%S}"
     return {"identity": identity, "artifact": snapshot(candidates[0]), "measurement": snapshot(finals[0]),
             "image": f"{IMAGES[repository]}:{tag}", "workflow_id": run["workflow_id"],
+            "producer_run_attempt": producer_attempt, "measurement_run_attempt": measurement_attempt,
             "producer_job_id": producer[0]["id"], "publisher_job_id": own[0]["id"]}
 
 
@@ -529,7 +539,7 @@ def transfer_record(expected, directory):
             not path.is_file() or path.is_symlink() for path in directory.iterdir()):
         raise ValueError("unexpected files in the image transfer artifact")
     record = read_json(directory / "producer.json")
-    metadata = {"schema": "public-source-image-staging-v1", **expected["identity"], "platform": "linux/amd64"}
+    metadata = {"schema": "public-source-image-staging-v1", **producer_identity(expected), "platform": "linux/amd64"}
     if (set(record) != set(metadata) | {"image_id", "config_digest", "archive_sha256"}
             or any(record.get(key) != value for key, value in metadata.items())
             or not DIGEST.fullmatch(record.get("config_digest", ""))
@@ -537,7 +547,7 @@ def transfer_record(expected, directory):
             or file_digest(directory / "image.tar.gz") != record["archive_sha256"]):
         raise ValueError("image archive is not bound to this exact source and producer")
     config_digest, identifiers = archive_identity(
-        directory / "image.tar.gz", expected["identity"], require_provenance=True)
+        directory / "image.tar.gz", producer_identity(expected), require_provenance=True)
     if record["config_digest"] != config_digest or record["image_id"] not in identifiers:
         raise ValueError("archive configuration differs from the tested immutable image")
     return record, identifiers
@@ -586,6 +596,8 @@ def publication_receipt(expected, record, digest):
     if not DIGEST.fullmatch(digest):
         raise ValueError("publication receipt requires an exact manifest digest")
     return {"schema": "public-source-image-v1", **expected["identity"],
+            "producer_run_attempt": expected["producer_run_attempt"],
+            "measurement_run_attempt": expected["measurement_run_attempt"],
             "producer_artifact": {key: expected["artifact"][key] for key in ("id", "name", "digest")},
             "archive_sha256": record["archive_sha256"], "platform": "linux/amd64",
             "config_digest": record["config_digest"], "image": expected["image"], "manifest_digest": digest}
@@ -693,7 +705,7 @@ def registry_publication(intent):
     configuration = json.loads(raw)
     if configuration.get("os") != "linux" or configuration.get("architecture") != "amd64":
         raise ValueError("registry configuration has another runtime platform")
-    require_labels(configuration, expected["identity"])
+    require_labels(configuration, producer_identity(expected))
     return graph
 
 

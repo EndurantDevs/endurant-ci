@@ -42,10 +42,13 @@ def render_workflow(kind, revision, caller):
         "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
     }
     workflow["jobs"] = {"smoke": workflow["jobs"]["smoke"], **canonical["jobs"]}
+    producer_job = "container-package" if kind == "healthcare" else "validate"
+    measurement_job = "measurement" if kind == "healthcare" else "publish"
+    validation_job = "source-validation" if kind == "healthcare" else "publish"
     # Source execution remains read-only; privileged jobs execute pinned helpers only.
     workflow["jobs"]["dev-image-publication"] = {
         "name": "DEV image publication", "runs-on": "ubuntu-latest", "timeout-minutes": 30,
-        "needs": ["smoke", "source-validation" if kind == "healthcare" else "publish"],
+        "needs": list(dict.fromkeys(["smoke", validation_job, producer_job, measurement_job])),
         "permissions": {"contents": "read", "pull-requests": "read", "actions": "read", "packages": "write"},
         "env": {"CI_REVISION": revision, "PYTHONDONTWRITEBYTECODE": "1"},
         "steps": [
@@ -54,7 +57,9 @@ def render_workflow(kind, revision, caller):
              "with": {"repository": "EndurantDevs/endurant-ci", "ref": revision,
                       "path": "ci", "persist-credentials": False}},
             {"name": "Authenticate DEV image input", "id": "image",
-             "env": {"GH_TOKEN": "${{ github.token }}"},
+             "env": {"GH_TOKEN": "${{ github.token }}",
+                     "IMAGE_ARTIFACT_ID": "${{ needs." + producer_job + ".outputs.image_artifact_id }}",
+                     "MEASUREMENT_ARTIFACT_ID": "${{ needs." + measurement_job + ".outputs.measurement_artifact_id }}"},
              "run": "python3 ci/scripts/source_image.py prepare"},
             {"name": "Download validated image archive", "if": "steps.image.outputs.publish == 'true'",
              "uses": "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
@@ -72,6 +77,7 @@ def render_workflow(kind, revision, caller):
              "env": {"GH_TOKEN": "${{ github.token }}"},
              "run": "python3 ci/scripts/source_image.py publish"},
             {"name": "Upload DEV image receipt", "if": "steps.image.outputs.publish == 'true'",
+             "id": "receipt-artifact",
              "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
              "with": {"name": kind + "-public-image-${{ github.run_id }}-${{ github.run_attempt }}",
                       "path": "${{ runner.temp }}/public-image-receipt/image.json",
@@ -80,10 +86,11 @@ def render_workflow(kind, revision, caller):
              "env": {"GH_TOKEN": "${{ github.token }}"},
              "run": "python3 ci/scripts/source_image.py reconcile"},
         ],
+        "outputs": {"receipt_artifact_id": "${{ steps.receipt-artifact.outputs.artifact-id }}"},
     }
     workflow["jobs"]["artifact-cleanup"] = {
         "name": "CI artifact cleanup", "runs-on": "ubuntu-latest", "timeout-minutes": 10,
-        "needs": ["dev-image-publication"],
+        "needs": ["dev-image-publication", producer_job, measurement_job],
         "if": "success()",
         "permissions": {"contents": "read", "actions": "write"},
         "steps": [
@@ -92,7 +99,10 @@ def render_workflow(kind, revision, caller):
              "with": {"repository": "EndurantDevs/endurant-ci", "ref": revision,
                       "path": "ci", "persist-credentials": False}},
             {"name": "Remove validated CI intermediates",
-             "env": {"GH_TOKEN": "${{ github.token }}", "PYTHONDONTWRITEBYTECODE": "1"},
+             "env": {"GH_TOKEN": "${{ github.token }}", "PYTHONDONTWRITEBYTECODE": "1",
+                     "IMAGE_ARTIFACT_ID": "${{ needs." + producer_job + ".outputs.image_artifact_id }}",
+                     "MEASUREMENT_ARTIFACT_ID": "${{ needs." + measurement_job + ".outputs.measurement_artifact_id }}",
+                     "IMAGE_RECEIPT_ARTIFACT_ID": "${{ needs.dev-image-publication.outputs.receipt_artifact_id }}"},
              "run": "python3 ci/scripts/artifact_cleanup.py"},
         ],
     }

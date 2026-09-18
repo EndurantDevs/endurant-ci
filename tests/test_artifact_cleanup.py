@@ -56,6 +56,14 @@ class ArtifactCleanupChecks(unittest.TestCase):
     def exercise(self, items, expected=None, refresh=None, changed_artifact=None, delete_error=False,
                  job_inventory=None, refreshed_jobs=None):
         expected = expected or run()
+        kind = cleanup.KINDS[expected["repository"]["full_name"]]
+        measurement = next((item for item in items if f"{kind}-public-measurement-" in item.get("name", "")), None)
+        image = next((item for item in items if f"{kind}-public-image-staging-" in item.get("name", "")), None)
+        receipt = next((item for item in items if f"{kind}-public-image-" in item.get("name", "")
+                        and "-staging-" not in item.get("name", "")), None)
+        expected = {**expected, "measurement_artifact_id": measurement["id"] if measurement else 9999,
+                    **({"image_artifact_id": image["id"]} if image else {}),
+                    **({"image_receipt_artifact_id": receipt["id"]} if receipt else {})}
         calls, deleted = [], []
         run_reads = job_reads = 0
 
@@ -71,7 +79,7 @@ class ArtifactCleanupChecks(unittest.TestCase):
             if path == "actions/runs/123":
                 run_reads += 1
                 return {**expected, **(refresh or {})} if run_reads > 1 else expected
-            if path.startswith("actions/runs/123/attempts/2/jobs?"):
+            if path.startswith("actions/runs/123/jobs?filter=all"):
                 job_reads += 1
                 current = jobs() if job_inventory is None else job_inventory
                 if job_reads > 1 and refreshed_jobs is not None:
@@ -105,11 +113,12 @@ class ArtifactCleanupChecks(unittest.TestCase):
             expected = run(repository)
             names = sorted(cleanup.temporary_names(kind, expected))
             intermediates = [artifact(index + 1, name) for index, name in enumerate(names)]
+            current_name = next(name for name in names if name.endswith("-123-2"))
             keep = [artifact(100, f"{kind}-public-measurement-123-2", 90),
-                    artifact(101, names[0].removesuffix("-2") + "-1"),
-                    artifact(102, names[0].replace("123-2", "999-2")),
-                    artifact(103, names[0] + "-unknown"),
-                    artifact(104, names[0].removesuffix("-123-2"))]
+                    artifact(101, current_name.removesuffix("-2") + "-3"),
+                    artifact(102, current_name.replace("123-2", "999-2")),
+                    artifact(103, current_name + "-unknown"),
+                    artifact(104, current_name.removesuffix("-123-2"))]
             keep.extend(artifact(200 + index, f"unknown-{index}") for index in range(100))
             with self.subTest(repository=repository):
                 deleted, calls = self.exercise(intermediates + keep, expected)
@@ -138,13 +147,16 @@ class ArtifactCleanupChecks(unittest.TestCase):
     def test_consumers_must_all_finish_in_the_same_attempt_before_each_delete(self):
         items = [artifact(1, "mrf-rust-coverage-123-2"), artifact(2, "healthcare-public-measurement-123-2", 90)]
         for changes in ({"status": "in_progress", "conclusion": None}, {"status": "queued", "conclusion": None},
-                        {"conclusion": None}, {"conclusion": "unknown"}, {"run_attempt": 1}, {"run_id": 999},
+                        {"conclusion": None}, {"conclusion": "unknown"}, {"run_id": 999},
                         {"head_sha": "c" * 40}):
             changed = jobs()
             changed[0].update(changes)
             for option in ("job_inventory", "refreshed_jobs"):
                 with self.subTest(changes=changes, option=option), self.assertRaises(ValueError):
                     self.exercise(items, **{option: changed})
+        mixed = jobs()
+        mixed[0]["run_attempt"] = 1
+        self.assertEqual(self.exercise(items, job_inventory=mixed)[0], [1])
         for changed in ([], jobs()[:-1], [jobs()[-1]], jobs() + [jobs()[0]],
                         [{**item, "status": "completed", "conclusion": "success"} for item in jobs()]):
             with self.subTest(changed=changed), self.assertRaises(ValueError):
@@ -154,12 +166,12 @@ class ArtifactCleanupChecks(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.exercise(items, refreshed_jobs=changed)
 
-    def test_failed_validation_removes_known_intermediates_without_a_final_measurement(self):
+    def test_failed_validation_retains_known_intermediates_for_failed_only_rerun(self):
         failed_jobs = jobs()
         failed_jobs[0]["conclusion"] = "failure"
         temporary = artifact(1, "mrf-rust-coverage-123-2")
         unknown = artifact(2, "unknown")
-        self.assertEqual(self.exercise([temporary, unknown], job_inventory=failed_jobs)[0], [1])
+        self.assertEqual(self.exercise([temporary, unknown], job_inventory=failed_jobs)[0], [])
 
     def test_final_measurement_must_exist_and_remain_durable(self):
         temporary = artifact(1, "mrf-rust-coverage-123-2")
@@ -195,7 +207,7 @@ class ArtifactCleanupChecks(unittest.TestCase):
 
         failed_jobs = jobs()
         failed_jobs[0]["conclusion"] = "failure"
-        self.assertEqual(self.exercise([archive], expected, job_inventory=failed_jobs)[0], [1])
+        self.assertEqual(self.exercise([archive], expected, job_inventory=failed_jobs)[0], [])
 
     def test_delete_api_requires_confirmed_204_and_propagates_errors(self):
         with patch.dict("os.environ", {"GH_TOKEN": "synthetic"}), patch.object(
@@ -361,12 +373,13 @@ class ArtifactCleanupChecks(unittest.TestCase):
             event.write_text(json.dumps(payload))
             environment = {"GITHUB_EVENT_PATH": str(event), "GITHUB_EVENT_NAME": "pull_request",
                            "GITHUB_REF": "refs/pull/7/merge", "GITHUB_REPOSITORY": repository,
-                           "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_JOB": "artifact-cleanup"}
+                           "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_JOB": "artifact-cleanup",
+                           "MEASUREMENT_ARTIFACT_ID": "55"}
             with patch.dict("os.environ", environment), patch.object(cleanup, "cleanup") as execute:
                 cleanup.main()
                 execute.assert_called_once_with(repository, {"id": 123, "run_attempt": 2,
                     "event": "pull_request", "head_sha": "a" * 40, "head_branch": "fix/example",
-                    "path": ".github/workflows/ci.yml"})
+                    "path": ".github/workflows/ci.yml", "measurement_artifact_id": 55})
             for changes in ({"GITHUB_EVENT_NAME": "workflow_run"}, {"GITHUB_REF": "refs/pull/1/merge"},
                             {"GITHUB_REPOSITORY": "Other/service"}, {"GITHUB_JOB": "validate"}):
                 with patch.dict("os.environ", {**environment, **changes}), self.assertRaises(ValueError):
@@ -381,6 +394,8 @@ class ArtifactCleanupChecks(unittest.TestCase):
                 push = {"repository": payload["repository"], "ref": f"refs/heads/{branch}", "after": "b" * 40}
                 event.write_text(json.dumps(push))
                 environment.update(GITHUB_EVENT_NAME="push", GITHUB_REF=push["ref"], GITHUB_SHA=push["after"])
+                if branch == "dev":
+                    environment.update(IMAGE_ARTIFACT_ID="44", IMAGE_RECEIPT_ARTIFACT_ID="66")
                 with patch.dict("os.environ", environment), patch.object(cleanup, "cleanup") as execute:
                     cleanup.main()
                     self.assertEqual(execute.call_args.args[1]["head_sha"], "b" * 40)
@@ -405,7 +420,8 @@ class ArtifactCleanupChecks(unittest.TestCase):
                         names.add(upload["name"].replace("${{ github.run_id }}", "123")
                                   .replace("${{ github.run_attempt }}", "2")
                                   .replace("${{ matrix.shard }}", row.get("shard", "")))
-            self.assertEqual(names, cleanup.temporary_names(kind, {**run(repository), "event": "push", "head_branch": "dev"}))
+            expected = cleanup.temporary_names(kind, {**run(repository), "event": "push", "head_branch": "dev"})
+            self.assertEqual(names, {name for name in expected if name.endswith("-123-2")})
 
 
 if __name__ == "__main__":
