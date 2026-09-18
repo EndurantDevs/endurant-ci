@@ -16,8 +16,9 @@ SHA = re.compile(r"[0-9a-f]{40}\Z")
 def api(repository, path, method="GET"):
     if repository not in REPOSITORIES:
         raise ValueError("repository is outside the public validation allowlist")
+    suffix = f"/{path}" if path else ""
     request = urllib.request.Request(
-        f"https://api.github.com/repos/{repository}/{path}",
+        f"https://api.github.com/repos/{repository}{suffix}",
         method=method,
         headers={
             "Authorization": f"Bearer {os.environ['GH_TOKEN']}",

@@ -238,6 +238,14 @@ class ArtifactCleanupChecks(unittest.TestCase):
             with self.assertRaises(OSError):
                 cleanup.github.api("EndurantDevs/drug-api", "actions/artifacts/1", "DELETE")
 
+    def test_repository_metadata_request_has_no_trailing_slash(self):
+        with patch.dict("os.environ", {"GH_TOKEN": "synthetic"}), patch.object(
+                cleanup.github.urllib.request, "urlopen") as request:
+            request.return_value.__enter__.return_value.read.return_value = b"{}"
+            self.assertEqual(cleanup.github.api("EndurantDevs/drug-api", ""), {})
+        self.assertEqual(request.call_args.args[0].full_url,
+                         "https://api.github.com/repos/EndurantDevs/drug-api")
+
     def test_stale_sweep_preserves_active_and_latest_branch_evidence(self):
         repository = "EndurantDevs/healthcare-mrf-api"
         main_sha, dev_sha, open_sha = "f" * 40, "d" * 40, "e" * 40
