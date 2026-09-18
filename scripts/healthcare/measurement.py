@@ -6,12 +6,18 @@ from contextlib import closing
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import sqlite3
 
 
 MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_TOTAL_BYTES = 128 * 1024 * 1024 - 64 * 1024  # Reserve ZIP headers below the verifier limit.
+POSTGRES_SHARDS = (
+    "core-services", "core-imports", "core-ptg",
+    "directory-source", "directory-storage", "directory-address",
+    "profile-storage", "profile-publication",
+)
 SQL_COLUMNS = {
     "coverage_schema": ("version",), "meta": ("key", "value"),
     "file": ("id", "path"), "context": ("id", "context"),
@@ -25,7 +31,7 @@ def producer_files():
     result = {}
     for kind, shards in (("main", ("0", "1", "2", "3")),
                          ("capacity", ("capacity",)),
-                         ("postgres", ("core", "provider-directory", "provider-profile"))):
+                         ("postgres", POSTGRES_SHARDS)):
         for shard in shards:
             suffix = kind if kind == "capacity" else f"{kind}.{shard}"
             artifact = "mrf-python-coverage-" + suffix.replace(".", "-")
@@ -119,13 +125,22 @@ def validate_files(directory, identity):
 
 
 def publish(staging, output, identity, run_id, run_attempt, revision):
-    expected = {f"{name}-{run_id}-{run_attempt}": files for name, files in producer_files().items()}
-    if {path.name for path in staging.iterdir()} != set(expected):
+    if not re.fullmatch(r"[1-9][0-9]*", str(run_id)) or not re.fullmatch(r"[1-9][0-9]*", str(run_attempt)):
+        raise ValueError("measurement requires one exact run and consumer attempt")
+    run_attempt = int(run_attempt)
+    expected = producer_files()
+    producers = {}
+    for directory in staging.iterdir():
+        match = re.fullmatch(rf"(.+)-{re.escape(str(run_id))}-([1-9][0-9]*)", directory.name)
+        if not match or match[1] not in expected or not 1 <= int(match[2]) <= run_attempt or match[1] in producers:
+            raise ValueError("missing, duplicate, or unexpected staging artifact")
+        producers[match[1]] = (directory, int(match[2]))
+    if set(producers) != set(expected):
         raise ValueError("missing or unexpected staging artifact")
     output.mkdir()
     total = 0
     for artifact, files in expected.items():
-        directory = staging / artifact
+        directory, _ = producers[artifact]
         if directory.is_symlink() or not directory.is_dir() or {path.name for path in directory.iterdir()} != set(files):
             raise ValueError("unexpected staging artifact members")
         for name in files:
@@ -138,7 +153,8 @@ def publish(staging, output, identity, run_id, run_attempt, revision):
             shutil.copyfile(source, output / name)
     hashes = validate_files(output, identity)
     measurement = {"schema": "public-source-measurement-v1", **identity,
-                   "run_id": str(run_id), "run_attempt": int(run_attempt),
+                   "run_id": str(run_id), "run_attempt": run_attempt,
+                   "producer_attempts": {name: producers[name][1] for name in sorted(producers)},
                    "ci_revision": revision, "sha256": hashes}
     encoded = (json.dumps(measurement, sort_keys=True) + "\n").encode()
     if total + len(encoded) > MAX_TOTAL_BYTES:

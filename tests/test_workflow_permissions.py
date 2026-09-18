@@ -80,8 +80,13 @@ class PublicWorkflowPermissions(unittest.TestCase):
             "python-tests": [(str(index), f"Python tests ({index + 1}/4)", f"artifact_{index}")
                              for index in range(4)],
             "address-canonical-db-tests": [(shard, f"Database tests ({label})", "artifact_" + shard.replace("-", "_"))
-                                            for shard, label in (("core", "core"), ("provider-directory", "directory"),
-                                                                 ("provider-profile", "profiles"))],
+                                            for shard, label in (
+                                                ("core-services", "services"), ("core-imports", "imports"),
+                                                ("core-ptg", "PTG"), ("directory-source", "directory source"),
+                                                ("directory-storage", "directory storage"),
+                                                ("directory-address", "directory address"),
+                                                ("profile-storage", "profile storage"),
+                                                ("profile-publication", "profile publication"))],
         }
         artifact_ids = []
         for job_id, rows in expected.items():
@@ -108,9 +113,9 @@ class PublicWorkflowPermissions(unittest.TestCase):
         download = next(step for step in jobs["measurement"]["steps"]
                         if step.get("name") == "Download immutable measurement artifacts")
         self.assertEqual(set(download["with"]["artifact-ids"].split(",")), set(artifact_ids))
-        self.assertEqual(len(download["with"]["artifact-ids"].split(",")), 9)
+        self.assertEqual(len(download["with"]["artifact-ids"].split(",")), 14)
         self.assertEqual(sum(len(job.get("strategy", {}).get("matrix", {}).get("include", [None]))
-                             for job in jobs.values()), 18)
+                             for job in jobs.values()), 23)
 
     def test_cheap_lint_blocks_heavy_jobs_without_changing_measurement_producers(self):
         jobs = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())["jobs"]
@@ -130,6 +135,8 @@ class PublicWorkflowPermissions(unittest.TestCase):
         installer = next(step for step in database_job["steps"] if step.get("name") == "Install PostgreSQL client")
         command = installer["run"]
         self.assertIn("https://apt.postgresql.org/pub/repos/apt", command)
+        self.assertIn("Acquire::Retries=3", command)
+        self.assertIn("--retry-all-errors", command)
         self.assertIn("postgresql-client-18", command)
         self.assertIn('>> "$GITHUB_PATH"', command)
         self.assertIn("for tool in psql pg_dump pg_restore; do", command)

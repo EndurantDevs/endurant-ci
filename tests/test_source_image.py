@@ -65,12 +65,14 @@ def artifact(identifier, name, days):
             "expires_at": (NOW + timedelta(days=days)).isoformat()}
 
 
-def expected():
+def expected(producer_attempt=2, measurement_attempt=2):
     return {"identity": {**IDENTITY, "caller_workflow_blob_sha": "f" * 40},
-            "artifact": transfer.snapshot(artifact(44, "drug-public-image-staging-123-2", 1)),
-            "measurement": transfer.snapshot(artifact(55, "drug-public-measurement-123-2", 90)),
+            "artifact": transfer.snapshot(artifact(44, f"drug-public-image-staging-123-{producer_attempt}", 1)),
+            "measurement": transfer.snapshot(artifact(55, f"drug-public-measurement-123-{measurement_attempt}", 90)),
             "image": transfer.IMAGES[REPOSITORY] + ":dev-main-aaaaaaaa-20260909120000",
-            "workflow_id": 456, "producer_job_id": 1, "publisher_job_id": 4}
+            "workflow_id": 456, "producer_run_attempt": producer_attempt,
+            "measurement_run_attempt": measurement_attempt,
+            "producer_job_id": 1, "publisher_job_id": 4}
 
 
 def docker_archive(*, entries=None, extra=None):
@@ -133,7 +135,8 @@ class AdmissionChecks(unittest.TestCase):
             self.assertEqual(repository, REPOSITORY)
             return deepcopy(jobs if key == "jobs" else items)
 
-        with patch.dict(os.environ, {"GITHUB_JOB": "dev-image-publication"}), \
+        with patch.dict(os.environ, {"GITHUB_JOB": "dev-image-publication", "IMAGE_ARTIFACT_ID": "44",
+                                     "MEASUREMENT_ARTIFACT_ID": "55"}), \
                 patch.object(transfer, "context", return_value=(IDENTITY, run)), \
                 patch.object(transfer.github, "api", side_effect=api), patch.object(transfer.github, "pages", side_effect=pages):
             return transfer.admit()
@@ -154,6 +157,13 @@ class AdmissionChecks(unittest.TestCase):
                 self.admit(run, jobs, changed)
         with self.assertRaisesRegex(ValueError, "advanced"):
             self.admit(run, jobs, items, head="b" * 40)
+
+    def test_failed_only_rerun_uses_exact_prior_attempt_outputs(self):
+        run, jobs, items = self.fixtures()
+        jobs[0]["run_attempt"] = 1
+        items[0]["name"] = "drug-public-image-staging-123-1"
+        items[1]["name"] = "drug-public-measurement-123-1"
+        self.assertEqual(self.admit(run, jobs, items), expected(1, 1))
 
     def test_non_dev_publication_is_authenticated_noop(self):
         run, jobs, items = self.fixtures()
@@ -262,6 +272,7 @@ class TransferChecks(unittest.TestCase):
             calls, digest = self.exercise(directory, record)
             receipt = json.loads((directory.parent / "public-image-receipt/image.json").read_text())
             self.assertEqual(receipt, {"schema": "public-source-image-v1", **expected()["identity"],
+                "producer_run_attempt": 2, "measurement_run_attempt": 2,
                 "producer_artifact": {key: expected()["artifact"][key] for key in ("id", "name", "digest")},
                 "archive_sha256": record["archive_sha256"], "platform": "linux/amd64", "config_digest": CONFIG,
                 "image": expected()["image"], "manifest_digest": digest})
