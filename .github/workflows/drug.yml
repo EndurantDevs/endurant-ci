@@ -136,6 +136,6 @@ jobs:
             ${{ runner.temp }}/drug-public-measurement/coverage-provenance.json
             ${{ runner.temp }}/drug-public-measurement/measurement.json
           if-no-files-found: error
-          retention-days: 90
+          retention-days: 1
     outputs:
       measurement_artifact_id: ${{ steps.measurement-artifact.outputs.artifact-id }}

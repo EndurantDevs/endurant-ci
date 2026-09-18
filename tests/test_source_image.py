@@ -68,7 +68,7 @@ def artifact(identifier, name, days):
 def expected(producer_attempt=2, measurement_attempt=2):
     return {"identity": {**IDENTITY, "caller_workflow_blob_sha": "f" * 40},
             "artifact": transfer.snapshot(artifact(44, f"drug-public-image-staging-123-{producer_attempt}", 1)),
-            "measurement": transfer.snapshot(artifact(55, f"drug-public-measurement-123-{measurement_attempt}", 90)),
+            "measurement": transfer.snapshot(artifact(55, f"drug-public-measurement-123-{measurement_attempt}", 1)),
             "image": transfer.IMAGES[REPOSITORY] + ":dev-main-aaaaaaaa-20260909120000",
             "workflow_id": 456, "producer_run_attempt": producer_attempt,
             "measurement_run_attempt": measurement_attempt,
@@ -119,7 +119,7 @@ class AdmissionChecks(unittest.TestCase):
         jobs[0]["steps"] = [{"name": transfer.UPLOAD, "status": "completed", "conclusion": "success",
                              "started_at": (NOW - timedelta(seconds=5)).isoformat(),
                              "completed_at": (NOW + timedelta(seconds=5)).isoformat()}]
-        items = [artifact(44, "drug-public-image-staging-123-2", 1), artifact(55, "drug-public-measurement-123-2", 90)]
+        items = [artifact(44, "drug-public-image-staging-123-2", 1), artifact(55, "drug-public-measurement-123-2", 1)]
         return run, jobs, items
 
     def admit(self, run, jobs, items, head="a" * 40):
@@ -152,7 +152,7 @@ class AdmissionChecks(unittest.TestCase):
                 self.admit(run, changed, items)
         for changed in (items[:1], items[1:], items + [items[0]], [{**items[0], "expired": True}, items[1]],
                         [{**items[0], "created_at": (NOW - timedelta(minutes=1)).isoformat()}, items[1]],
-                        [items[0], artifact(55, items[1]["name"], 1)]):
+                        [items[0], {**items[1], "expired": True}]):
             with self.subTest(items=changed), self.assertRaises(ValueError):
                 self.admit(run, jobs, changed)
         with self.assertRaisesRegex(ValueError, "advanced"):
@@ -607,7 +607,7 @@ class IntentChecks(unittest.TestCase):
         with zipfile.ZipFile(output, "w") as archive:
             archive.writestr("intent.json" if intent else "image.json", json.dumps(payload))
         raw = output.getvalue()
-        item = {**artifact(88, transfer.proof_name(IDENTITY, intent), 90), "size_in_bytes": len(raw),
+        item = {**artifact(88, transfer.proof_name(IDENTITY, intent), 1), "size_in_bytes": len(raw),
                 "digest": "sha256:" + hashlib.sha256(raw).hexdigest()}
         with patch.object(transfer.github, "pages", return_value=[] if missing else [item]), \
                 patch.object(transfer.github, "api", return_value=item), \

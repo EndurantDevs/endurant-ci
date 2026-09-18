@@ -628,7 +628,7 @@ jobs:
         path: ${{ runner.temp }}/healthcare-public-measurement/
         include-hidden-files: true
         if-no-files-found: error
-        retention-days: 90
+        retention-days: 1
     outputs:
       measurement_artifact_id: ${{ steps.measurement-artifact.outputs.artifact-id }}
   source-validation:

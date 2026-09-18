@@ -329,8 +329,8 @@ def admit():
             or not DIGEST.fullmatch(candidates[0].get("digest", "")) or candidates[0].get("size_in_bytes", 0) <= 0
             or not (artifacts.timestamp(uploads[0]["started_at"]) <= artifacts.timestamp(candidates[0]["created_at"])
                     <= artifacts.timestamp(uploads[0]["completed_at"]))
-            or measurement_attempt is None or not artifacts.durable(finals[0], run)):
-        raise ValueError("publication requires its exact completed artifact and durable measurement")
+            or measurement_attempt is None or not artifacts.current_evidence(finals[0], run)):
+        raise ValueError("publication requires its exact completed artifact and current measurement")
     caller = github.api(repository, f"contents/.github/workflows/ci.yml?ref={identity['source_sha']}").get("sha", "")
     if not github.SHA.fullmatch(caller):
         raise ValueError("publication caller workflow identity is missing")
@@ -515,11 +515,11 @@ def uploaded_payload(expected, run, job, *, intent=False):
         if not items and steps[0].get("conclusion") == "skipped":
             return None
     if (len(items) != 1 or len(steps) != 1 or steps[0].get("status") != "completed"
-            or steps[0].get("conclusion") != "success" or not artifacts.durable(items[0], run)
+            or steps[0].get("conclusion") != "success" or not artifacts.current_evidence(items[0], run)
             or not 0 < items[0].get("size_in_bytes", 0) <= 131072 or not DIGEST.fullmatch(items[0].get("digest", ""))
             or not (artifacts.timestamp(steps[0]["started_at"]) <= artifacts.timestamp(items[0]["created_at"])
                     <= artifacts.timestamp(steps[0]["completed_at"]))):
-        raise ValueError("durable publication upload is missing, ambiguous, or incomplete")
+        raise ValueError("current publication upload is missing, ambiguous, or incomplete")
     item = items[0]
     if snapshot(github.api(repository, f"actions/artifacts/{item['id']}")) != snapshot(item):
         raise ValueError("durable publication artifact identity changed")
