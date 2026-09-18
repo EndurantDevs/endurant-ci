@@ -113,16 +113,18 @@ class RenderWorkflowChecks(unittest.TestCase):
                 self.assertEqual(publisher["permissions"], {"contents": "read", "pull-requests": "read", "actions": "read", "packages": "write"})
                 expected_needs = ["smoke", "source-validation", producer, measurement] if kind == "healthcare" else ["smoke", "publish", producer]
                 self.assertEqual(publisher["needs"], expected_needs)
-                self.assertEqual(publisher["env"], {"CI_REVISION": "1" * 40, "PYTHONDONTWRITEBYTECODE": "1"})
+                self.assertEqual(publisher["env"], {
+                    "CI_REVISION": "1" * 40,
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "IMAGE_ARTIFACT_ID": "${{ needs." + producer + ".outputs.image_artifact_id }}",
+                    "MEASUREMENT_ARTIFACT_ID": "${{ needs." + measurement + ".outputs.measurement_artifact_id }}",
+                })
                 self.assertEqual(publisher["outputs"], {"receipt_artifact_id": "${{ steps.receipt-artifact.outputs.artifact-id }}"})
                 self.assertEqual(publisher["steps"][0]["with"], {"repository": "EndurantDevs/endurant-ci", "ref": "1" * 40,
                                  "path": "ci", "persist-credentials": False})
                 self.assertNotIn("if", publisher["steps"][1])
                 self.assertEqual(publisher["steps"][1]["run"], "python3 ci/scripts/source_image.py prepare")
-                self.assertEqual(publisher["steps"][1]["env"], {
-                    "GH_TOKEN": "${{ github.token }}",
-                    "IMAGE_ARTIFACT_ID": "${{ needs." + producer + ".outputs.image_artifact_id }}",
-                    "MEASUREMENT_ARTIFACT_ID": "${{ needs." + measurement + ".outputs.measurement_artifact_id }}"})
+                self.assertEqual(publisher["steps"][1]["env"], {"GH_TOKEN": "${{ github.token }}"})
                 steps = {step["name"]: step for step in publisher["steps"]}
                 self.assertEqual(len(steps), len(publisher["steps"]))
                 self.assertEqual(steps["Stage DEV image publication intent"]["run"], "python3 ci/scripts/source_image.py stage")
