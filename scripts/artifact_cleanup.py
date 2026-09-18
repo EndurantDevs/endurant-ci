@@ -333,9 +333,6 @@ def cleanup(repository, expected):
               if artifact.get("id") == expected.get("measurement_artifact_id")]
     candidates = [artifact for artifact in artifacts
                   if artifact.get("name") in temporary_names(kind, expected) and available(artifact, expected)]
-    if not candidates:
-        print("No retained intermediates to remove.")
-        return 0
     successful = all(conclusion == "success" for _, name, _, conclusion in consumers if name != CLEANUP_JOB)
     if not successful:
         print("Retained intermediates for a failed-only rerun.")
@@ -348,7 +345,7 @@ def cleanup(repository, expected):
     proofs.append(finals[0])
     image_candidates = [item for item in candidates
                         if artifact_attempt(item.get("name"), f"{kind}-public-image-staging", expected)]
-    if image_candidates:
+    if expected.get("image_artifact_id"):
         if sum(item.get("id") == expected.get("image_artifact_id") for item in image_candidates) != 1:
             raise ValueError("retained image archive: exact tested image artifact is missing")
         receipts = [item for item in artifacts
@@ -358,6 +355,9 @@ def cleanup(repository, expected):
                 or not durable(receipts[0], expected)):
             raise ValueError("retained image archive: durable publication receipt is missing or invalid")
         proofs.append(receipts[0])
+    if not candidates:
+        print("No retained intermediates to remove.")
+        return 0
     deleted = 0
     for artifact in candidates:
         # Refresh consumer completion, immutable artifacts, and run before each delete.

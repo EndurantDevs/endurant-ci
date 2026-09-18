@@ -187,9 +187,19 @@ class ArtifactCleanupChecks(unittest.TestCase):
             self.exercise([temporary, final], delete_error=True)
 
     def test_conflicting_producer_metadata_is_preserved(self):
+        final = artifact(2, "healthcare-public-measurement-123-2", 90)
         for producer in ({"id": 999}, {"id": 123, "head_sha": "c" * 40}):
             item = {**artifact(1, "mrf-rust-coverage-123-2"), "workflow_run": producer}
-            self.assertEqual(self.exercise([item])[0], [])
+            self.assertEqual(self.exercise([item, final])[0], [])
+
+    def test_success_without_intermediates_still_requires_final_evidence(self):
+        with self.assertRaisesRegex(ValueError, "durable public measurement"):
+            self.exercise([])
+        expected = {**run("EndurantDevs/drug-api"), "event": "push", "head_branch": "dev",
+                    "image_artifact_id": 77, "image_receipt_artifact_id": 78}
+        measurement = artifact(2, "drug-public-measurement-123-2", 90)
+        with self.assertRaisesRegex(ValueError, "exact tested image"):
+            self.exercise([measurement], expected)
 
     def test_dev_archive_requires_durable_publication_and_preserves_both_final_receipts(self):
         expected = {**run("EndurantDevs/drug-api"), "event": "push", "head_branch": "dev"}
@@ -203,7 +213,9 @@ class ArtifactCleanupChecks(unittest.TestCase):
         self.assertEqual(deleted, [1])
         with self.assertRaisesRegex(ValueError, "publication changed"):
             self.exercise([archive, measurement, publication], expected, changed_artifact=(3, {"digest": "sha256:" + "c" * 64}))
-        self.assertEqual(self.exercise([archive, measurement, publication], run("EndurantDevs/drug-api"))[0], [])
+        self.assertEqual(self.exercise([measurement], run("EndurantDevs/drug-api"))[0], [])
+        with self.assertRaisesRegex(ValueError, "exact tested image"):
+            self.exercise([archive, measurement, publication], run("EndurantDevs/drug-api"))
 
         failed_jobs = jobs()
         failed_jobs[0]["conclusion"] = "failure"
