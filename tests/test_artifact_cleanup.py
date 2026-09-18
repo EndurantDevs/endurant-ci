@@ -114,7 +114,7 @@ class ArtifactCleanupChecks(unittest.TestCase):
             names = sorted(cleanup.temporary_names(kind, expected))
             intermediates = [artifact(index + 1, name) for index, name in enumerate(names)]
             current_name = next(name for name in names if name.endswith("-123-2"))
-            keep = [artifact(100, f"{kind}-public-measurement-123-2", 90),
+            keep = [artifact(100, f"{kind}-public-measurement-123-2", 1),
                     artifact(101, current_name.removesuffix("-2") + "-3"),
                     artifact(102, current_name.replace("123-2", "999-2")),
                     artifact(103, current_name + "-unknown"),
@@ -138,14 +138,14 @@ class ArtifactCleanupChecks(unittest.TestCase):
             cleanup.cleanup("Other/service", run())
 
     def test_rerun_source_or_workflow_change_before_delete_preserves_artifacts(self):
-        items = [artifact(1, "mrf-rust-coverage-123-2"), artifact(2, "healthcare-public-measurement-123-2", 90)]
+        items = [artifact(1, "mrf-rust-coverage-123-2"), artifact(2, "healthcare-public-measurement-123-2", 1)]
         for changes in ({"run_attempt": 3}, {"status": "completed"}, {"head_sha": "c" * 40},
                         {"workflow_id": 999}, {"repository": {"full_name": "Other/service"}}):
             with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "stopped after 0 deletions"):
                 self.exercise(items, refresh=changes)
 
     def test_consumers_must_all_finish_in_the_same_attempt_before_each_delete(self):
-        items = [artifact(1, "mrf-rust-coverage-123-2"), artifact(2, "healthcare-public-measurement-123-2", 90)]
+        items = [artifact(1, "mrf-rust-coverage-123-2"), artifact(2, "healthcare-public-measurement-123-2", 1)]
         for changes in ({"status": "in_progress", "conclusion": None}, {"status": "queued", "conclusion": None},
                         {"conclusion": None}, {"conclusion": "unknown"}, {"run_id": 999},
                         {"head_sha": "c" * 40}):
@@ -173,11 +173,13 @@ class ArtifactCleanupChecks(unittest.TestCase):
         unknown = artifact(2, "unknown")
         self.assertEqual(self.exercise([temporary, unknown], job_inventory=failed_jobs)[0], [])
 
-    def test_final_measurement_must_exist_and_remain_durable(self):
+    def test_final_measurement_must_exist_and_remain_current(self):
         temporary = artifact(1, "mrf-rust-coverage-123-2")
-        final = artifact(2, "healthcare-public-measurement-123-2", 90)
-        for replacement in ([], [artifact(2, final["name"], 1)], [{**final, "expired": True}],
-                            [{**final, "size_in_bytes": 0}], [final, {**final, "id": 3}]):
+        final = artifact(2, "healthcare-public-measurement-123-2", 1)
+        for replacement in ([], [{**final, "expired": True}],
+                            [{**final, "expires_at": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()}],
+                            [{**final, "size_in_bytes": 0}],
+                            [final, {**final, "id": 3}]):
             with self.subTest(replacement=replacement), self.assertRaises(ValueError):
                 self.exercise([temporary, *replacement])
         for changes in ({"name": "unknown"}, {"expired": True}, {"digest": "sha256:" + "c" * 64}):
@@ -187,27 +189,27 @@ class ArtifactCleanupChecks(unittest.TestCase):
             self.exercise([temporary, final], delete_error=True)
 
     def test_conflicting_producer_metadata_is_preserved(self):
-        final = artifact(2, "healthcare-public-measurement-123-2", 90)
+        final = artifact(2, "healthcare-public-measurement-123-2", 1)
         for producer in ({"id": 999}, {"id": 123, "head_sha": "c" * 40}):
             item = {**artifact(1, "mrf-rust-coverage-123-2"), "workflow_run": producer}
             self.assertEqual(self.exercise([item, final])[0], [])
 
     def test_success_without_intermediates_still_requires_final_evidence(self):
-        with self.assertRaisesRegex(ValueError, "durable public measurement"):
+        with self.assertRaisesRegex(ValueError, "current public measurement"):
             self.exercise([])
         expected = {**run("EndurantDevs/drug-api"), "event": "push", "head_branch": "dev",
                     "image_artifact_id": 77, "image_receipt_artifact_id": 78}
-        measurement = artifact(2, "drug-public-measurement-123-2", 90)
+        measurement = artifact(2, "drug-public-measurement-123-2", 1)
         with self.assertRaisesRegex(ValueError, "exact tested image"):
             self.exercise([measurement], expected)
 
-    def test_dev_archive_requires_durable_publication_and_preserves_both_final_receipts(self):
+    def test_dev_archive_requires_current_publication_and_preserves_both_final_receipts(self):
         expected = {**run("EndurantDevs/drug-api"), "event": "push", "head_branch": "dev"}
         archive = artifact(1, "drug-public-image-staging-123-2")
-        measurement = artifact(2, "drug-public-measurement-123-2", 90)
-        publication = artifact(3, "drug-public-image-123-2", 90)
-        for receipts in ([], [artifact(3, publication["name"], 1)], [{**publication, "expired": True}]):
-            with self.subTest(receipts=receipts), self.assertRaisesRegex(ValueError, "durable publication"):
+        measurement = artifact(2, "drug-public-measurement-123-2", 1)
+        publication = artifact(3, "drug-public-image-123-2", 1)
+        for receipts in ([], [{**publication, "expired": True}], [{**publication, "size_in_bytes": 0}]):
+            with self.subTest(receipts=receipts), self.assertRaisesRegex(ValueError, "current publication"):
                 self.exercise([archive, measurement, *receipts], expected)
         deleted, _ = self.exercise([archive, measurement, publication], expected)
         self.assertEqual(deleted, [1])
@@ -264,7 +266,12 @@ class ArtifactCleanupChecks(unittest.TestCase):
         items[8]["name"] = "healthcare-public-measurement-109-1"
         items[-2]["name"] = "healthcare-public-image-111-1"
         items[-1]["name"] = "healthcare-public-image-112-1"
-        items.append(artifact(50, "unknown-durable", 90))
+        items.extend([
+            artifact(50, "unknown-durable", 90),
+            artifact(51, "healthcare-public-measurement-999-1", 1),
+            artifact(52, "healthcare-public-image-intent-999-1", 1),
+            artifact(53, "healthcare-public-image-999-1", 1),
+        ])
         deleted = []
 
         def api(actual_repository, path, method="GET"):
@@ -424,10 +431,9 @@ class ArtifactCleanupChecks(unittest.TestCase):
                     if not step.get("uses", "").startswith("actions/upload-artifact@"):
                         continue
                     upload = step["with"]
-                    if "public-measurement" in upload["name"]:
-                        self.assertEqual(upload["retention-days"], "90")
-                        continue
                     self.assertEqual(upload["retention-days"], "1")
+                    if "public-measurement" in upload["name"]:
+                        continue
                     for row in definition.get("strategy", {}).get("matrix", {}).get("include", [{}]):
                         names.add(upload["name"].replace("${{ github.run_id }}", "123")
                                   .replace("${{ github.run_attempt }}", "2")

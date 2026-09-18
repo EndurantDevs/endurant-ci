@@ -109,10 +109,16 @@ def available(artifact, run):
     )
 
 
-def durable(artifact, run):
+def current_evidence(artifact, run):
     return bool(
         available(artifact, run) and artifact.get("size_in_bytes", 0) > 0
         and timestamp(artifact["expires_at"]) > datetime.now(timezone.utc)
+    )
+
+
+def durable(artifact, run):
+    return bool(
+        current_evidence(artifact, run)
         and timestamp(artifact["expires_at"]) - timestamp(artifact["created_at"]) >= timedelta(days=89)
     )
 
@@ -240,7 +246,8 @@ def stale_cleanup(repository, expected):
     seen_ids = set()
     for artifact in artifact_pages(repository):
         parts = durable_parts(kind, artifact.get("name"))
-        if not parts or artifact.get("expired") is not False:
+        if (not parts or artifact.get("expired") is not False
+                or timestamp(artifact["expires_at"]) - timestamp(artifact["created_at"]) < timedelta(days=89)):
             continue
         category, *identity = parts
         if artifact.get("id") in seen_ids:
@@ -340,8 +347,8 @@ def cleanup(repository, expected):
     proofs = []
     if (len(finals) != 1 or sum(item.get("name") == finals[0].get("name") for item in artifacts) != 1
             or artifact_attempt(finals[0].get("name"), f"{kind}-public-measurement", expected) is None
-            or not durable(finals[0], expected)):
-        raise ValueError("retained intermediates: exact durable public measurement is missing or invalid")
+            or not current_evidence(finals[0], expected)):
+        raise ValueError("retained intermediates: exact current public measurement is missing or invalid")
     proofs.append(finals[0])
     image_candidates = [item for item in candidates
                         if artifact_attempt(item.get("name"), f"{kind}-public-image-staging", expected)]
@@ -352,8 +359,8 @@ def cleanup(repository, expected):
                     if item.get("id") == expected.get("image_receipt_artifact_id")]
         if (len(receipts) != 1
                 or artifact_attempt(receipts[0].get("name"), f"{kind}-public-image", expected) is None
-                or not durable(receipts[0], expected)):
-            raise ValueError("retained image archive: durable publication receipt is missing or invalid")
+                or not current_evidence(receipts[0], expected)):
+            raise ValueError("retained image archive: current publication receipt is missing or invalid")
         proofs.append(receipts[0])
     if not candidates:
         print("No retained intermediates to remove.")
@@ -368,8 +375,8 @@ def cleanup(repository, expected):
             raise ValueError("retained intermediates: artifact identity changed")
         for proof in proofs:
             measurement = github.api(repository, f"actions/artifacts/{proof['id']}")
-            if not durable(measurement, expected) or any(measurement.get(key) != proof.get(key) for key in ARTIFACT_FIELDS):
-                raise ValueError("retained intermediates: durable measurement or publication changed")
+            if not current_evidence(measurement, expected) or any(measurement.get(key) != proof.get(key) for key in ARTIFACT_FIELDS):
+                raise ValueError("retained intermediates: current measurement or publication changed")
         if not current_run(github.api(repository, run_path), expected, repository):
             raise ValueError(f"stopped after {deleted} deletions: producing run changed")
         github.api(repository, f"actions/artifacts/{artifact['id']}", "DELETE")
@@ -411,7 +418,7 @@ def main():
         ("image_receipt_artifact_id", "IMAGE_RECEIPT_ARTIFACT_ID"),
     )}
     if not re.fullmatch(r"[1-9][0-9]*", identifiers["measurement_artifact_id"]):
-        raise ValueError("cleanup requires the exact durable measurement artifact")
+        raise ValueError("cleanup requires the exact current measurement artifact")
     if event == "push" and branch == "dev" and any(
             not re.fullmatch(r"[1-9][0-9]*", identifiers[name])
             for name in ("image_artifact_id", "image_receipt_artifact_id")):
