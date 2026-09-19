@@ -168,17 +168,21 @@ def _source_if_present(revision: str, path: str) -> bytes | None:
     return _source_at_revision(revision, path)
 
 
-def _has_ruff_pyproject_settings(content: bytes | None) -> bool:
+def _ruff_pyproject_settings(content: bytes | None) -> dict | None:
     """Parse one pyproject blob so quoted TOML keys cannot bypass the policy guard."""
 
     if content is None:
-        return False
+        return None
     try:
         document = tomllib.loads(content.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         raise ValueError("changed pyproject.toml is not valid TOML") from error
     tool = document.get("tool")
-    return isinstance(tool, dict) and "ruff" in tool
+    return tool.get("ruff") if isinstance(tool, dict) else None
+
+
+def _has_ruff_pyproject_settings(content: bytes | None) -> bool:
+    return _ruff_pyproject_settings(content) is not None
 
 
 def _ruff_configuration_changes(base: str, head: str) -> bool:
@@ -191,7 +195,8 @@ def _ruff_configuration_changes(base: str, head: str) -> bool:
         if name != "pyproject.toml":
             return True
         contents = (_source_if_present(base, path), _source_if_present(head, path))
-        if any(_has_ruff_pyproject_settings(content) for content in contents):
+        before, after = (_ruff_pyproject_settings(content) for content in contents)
+        if before != after:
             return True
     return False
 
