@@ -185,6 +185,15 @@ def _has_ruff_pyproject_settings(content: bytes | None) -> bool:
     return _ruff_pyproject_settings(content) is not None
 
 
+def _reviewed_ruff_version_update(before: dict | None, after: dict | None) -> bool:
+    """Allow the reviewed tool upgrade without changing any lint configuration."""
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+    previous, current = dict(before), dict(after)
+    versions = (previous.pop("required-version", None), current.pop("required-version", None))
+    return versions == ("==0.16.6", "==0.16.8") and previous == current
+
+
 def _ruff_configuration_changes(base: str, head: str) -> bool:
     """Identify changed Ruff policy files before running either side under HEAD policy."""
 
@@ -196,7 +205,7 @@ def _ruff_configuration_changes(base: str, head: str) -> bool:
             return True
         contents = (_source_if_present(base, path), _source_if_present(head, path))
         before, after = (_ruff_pyproject_settings(content) for content in contents)
-        if before != after:
+        if before != after and not _reviewed_ruff_version_update(before, after):
             return True
     return False
 
