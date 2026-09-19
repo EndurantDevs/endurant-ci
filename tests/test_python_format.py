@@ -140,6 +140,24 @@ class PythonFormattingTests(unittest.TestCase):
         ):
             self.assertTrue(FORMAT._ruff_configuration_changes("a" * 40, "b" * 40))
 
+    def test_dependency_changes_preserve_unchanged_ruff_policy(self):
+        before = b'[project]\ndependencies = ["example==1"]\n[tool.ruff]\nline-length = 120\n'
+        after = before.replace(b"example==1", b"example==2")
+        with (
+            patch.object(FORMAT, "_changed_paths", return_value=["pyproject.toml"]),
+            patch.object(FORMAT, "_source_if_present", side_effect=[before, after]),
+        ):
+            self.assertFalse(FORMAT._ruff_configuration_changes("a" * 40, "b" * 40))
+
+    def test_dependency_changes_cannot_hide_changed_ruff_rules(self):
+        before = b'[project]\ndependencies = ["example==1"]\n[tool.ruff.lint]\nselect = ["F"]\n'
+        after = before.replace(b"example==1", b"example==2").replace(b'["F"]', b'[]')
+        with (
+            patch.object(FORMAT, "_changed_paths", return_value=["pyproject.toml"]),
+            patch.object(FORMAT, "_source_if_present", side_effect=[before, after]),
+        ):
+            self.assertTrue(FORMAT._ruff_configuration_changes("a" * 40, "b" * 40))
+
     def test_quoted_or_inline_ruff_pyproject_settings_trip_the_configuration_guard(self):
         for contents in (
             b'[tool."ruff".lint]\nignore = ["F821"]\n',
