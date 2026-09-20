@@ -194,7 +194,11 @@ run_python_main() {
     tests/test_custom_import_execution_postgres.py \
     tests/test_custom_import_publication_postgres.py \
     tests/test_custom_import_materialization_postgres.py \
-    tests/test_custom_import_read_core_postgres.py; do
+    tests/test_custom_import_read_core_postgres.py \
+    tests/test_entity_address_result_generation_postgres.py \
+    tests/test_mrf_result_archive_postgres.py \
+    tests/test_reference_family_archive_postgres.py \
+    tests/test_reference_family_result_generation_postgres.py; do
     if [ -f "$repository_root/$test_path" ]; then
       collection_args+=(--ignore "$test_path")
     fi
@@ -799,6 +803,48 @@ run_core_postgres() {
     HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN=$dsn \
       timeout --foreground 295s python -m pytest -q \
         "${custom_import_postgres_tests[@]}"
+  fi
+
+  local reference_family_postgres_tests=()
+  for test_path in \
+    tests/test_reference_family_archive_postgres.py \
+    tests/test_reference_family_result_generation_postgres.py; do
+    if [ -f "$repository_root/$test_path" ]; then
+      reference_family_postgres_tests+=("$test_path")
+    fi
+  done
+  if [ "${#reference_family_postgres_tests[@]}" -gt 0 ]; then
+    local database="hc_reference_family_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+    create_test_database "$database"
+    if ! HLTHPRT_REFERENCE_FAMILY_ARCHIVE_TEST_DSN="${dsn%/*}/$database" \
+      timeout --foreground 295s python -m pytest -q "${reference_family_postgres_tests[@]}"; then
+      drop_test_database "$database"
+      return 1
+    fi
+    drop_test_database "$database"
+  fi
+
+  if [ -f "$repository_root/tests/test_entity_address_result_generation_postgres.py" ]; then
+    database="hc_address_generation_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+    create_test_database "$database"
+    if ! HLTHPRT_ENTITY_ADDRESS_GENERATION_TEST_DSN="${dsn%/*}/$database" \
+      timeout --foreground 295s python -m pytest -q \
+        tests/test_entity_address_result_generation_postgres.py; then
+      drop_test_database "$database"
+      return 1
+    fi
+    drop_test_database "$database"
+  fi
+
+  if [ -f "$repository_root/tests/test_mrf_result_archive_postgres.py" ]; then
+    database="hc_mrf_archive_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+    create_test_database "$database"
+    if ! HLTHPRT_MRF_RESULT_ARCHIVE_TEST_DSN="${dsn%/*}/$database" \
+      timeout --foreground 295s python -m pytest -q tests/test_mrf_result_archive_postgres.py; then
+      drop_test_database "$database"
+      return 1
+    fi
+    drop_test_database "$database"
   fi
   fi
 
