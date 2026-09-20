@@ -950,6 +950,70 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                 else:
                     self.assertEqual(executions, [])
 
+    def test_result_archive_postgres_tests_use_isolated_core_import_databases(self):
+        test_paths = (
+            "tests/test_entity_address_result_generation_postgres.py",
+            "tests/test_mrf_result_archive_postgres.py",
+            "tests/test_reference_family_archive_postgres.py",
+            "tests/test_reference_family_result_generation_postgres.py",
+        )
+        dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            (source / "tests").mkdir(parents=True)
+            for test_path in test_paths:
+                (source / test_path).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
+            call_log = root / "calls"
+            env = {
+                **os.environ,
+                "SOURCE_ROOT": str(source),
+                "CI_ROOT": str(ROOT),
+                "CI_DEPS_READY": "1",
+                "COVERAGE_BASE_SHA": "a" * 40,
+                "HLTHPRT_DB_PASSWORD": "postgres",
+                "CALL_LOG": str(call_log),
+            }
+            script = CHECK_FUNCTIONS + r'''
+mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
+prepare_debug_rust_binaries() { :; }
+create_test_database() { printf 'create\t%s\n' "$1" >> "$CALL_LOG"; }
+drop_test_database() { printf 'drop\t%s\n' "$1" >> "$CALL_LOG"; }
+python() {
+  printf '%s\t%s\t%s\t%s\n' \
+    "${HLTHPRT_REFERENCE_FAMILY_ARCHIVE_TEST_DSN:-}" \
+    "${HLTHPRT_ENTITY_ADDRESS_GENERATION_TEST_DSN:-}" \
+    "${HLTHPRT_MRF_RESULT_ARCHIVE_TEST_DSN:-}" \
+    "$*" >> "$CALL_LOG"
+}
+timeout() {
+  shift 2
+  "$@"
+}
+run_python_main 0
+run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" core-imports
+'''
+            subprocess.run(["bash", "-euc", script], cwd=source, env=env, check=True)
+            calls = call_log.read_text().splitlines()
+            main_call = next(call for call in calls if "--ci-shard-count 4" in call)
+            for test_path in test_paths:
+                self.assertIn(f"--ignore {test_path}", main_call)
+
+            reference_call = next(call for call in calls if test_paths[2] in call and "--ignore" not in call)
+            self.assertIn(test_paths[3], reference_call)
+            entity_call = next(call for call in calls if test_paths[0] in call and "--ignore" not in call)
+            mrf_call = next(call for call in calls if test_paths[1] in call and "--ignore" not in call)
+            reference_dsn = reference_call.split("\t", 1)[0]
+            entity_dsn = entity_call.split("\t", 2)[1]
+            mrf_dsn = mrf_call.split("\t", 3)[2]
+            self.assertRegex(reference_dsn, rf"^{dsn.rsplit('/', 1)[0]}/hc_reference_family_[0-9a-f]{{32}}$")
+            self.assertRegex(entity_dsn, rf"^{dsn.rsplit('/', 1)[0]}/hc_address_generation_[0-9a-f]{{32}}$")
+            self.assertRegex(mrf_dsn, rf"^{dsn.rsplit('/', 1)[0]}/hc_mrf_archive_[0-9a-f]{{32}}$")
+            databases = tuple(value.rsplit("/", 1)[1] for value in (reference_dsn, entity_dsn, mrf_dsn))
+            for database in databases:
+                self.assertEqual(calls.count(f"create\t{database}"), 1)
+                self.assertEqual(calls.count(f"drop\t{database}"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
