@@ -3,7 +3,7 @@ set -euo pipefail
 
 input_root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source_root=${SOURCE_ROOT:?SOURCE_ROOT must identify the public source checkout}
-readonly UV_VERSION=0.12.12
+readonly UV_VERSION=0.12.17
 unset PYTHONPATH || true
 
 case "$#:${1-}" in

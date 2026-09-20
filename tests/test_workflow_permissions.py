@@ -14,11 +14,11 @@ class PublicWorkflowPermissions(unittest.TestCase):
     def check_steps(self, steps, *, composite=False):
         for index, step in enumerate(steps):
             run = step.get("run", "")
-            if "uv==0.12.12" in run:
+            if "uv==0.12.17" in run:
                 self.assertIn("--only-binary=:all: --require-hashes -r /dev/stdin", run)
                 self.assertIn(
-                    "uv==0.12.12 --hash=sha256:fa5df02fc619a3cc7a58810d6ffeb80c"
-                    "a1e01404b8ef7239bd1cf2103c02cacf",
+                    "uv==0.12.17 --hash=sha256:9e25bb39e1674799c408345a6397ebc2"
+                    "c7c719d498be0ce9d935466d36ceacf5",
                     run,
                 )
             if "uses" not in step:

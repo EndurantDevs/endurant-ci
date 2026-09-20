@@ -17,7 +17,7 @@ repository_root = (
 input_names = ("requirements.txt", "requirements-dev.txt", "requirements-ci.in")
 ci_inputs = Path(__file__).resolve().parent
 target = "# Target: CPython 3.14.7 (Linux x86_64)"
-resolver = "# Resolver: uv 0.12.12"
+resolver = "# Resolver: uv 0.12.17"
 required_packages = {"pip-audit": "2.10.1", "pip": "26.2.1"}
 hash_line = re.compile(r"    --hash=sha256:[0-9a-f]{64}(?: \\)?$")
 lock_path = repository_root / "requirements-ci.lock"

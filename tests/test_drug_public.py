@@ -152,7 +152,7 @@ class PublicDrugTests(unittest.TestCase):
     def test_validation_uses_pinned_uv_and_lockfile_provenance(self):
         gate = (ROOT / "scripts/drug/check").read_text()
         workflow = (ROOT / ".github/workflows/drug.yml").read_text()
-        self.assertIn("readonly UV_VERSION='0.12.12'", gate)
+        self.assertIn("readonly UV_VERSION='0.12.17'", gate)
         self.assertIn("uv --no-config sync --locked --all-groups --python \"$python_bin\" --no-build", gate)
         self.assertIn("uv --no-config export --quiet --locked --all-groups", gate)
         self.assertIn("uv_lock_sha256=", gate)
@@ -160,8 +160,8 @@ class PublicDrugTests(unittest.TestCase):
         self.assertIn("actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97", workflow)
         self.assertIn("--only-binary=:all: --require-hashes -r /dev/stdin", workflow)
         self.assertIn(
-            "uv==0.12.12 --hash=sha256:fa5df02fc619a3cc7a58810d6ffeb80c"
-            "a1e01404b8ef7239bd1cf2103c02cacf",
+            "uv==0.12.17 --hash=sha256:9e25bb39e1674799c408345a6397ebc2"
+            "c7c719d498be0ce9d935466d36ceacf5",
             workflow,
         )
         self.assertNotIn("astral-sh/setup-uv@", workflow)

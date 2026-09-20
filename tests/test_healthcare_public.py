@@ -256,8 +256,8 @@ run_provider_profile_postgres postgresql://synthetic/original
         self.assertIn("actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97", setup)
         self.assertIn("--only-binary=:all: --require-hashes -r /dev/stdin", setup)
         self.assertIn(
-            "uv==0.12.12 --hash=sha256:fa5df02fc619a3cc7a58810d6ffeb80c"
-            "a1e01404b8ef7239bd1cf2103c02cacf",
+            "uv==0.12.17 --hash=sha256:9e25bb39e1674799c408345a6397ebc2"
+            "c7c719d498be0ce9d935466d36ceacf5",
             setup,
         )
         self.assertNotIn("astral-sh/setup-uv@", setup)
@@ -296,7 +296,7 @@ run_provider_profile_postgres postgresql://synthetic/original
                   for name in input_names),
                 f"# Input: requirements-ci.in ({hashlib.sha256(ci_input.read_bytes()).hexdigest()})",
                 "# Target: CPython 3.14.7 (Linux x86_64)",
-                "# Resolver: uv 0.12.12",
+                "# Resolver: uv 0.12.17",
                 "--only-binary :all:",
                 "",
                 "pip-audit==2.10.1 \\",
@@ -622,7 +622,7 @@ RUNTIME_BASE_IMAGE=synthetic
                        "CI_DEPS_READY": "0", "CI_PYTHON_ENV_READY": "0",
                        "PREPUSH_DEPS_READY": "0", "PREPUSH_PYTHON_ENV_READY": "0"}
                 result = subprocess.run(
-                    ["bash", "-euc", 'uv() { [ "$1 $2" = "--no-config --version" ] && { echo "uv 0.12.12"; return; }; return "$VENV_STATUS"; };\n'
+                    ["bash", "-euc", 'uv() { [ "$1 $2" = "--no-config --version" ] && { echo "uv 0.12.17"; return; }; return "$VENV_STATUS"; };\n'
                      'rm() { [ "$REMOVE_STATUS" = 0 ] || return "$REMOVE_STATUS"; command rm "$@"; };\n' +
                      (ROOT / "scripts/phase_timing.sh").read_text() + "\n" + function +
                      "\nci_phase_begin python-environment\nprepare_python_environment\n"], env=env, capture_output=True, text=True,
@@ -665,7 +665,7 @@ rustc() { echo 'rustc 1.98.1'; }
 timeout() { [ "$ci_phase_name" != "$FAIL_PHASE" ] || return 17; }
 uv() {
   case "$*" in
-    '--no-config --version') echo 'uv 0.12.12'; return ;;
+    '--no-config --version') echo 'uv 0.12.17'; return ;;
     '--no-config venv '*) mkdir -p "${!#}/bin"; return ;;
   esac
   [ "$ci_phase_name" != "$FAIL_PHASE" ] || return 17

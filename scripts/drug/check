@@ -7,7 +7,7 @@ cd "${SOURCE_ROOT:?SOURCE_ROOT must name the exact public checkout}"
 source "$CI_ROOT/scripts/phase_timing.sh"
 
 readonly PYTHON_VERSION='3.14.7'
-readonly UV_VERSION='0.12.12'
+readonly UV_VERSION='0.12.17'
 readonly POSTGRES_IMAGE='postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280'
 readonly REDIS_IMAGE='redis:7@sha256:71da9275c5f3fcb97d0fa0c8c5b36cc995327265420f17a04bfd544f458059f7'
 readonly RUNTIME_BASE_IMAGE='python:3.14.7-slim-trixie@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6'

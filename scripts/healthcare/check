@@ -59,7 +59,7 @@ prepare_python_environment() {
     exit "$status"
   }
   trap cleanup_python_environment EXIT
-  test "$(uv --no-config --version | awk '{print $2}')" = 0.12.12
+  test "$(uv --no-config --version | awk '{print $2}')" = 0.12.17
   uv --no-config venv --python 3.14.7 --no-python-downloads "$python_environment_root/venv"
   export VIRTUAL_ENV="$python_environment_root/venv"
   export PATH="$VIRTUAL_ENV/bin:$PATH"
