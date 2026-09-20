@@ -5,7 +5,7 @@ cd "$input_root"
 set -euo pipefail
 unset PYTHONPATH || true
 
-readonly UV_VERSION=0.12.12
+readonly UV_VERSION=0.12.17
 readonly PYTHON_VERSION=3.14.7
 test "$(uv --no-config --version | awk '{print $2}')" = "$UV_VERSION"
 python_bin=$(uv --no-config python find "$PYTHON_VERSION")
