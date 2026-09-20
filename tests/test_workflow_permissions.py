@@ -14,7 +14,7 @@ class PublicWorkflowPermissions(unittest.TestCase):
     def check_steps(self, steps, *, composite=False):
         for index, step in enumerate(steps):
             run = step.get("run", "")
-            if "uv==0.12.17" in run:
+            if "uv==" in run:
                 self.assertIn("--only-binary=:all: --require-hashes -r /dev/stdin", run)
                 self.assertIn(
                     "uv==0.12.17 --hash=sha256:9e25bb39e1674799c408345a6397ebc2"
@@ -59,6 +59,10 @@ class PublicWorkflowPermissions(unittest.TestCase):
                     self.assertNotIn("secrets", job)
                     self.check_steps(job.get("steps", []))
                 self.assertNotRegex(path.read_text(), r"\bsecrets[.\[]")
+
+    def test_unapproved_uv_requirement_is_rejected(self):
+        with self.assertRaises(AssertionError):
+            self.check_steps([{"run": "uv==0.12.12 --hash=sha256:" + "a" * 64}])
 
     def test_composite_requires_its_pinned_checkout_and_pinned_nested_actions(self):
         checkout = {"uses": "actions/checkout@" + "a" * 40, "with": {
