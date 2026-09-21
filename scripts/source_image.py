@@ -318,9 +318,12 @@ def admit():
                         if len(candidates) == 1 else None)
     measurement_attempt = (artifacts.artifact_attempt(finals[0].get("name"), f"{kind}-public-measurement", run)
                            if len(finals) == 1 else None)
-    producer = [job for job in jobs if job["name"] == PRODUCERS[repository]
+    producer_jobs = (jobs if producer_attempt == run["run_attempt"]
+                     else artifacts.attempt_jobs(repository, run, producer_attempt))
+    producer = [job for job in producer_jobs if job["name"] == PRODUCERS[repository]
                 and job.get("run_attempt") == producer_attempt]
-    if len(producer) != 1:
+    if (len(producer) != 1 or producer[0].get("status") != "completed"
+            or producer[0].get("conclusion") != "success"):
         raise ValueError("the exact image producer attempt is missing")
     uploads = [step for step in producer[0].get("steps", []) if step.get("name") == UPLOAD]
     if len(uploads) != 1 or uploads[0].get("status") != "completed" or uploads[0].get("conclusion") != "success":
@@ -480,14 +483,10 @@ def active_publisher(expected):
             or identity["source_branch"] != "dev" or expected["workflow_id"] != run["workflow_id"]
             or any(expected["identity"].get(key) != value for key, value in identity.items())):
         raise ValueError("publication no longer belongs to this active DEV run")
-    jobs = list(github.pages(identity["repository"], f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs", "jobs"))
+    jobs = artifacts.effective_jobs(identity["repository"], run)
     own = [job for job in jobs if job.get("name") == JOB]
-    if (len(own) != 1 or len({job.get("id") for job in jobs}) != len(jobs)
-            or len({job.get("name") for job in jobs}) != len(jobs)
-            or own[0].get("id") != expected["publisher_job_id"]
-            or own[0].get("status") != "in_progress" or own[0].get("conclusion") is not None
-            or any(job.get("run_id") != run["id"] or job.get("run_attempt") != run["run_attempt"]
-                   or job.get("head_sha") != run["head_sha"] for job in jobs)):
+    if (len(own) != 1 or own[0].get("id") != expected["publisher_job_id"]
+            or own[0].get("status") != "in_progress" or own[0].get("conclusion") is not None):
         raise ValueError("cleanup requires its exact unique still-active publisher job")
     tag = f"dev-main-{identity['source_sha'][:8]}-{artifacts.timestamp(own[0]['started_at']).astimezone(timezone.utc):%Y%m%d%H%M%S}"
     if expected["image"] != f"{IMAGES[identity['repository']]}:{tag}":

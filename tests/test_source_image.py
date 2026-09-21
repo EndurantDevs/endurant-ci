@@ -122,7 +122,7 @@ class AdmissionChecks(unittest.TestCase):
         items = [artifact(44, "drug-public-image-staging-123-2", 1), artifact(55, "drug-public-measurement-123-2", 1)]
         return run, jobs, items
 
-    def admit(self, run, jobs, items, head="a" * 40):
+    def admit(self, run, jobs, items, head="a" * 40, producer_jobs=None):
         def api(repository, path):
             self.assertEqual(repository, REPOSITORY)
             if path == "commits/dev":
@@ -133,6 +133,8 @@ class AdmissionChecks(unittest.TestCase):
 
         def pages(repository, path, key):
             self.assertEqual(repository, REPOSITORY)
+            if key == "jobs" and producer_jobs is not None and "/attempts/1/jobs" in path:
+                return deepcopy(producer_jobs)
             return deepcopy(jobs if key == "jobs" else items)
 
         with patch.dict(os.environ, {"GITHUB_JOB": "dev-image-publication", "IMAGE_ARTIFACT_ID": "44",
@@ -160,10 +162,22 @@ class AdmissionChecks(unittest.TestCase):
 
     def test_failed_only_rerun_uses_exact_prior_attempt_outputs(self):
         run, jobs, items = self.fixtures()
-        jobs[0]["run_attempt"] = 1
+        producer_jobs = deepcopy(jobs)
+        for job in producer_jobs:
+            job["run_attempt"] = 1
+        jobs[0]["id"] = 99
         items[0]["name"] = "drug-public-image-staging-123-1"
         items[1]["name"] = "drug-public-measurement-123-1"
-        self.assertEqual(self.admit(run, jobs, items), expected(1, 1))
+        self.assertEqual(self.admit(run, jobs, items, producer_jobs=producer_jobs), expected(1, 1))
+        for change in ({"conclusion": "failure"}, {"name": "Other producer"}):
+            changed = deepcopy(producer_jobs)
+            changed[0].update(change)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.admit(run, jobs, items, producer_jobs=changed)
+        changed = deepcopy(producer_jobs)
+        changed[0]["steps"][0]["conclusion"] = "failure"
+        with self.assertRaises(ValueError):
+            self.admit(run, jobs, items, producer_jobs=changed)
 
     def test_non_dev_publication_is_authenticated_noop(self):
         run, jobs, items = self.fixtures()
