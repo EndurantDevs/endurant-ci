@@ -895,6 +895,9 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_publication_postgres.py",
             "tests/test_custom_import_materialization_postgres.py",
             "tests/test_custom_import_read_core_postgres.py",
+            "tests/test_custom_import_runner_postgres.py",
+            "tests/test_custom_import_definition_store_postgres.py",
+            "tests/test_custom_import_capture_store_postgres.py",
         )
         dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
         present_path_sets = ((), *((test_path,) for test_path in test_paths), test_paths)
