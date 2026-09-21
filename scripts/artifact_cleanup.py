@@ -53,21 +53,23 @@ def completed_consumers(repository, run):
 
 
 def effective_jobs(repository, run):
-    """Return the latest execution of each named job across failed-only reruns."""
-    jobs = list(github.pages(repository, f"actions/runs/{run['id']}/jobs?filter=all", "jobs"))
-    seen = set()
-    latest = {}
-    for job in jobs:
-        key = (job.get("name"), job.get("run_attempt"))
-        if (not isinstance(key[0], str) or not key[0] or key in seen
-                or type(job.get("id")) is not int or job["id"] <= 0
-                or job.get("run_id") != run["id"] or type(key[1]) is not int
-                or not 1 <= key[1] <= run["run_attempt"] or job.get("head_sha") != run["head_sha"]):
-            raise ValueError("workflow job inventory has ambiguous run-attempt provenance")
-        seen.add(key)
-        if key[1] > latest.get(key[0], {}).get("run_attempt", 0):
-            latest[key[0]] = job
-    return list(latest.values())
+    """Return GitHub's complete effective job snapshot for the current attempt."""
+    return attempt_jobs(repository, run, run["run_attempt"])
+
+
+def attempt_jobs(repository, run, attempt):
+    if type(attempt) is not int or not 1 <= attempt <= run["run_attempt"]:
+        raise ValueError("workflow job inventory requires an exact run attempt")
+    jobs = list(github.pages(repository, f"actions/runs/{run['id']}/attempts/{attempt}/jobs", "jobs"))
+    if (len({job.get("id") for job in jobs}) != len(jobs)
+            or len({job.get("name") for job in jobs}) != len(jobs)
+            or any(type(job.get("id")) is not int or job["id"] <= 0
+                   or not isinstance(job.get("name"), str) or not job["name"]
+                   or job.get("run_id") != run["id"] or type(job.get("run_attempt")) is not int
+                   or job["run_attempt"] != attempt
+                   or job.get("head_sha") != run["head_sha"] for job in jobs)):
+        raise ValueError("workflow job inventory has ambiguous run-attempt provenance")
+    return jobs
 
 
 def temporary_names(kind, run):

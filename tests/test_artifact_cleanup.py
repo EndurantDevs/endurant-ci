@@ -79,7 +79,7 @@ class ArtifactCleanupChecks(unittest.TestCase):
             if path == "actions/runs/123":
                 run_reads += 1
                 return {**expected, **(refresh or {})} if run_reads > 1 else expected
-            if path.startswith("actions/runs/123/jobs?filter=all"):
+            if path.startswith("actions/runs/123/attempts/2/jobs?"):
                 job_reads += 1
                 current = jobs() if job_inventory is None else job_inventory
                 if job_reads > 1 and refreshed_jobs is not None:
@@ -147,17 +147,15 @@ class ArtifactCleanupChecks(unittest.TestCase):
     def test_consumers_must_all_finish_in_the_same_attempt_before_each_delete(self):
         items = [artifact(1, "mrf-rust-coverage-123-2"), artifact(2, "healthcare-public-measurement-123-2", 1)]
         for changes in ({"status": "in_progress", "conclusion": None}, {"status": "queued", "conclusion": None},
-                        {"conclusion": None}, {"conclusion": "unknown"}, {"run_id": 999},
-                        {"head_sha": "c" * 40}):
+                        {"conclusion": None}, {"conclusion": "unknown"}, {"run_id": 999}, {"run_attempt": 1},
+                        {"run_attempt": 2.0}, {"head_sha": "c" * 40}):
             changed = jobs()
             changed[0].update(changes)
             for option in ("job_inventory", "refreshed_jobs"):
                 with self.subTest(changes=changes, option=option), self.assertRaises(ValueError):
                     self.exercise(items, **{option: changed})
-        mixed = jobs()
-        mixed[0]["run_attempt"] = 1
-        self.assertEqual(self.exercise(items, job_inventory=mixed)[0], [1])
         for changed in ([], jobs()[:-1], [jobs()[-1]], jobs() + [jobs()[0]],
+                        jobs() + [{**jobs()[0], "id": 999}], jobs() + [{**jobs()[0], "name": "Other job"}],
                         [{**item, "status": "completed", "conclusion": "success"} for item in jobs()]):
             with self.subTest(changed=changed), self.assertRaises(ValueError):
                 self.exercise(items, job_inventory=changed)
