@@ -198,8 +198,17 @@ run_python_main() {
     tests/test_custom_import_runner_postgres.py \
     tests/test_custom_import_definition_store_postgres.py \
     tests/test_custom_import_capture_store_postgres.py \
+    tests/test_custom_import_operator_postgres.py \
     tests/test_entity_address_result_generation_postgres.py \
     tests/test_mrf_result_archive_postgres.py \
+    tests/test_cms_doctors_archive_postgres.py \
+    tests/test_tiger_result_archive_postgres.py \
+    tests/test_pharmacy_economics_snapshot_postgres.py \
+    tests/test_geo_census_reference_family_postgres.py \
+    tests/test_geo_reference_family_postgres.py \
+    tests/test_mrf_address_publication_postgres.py \
+    tests/test_mrf_publication_receipt_postgres.py \
+    tests/test_provider_quality_reference_family_postgres.py \
     tests/test_reference_family_archive_postgres.py \
     tests/test_reference_family_result_generation_postgres.py; do
     if [ -f "$repository_root/$test_path" ]; then
@@ -800,7 +809,8 @@ run_core_postgres() {
     tests/test_custom_import_read_core_postgres.py \
     tests/test_custom_import_runner_postgres.py \
     tests/test_custom_import_definition_store_postgres.py \
-    tests/test_custom_import_capture_store_postgres.py; do
+    tests/test_custom_import_capture_store_postgres.py \
+    tests/test_custom_import_operator_postgres.py; do
     if [ -f "$repository_root/$custom_import_test_path" ]; then
       custom_import_postgres_tests+=("$custom_import_test_path")
     fi
@@ -814,7 +824,12 @@ run_core_postgres() {
   local reference_family_postgres_tests=()
   for test_path in \
     tests/test_reference_family_archive_postgres.py \
-    tests/test_reference_family_result_generation_postgres.py; do
+    tests/test_reference_family_result_generation_postgres.py \
+    tests/test_geo_census_reference_family_postgres.py \
+    tests/test_geo_reference_family_postgres.py \
+    tests/test_mrf_address_publication_postgres.py \
+    tests/test_mrf_publication_receipt_postgres.py \
+    tests/test_provider_quality_reference_family_postgres.py; do
     if [ -f "$repository_root/$test_path" ]; then
       reference_family_postgres_tests+=("$test_path")
     fi
@@ -851,6 +866,33 @@ run_core_postgres() {
       return 1
     fi
     drop_test_database "$database"
+  fi
+
+  if [ -f "$repository_root/tests/test_cms_doctors_archive_postgres.py" ]; then
+    database="cms_archive_test_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+    create_test_database "$database"
+    if ! HLTHPRT_CMS_DOCTORS_ARCHIVE_TEST_DSN="${dsn%/*}/$database" \
+      timeout --foreground 295s python -m pytest -q tests/test_cms_doctors_archive_postgres.py; then
+      drop_test_database "$database"
+      return 1
+    fi
+    drop_test_database "$database"
+  fi
+
+  if [ -f "$repository_root/tests/test_tiger_result_archive_postgres.py" ]; then
+    database="tiger_archive_test_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+    create_test_database "$database"
+    if ! HLTHPRT_TIGER_ARCHIVE_TEST_DSN="${dsn%/*}/$database" \
+      timeout --foreground 295s python -m pytest -q tests/test_tiger_result_archive_postgres.py; then
+      drop_test_database "$database"
+      return 1
+    fi
+    drop_test_database "$database"
+  fi
+
+  if [ -f "$repository_root/tests/test_pharmacy_economics_snapshot_postgres.py" ]; then
+    HLTHPRT_PHARMACY_ECON_POSTGRES_DSN=$dsn \
+      timeout --foreground 295s python -m pytest -q tests/test_pharmacy_economics_snapshot_postgres.py
   fi
   fi
 
