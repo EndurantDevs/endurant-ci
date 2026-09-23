@@ -25,6 +25,195 @@ IMAGE_VALIDATORS = (
 
 
 class HealthcarePublicChecks(unittest.TestCase):
+    def test_available_archive_suites_route_into_database_lane(self):
+        names = (
+            "test_code_sets_result_archive_postgres.py",
+            "test_code_sets_publication_postgres.py",
+            "test_ms_drg_result_generation_postgres.py",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source"
+            tests = source / "tests"
+            tests.mkdir(parents=True)
+            log = Path(temporary) / "routes"
+            script = CHECK_FUNCTIONS + r'''
+timeout() { :; }
+run_scoped_archive_postgres() { printf '%s\n' "$*" >> "$ROUTE_LOG"; }
+run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-services
+'''
+            for present in (names, names[:1], names[1:2]):
+                for path in tests.iterdir():
+                    path.unlink()
+                for name in present:
+                    (tests / name).touch()
+                result = subprocess.run(
+                    ["bash", "-euc", script], cwd=source,
+                    env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                         "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "postgres",
+                         "ROUTE_LOG": str(log)},
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = log.read_text().splitlines()
+                self.assertEqual(len(calls), 2 if len(present) == 3 else 1)
+                for name in present:
+                    self.assertTrue(any(name in call for call in calls), name)
+                for name in names:
+                    if name not in present:
+                        self.assertFalse(any(name in call for call in calls), name)
+                log.unlink()
+
+    def test_scoped_archive_uses_disposable_port_and_cleans_exact_database(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
+        postgres = workflow["jobs"]["address-canonical-db-tests"]["services"]["postgres"]
+        self.assertIn("5440:5432", postgres["ports"])
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "archive.log"
+            script = CHECK_FUNCTIONS + r'''
+DROP_CALL_COUNT=0
+dropdb() {
+  DROP_CALL_COUNT=$((DROP_CALL_COUNT + 1))
+  printf 'drop %s\n' "$*" >> "$ARCHIVE_LOG"
+  if [ "$DROP_CALL_COUNT" -eq 2 ]; then
+    test "$PGDATABASE" = postgres
+    return "$DROP_STATUS"
+  fi
+}
+createdb() { printf 'create %s\n' "$*" >> "$ARCHIVE_LOG"; }
+psql() { printf 'extension %s\n' "$*" >> "$ARCHIVE_LOG"; }
+timeout() {
+  test "$PGHOST:$PGPORT:$PGUSER:$PGDATABASE" = \
+    "127.0.0.1:5440:postgres:hc_florida_projection_0123456789abcdef0123456789abcdef"
+  test "$HLTHPRT_DB_DATABASE:$HLTHPRT_DB_DATABASE_OVERRIDE" = \
+    "hc_florida_projection_0123456789abcdef0123456789abcdef:hc_florida_projection_0123456789abcdef0123456789abcdef"
+  test "$PGPASSWORD" = postgres
+  printf 'run %s\n' "$FLORIDA_SNAPSHOT_TEST_DATABASE_URL" >> "$ARCHIVE_LOG"
+  return "$TEST_STATUS"
+}
+run_scoped_archive_postgres hc_florida_projection_0123456789abcdef0123456789abcdef \
+  FLORIDA_SNAPSHOT_TEST_DATABASE_URL postgresql+asyncpg://postgres@127.0.0.1:5440 \
+  tests/test_florida_projection_archive_postgres.py
+test -z "${FLORIDA_SNAPSHOT_TEST_DATABASE_URL:-}"
+test "$PGDATABASE" = sentinel
+test "$HLTHPRT_DB_DATABASE:$HLTHPRT_DB_DATABASE_OVERRIDE" = sentinel:sentinel
+'''
+            for status, drop_status, expected in ((0, 0, 0), (17, 0, 17), (0, 7, 1)):
+                result = subprocess.run(
+                    ["bash", "-euc", script],
+                    env={**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT),
+                         "ARCHIVE_LOG": str(log), "TEST_STATUS": str(status),
+                         "DROP_STATUS": str(drop_status), "HLTHPRT_DB_HOST": "localhost",
+                         "HLTHPRT_DB_PORT": "5432", "HLTHPRT_DB_USER": "postgres",
+                         "HLTHPRT_DB_PASSWORD": "postgres", "PGDATABASE": "sentinel",
+                         "HLTHPRT_DB_DATABASE": "sentinel",
+                         "HLTHPRT_DB_DATABASE_OVERRIDE": "sentinel"},
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertEqual(log.read_text().splitlines(), [
+                    "drop --if-exists --host 127.0.0.1 --port 5440 --username postgres "
+                    "hc_florida_projection_0123456789abcdef0123456789abcdef",
+                    "create --host 127.0.0.1 --port 5440 --username postgres "
+                    "hc_florida_projection_0123456789abcdef0123456789abcdef",
+                    "extension --no-psqlrc --set=ON_ERROR_STOP=1 --command "
+                    "CREATE EXTENSION IF NOT EXISTS intarray WITH SCHEMA public --command "
+                    "CREATE EXTENSION IF NOT EXISTS btree_gin WITH SCHEMA public --command "
+                    "CREATE EXTENSION IF NOT EXISTS postgis WITH SCHEMA public",
+                    "run postgresql+asyncpg://postgres@127.0.0.1:5440/"
+                    "hc_florida_projection_0123456789abcdef0123456789abcdef",
+                    "drop --if-exists --host 127.0.0.1 --port 5440 --username postgres "
+                    "hc_florida_projection_0123456789abcdef0123456789abcdef",
+                ])
+                log.unlink()
+
+    def test_address_archive_routes_only_available_native_suites(self):
+        names = (
+            "test_entity_address_snapshot_stage_postgres.py",
+            "test_entity_address_snapshot_source_postgres.py",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source"
+            tests = source / "tests"
+            tests.mkdir(parents=True)
+            log = Path(temporary) / "routes"
+            script = CHECK_FUNCTIONS + r'''
+env() { :; }
+pg_dump() { :; }
+pg_restore() { :; }
+run_scoped_archive_postgres() {
+  printf '%s\t%s\t%s\n' "$HLTHPRT_ENTITY_ADDRESS_ARCHIVE_TEST_PG_DUMP" \
+    "$HLTHPRT_ENTITY_ADDRESS_ARCHIVE_TEST_PG_RESTORE" "$*" >> "$ROUTE_LOG"
+}
+run_provider_directory_postgres postgresql://postgres:postgres@127.0.0.1:5432/test directory-address
+'''
+            for present in (names, names[:1], ()):
+                for path in tests.iterdir():
+                    path.unlink()
+                for name in present:
+                    (tests / name).touch()
+                result = subprocess.run(
+                    ["bash", "-euc", script], cwd=source,
+                    env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                         "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "postgres",
+                         "ROUTE_LOG": str(log)},
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = log.read_text().splitlines() if log.exists() else []
+                self.assertEqual(len(calls), 1 if present else 0)
+                if present:
+                    dump, restore, call = calls[0].split("\t", 2)
+                    self.assertEqual((dump, restore), ("pg_dump", "pg_restore"))
+                    self.assertRegex(call, r"^hc_entity_address_stage_[0-9a-f]{32} ")
+                    self.assertIn("HLTHPRT_ENTITY_ADDRESS_ARCHIVE_TEST_DSN", call)
+                    self.assertIn("@127.0.0.1:5440", call)
+                    for name in names:
+                        self.assertEqual(name in call, name in present)
+                    log.unlink()
+
+    def test_core_ptg_routes_guarded_result_archive_proofs(self):
+        names = (
+            "test_result_archive_adoption_postgres.py",
+            "test_result_archive_candidate_preparation_postgres.py",
+            "test_result_archive_closure_postgres.py",
+            "test_result_archive_candidate_initialization_postgres.py",
+            "test_result_archive_candidate_validation_postgres.py",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source"
+            tests = source / "tests"
+            tests.mkdir(parents=True)
+            for name in names:
+                (tests / name).touch()
+            log = Path(temporary) / "routes"
+            script = CHECK_FUNCTIONS + r'''
+timeout() {
+  if [[ "$*" = *test_result_archive_* ]]; then
+    printf '%s\t%s\t%s\t%s\n' "$HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST" \
+      "$HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN" \
+      "$HLTHPRT_PTG2_ARCHIVE_CANDIDATE_POSTGRES_TEST" "$*" >> "$ROUTE_LOG"
+  fi
+}
+run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-ptg
+'''
+            result = subprocess.run(
+                ["bash", "-euc", script], cwd=source,
+                env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                     "ROUTE_LOG": str(log), "HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST": "",
+                     "HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN": "",
+                     "HLTHPRT_PTG2_ARCHIVE_CANDIDATE_POSTGRES_TEST": ""},
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = [line.split("\t", 3) for line in log.read_text().splitlines()]
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0][:2], ["1", "postgresql://postgres:postgres@127.0.0.1:5432/test"])
+            self.assertEqual(calls[1][2], "1")
+            for name in names[:3]:
+                self.assertIn(name, calls[0][3])
+            for name in names[3:]:
+                self.assertIn(name, calls[1][3])
+
     def test_source_profile_postgres_suites_use_one_isolated_profile_database(self):
         test_paths = (
             "tests/test_source_profile_result_archive_postgres.py",

@@ -447,6 +447,7 @@ jobs:
           POSTGRES_DB: ptg2_v3_lifecycle_test_ci_runner
         ports:
         - 5432:5432
+        - 5440:5432
         options: --health-cmd "pg_isready -U postgres -d ptg2_v3_lifecycle_test_ci_runner" --health-interval 2s --health-timeout
           5s --health-retries 25
     env:
