@@ -25,6 +25,67 @@ IMAGE_VALIDATORS = (
 
 
 class HealthcarePublicChecks(unittest.TestCase):
+    def test_source_profile_postgres_suites_use_one_isolated_profile_database(self):
+        test_paths = (
+            "tests/test_source_profile_result_archive_postgres.py",
+            "tests/test_source_profile_ancestry_postgres.py",
+            "tests/test_source_profile_pin_migration_postgres.py",
+        )
+        for fail in (False, True):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "source"
+                (source / "tests").mkdir(parents=True)
+                for test_path in test_paths:
+                    (source / test_path).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
+                call_log = root / "calls"
+                dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
+                env = {
+                    **os.environ,
+                    "SOURCE_ROOT": str(source),
+                    "CI_ROOT": str(ROOT),
+                    "CI_DEPS_READY": "1",
+                    "COVERAGE_BASE_SHA": "a" * 40,
+                    "CALL_LOG": str(call_log),
+                    "ROUTE_FAILURE": "1" if fail else "0",
+                }
+                script = CHECK_FUNCTIONS + r'''
+mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
+prepare_debug_rust_binaries() { :; }
+create_test_database() { printf 'create\t%s\n' "$1" >> "$CALL_LOG"; }
+drop_test_database() { printf 'drop\t%s\n' "$1" >> "$CALL_LOG"; }
+python() {
+  printf '%s\t%s\n' "${HLTHPRT_SOURCE_PROFILE_ARCHIVE_TEST_DSN:-}" "$*" >> "$CALL_LOG"
+  if [[ "$*" = *"-m pytest -q tests/test_source_profile_result_archive_postgres.py"* \
+        && "$ROUTE_FAILURE" = 1 ]]; then
+    return 23
+  fi
+}
+timeout() { shift 2; "$@"; }
+run_python_main 0
+run_provider_profile_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" profile-publication
+'''
+                result = subprocess.run(
+                    ["bash", "-euc", script], cwd=source, env=env, capture_output=True, text=True
+                )
+                self.assertEqual(result.returncode == 0, not fail, result.stderr)
+                calls = call_log.read_text().splitlines()
+                main_call = next(call for call in calls if "--ci-shard-count 4" in call)
+                for test_path in test_paths:
+                    self.assertIn(f"--ignore {test_path}", main_call)
+                profile_call = next(
+                    call for call in calls if "-m pytest -q tests/test_source_profile_result_archive_postgres.py" in call
+                )
+                for test_path in test_paths:
+                    self.assertIn(test_path, profile_call)
+                profile_dsn = profile_call.split("\t", 1)[0]
+                self.assertRegex(profile_dsn, rf"^{dsn.rsplit('/', 1)[0]}/hc_source_profile_[0-9a-f]{{32}}$")
+                database = profile_dsn.rsplit("/", 1)[1]
+                self.assertEqual(calls.count(f"create\t{database}"), 1)
+                self.assertEqual(calls.count(f"drop\t{database}"), 1)
+                self.assertLess(calls.index(f"create\t{database}"), calls.index(profile_call))
+                self.assertGreater(calls.index(f"drop\t{database}"), calls.index(profile_call))
+
     def test_fast_quality_preserves_checks_without_reinstalling_the_runtime(self):
         with tempfile.TemporaryDirectory() as temporary:
             environment = {**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT), "BASE_SHA": "a" * 40}
