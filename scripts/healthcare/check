@@ -726,6 +726,33 @@ create_test_database() {
     "$database"
 }
 
+run_scoped_archive_postgres() (
+  scoped_archive_database=$1
+  local variable=$2 url_prefix=$3
+  shift 3
+  HLTHPRT_DB_HOST=127.0.0.1 HLTHPRT_DB_PORT=5440
+  export HLTHPRT_DB_DATABASE="$scoped_archive_database"
+  export HLTHPRT_DB_DATABASE_OVERRIDE="$scoped_archive_database"
+  cleanup_scoped_archive() {
+    local status=$?
+    trap - EXIT
+    if ! PGDATABASE=postgres drop_test_database "$scoped_archive_database"; then
+      [ "$status" -ne 0 ] || status=1
+    fi
+    exit "$status"
+  }
+  trap cleanup_scoped_archive EXIT
+  create_test_database "$scoped_archive_database"
+  export "$variable=$url_prefix/$scoped_archive_database"
+  export PGHOST=127.0.0.1 PGPORT=5440 PGUSER="$HLTHPRT_DB_USER"
+  export PGPASSWORD="$HLTHPRT_DB_PASSWORD" PGDATABASE="$scoped_archive_database"
+  psql --no-psqlrc --set=ON_ERROR_STOP=1 \
+    --command 'CREATE EXTENSION IF NOT EXISTS intarray WITH SCHEMA public' \
+    --command 'CREATE EXTENSION IF NOT EXISTS btree_gin WITH SCHEMA public' \
+    --command 'CREATE EXTENSION IF NOT EXISTS postgis WITH SCHEMA public'
+  timeout --foreground 295s python -m pytest -q "$@"
+)
+
 run_core_postgres() {
   local dsn=$1
   local lane=${2:-all}
@@ -799,6 +826,31 @@ run_core_postgres() {
     HLTHPRT_NPI_RESULT_ARCHIVE_TEST_DSN=$dsn \
       timeout --foreground 295s python -m pytest -q \
         tests/test_npi_result_archive_postgres.py
+  fi
+  local code_sets_archive_tests=()
+  if [ -f "$repository_root/tests/test_code_sets_result_archive_postgres.py" ]; then
+    code_sets_archive_tests+=(
+      tests/test_code_sets_result_archive_postgres.py::test_scoped_archive_merge_rollback_and_foreign_conflict
+      tests/test_code_sets_result_archive_postgres.py::test_tracked_predecessor_and_drifted_source_fail_closed
+      tests/test_code_sets_result_archive_postgres.py::test_precreated_two_relation_stage_validates_after_restore
+    )
+  fi
+  if [ -f "$repository_root/tests/test_code_sets_publication_postgres.py" ]; then
+    code_sets_archive_tests+=(tests/test_code_sets_publication_postgres.py)
+  fi
+  if [ "${#code_sets_archive_tests[@]}" -gt 0 ]; then
+    local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
+    run_scoped_archive_postgres \
+      "hc_scoped_reference_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')" \
+      HLTHPRT_CODE_SETS_PUBLICATION_TEST_DSN "$archive_url" \
+      "${code_sets_archive_tests[@]}"
+  fi
+  if [ -f "$repository_root/tests/test_ms_drg_result_generation_postgres.py" ]; then
+    local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
+    run_scoped_archive_postgres \
+      "hc_ms_drg_authority_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')" \
+      HLTHPRT_MS_DRG_AUTHORITY_TEST_DSN "$archive_url" \
+      tests/test_ms_drg_result_generation_postgres.py
   fi
   fi
 
@@ -1009,6 +1061,30 @@ run_core_postgres() {
       tests/test_ptg2_legacy_v3_v4_compat_postgres.py \
       tests/test_ptg_source_attempt_action_postgres.py
 
+  local result_archive_tests=()
+  for test_path in \
+    tests/test_result_archive_adoption_postgres.py \
+    tests/test_result_archive_candidate_preparation_postgres.py \
+    tests/test_result_archive_closure_postgres.py; do
+    if [ -f "$repository_root/$test_path" ]; then
+      result_archive_tests+=("$test_path")
+    fi
+  done
+  if [ "${#result_archive_tests[@]}" -gt 0 ]; then
+    HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST=1 \
+    HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN=$dsn \
+      timeout --foreground 295s python -m pytest -q "${result_archive_tests[@]}"
+  fi
+
+  if [ -f "$repository_root/tests/test_result_archive_candidate_initialization_postgres.py" ] && \
+     [ -f "$repository_root/tests/test_result_archive_candidate_validation_postgres.py" ]; then
+    HLTHPRT_PTG2_ARCHIVE_CANDIDATE_POSTGRES_TEST=1 \
+    HLTHPRT_PTG2_ARCHIVE_CANDIDATE_POSTGRES_DSN=$dsn \
+      timeout --foreground 295s python -m pytest -q \
+        tests/test_result_archive_candidate_initialization_postgres.py \
+        tests/test_result_archive_candidate_validation_postgres.py
+  fi
+
   HLTHPRT_PTG2_SHARED_GC_POSTGRES_TEST=1 \
     timeout --foreground 295s python -m pytest -q \
       tests/test_ptg2_shared_gc.py \
@@ -1152,6 +1228,26 @@ run_provider_directory_postgres() {
     tests/test_provider_directory_contract_identity_cutover.py \
     tests/test_provider_directory_retry_cleanup.py \
     tests/test_provider_directory_artifact_cutover_reconciliation.py
+  local address_archive_tests=()
+  for test_path in \
+    tests/test_entity_address_snapshot_stage_postgres.py \
+    tests/test_entity_address_snapshot_source_postgres.py; do
+    if [ -f "$repository_root/$test_path" ]; then
+      address_archive_tests+=("$test_path")
+    fi
+  done
+  if [ "${#address_archive_tests[@]}" -gt 0 ]; then
+    local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
+    local archive_pg_dump archive_pg_restore
+    archive_pg_dump=$(command -v pg_dump)
+    archive_pg_restore=$(command -v pg_restore)
+    HLTHPRT_ENTITY_ADDRESS_ARCHIVE_TEST_PG_DUMP=$archive_pg_dump \
+    HLTHPRT_ENTITY_ADDRESS_ARCHIVE_TEST_PG_RESTORE=$archive_pg_restore \
+      run_scoped_archive_postgres \
+        "hc_entity_address_stage_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')" \
+        HLTHPRT_ENTITY_ADDRESS_ARCHIVE_TEST_DSN "$archive_url" \
+        "${address_archive_tests[@]}"
+  fi
   fi
 }
 
@@ -1319,6 +1415,13 @@ run_provider_profile_postgres() {
       return 1
     fi
     drop_test_database "$database"
+  fi
+  if [ -f "$repository_root/tests/test_florida_projection_archive_postgres.py" ]; then
+    local archive_url="postgresql+asyncpg://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
+    run_scoped_archive_postgres \
+      "hc_florida_projection_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')" \
+      FLORIDA_SNAPSHOT_TEST_DATABASE_URL "$archive_url" \
+      tests/test_florida_projection_archive_postgres.py
   fi
   fi
 }
