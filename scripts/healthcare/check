@@ -210,7 +210,10 @@ run_python_main() {
     tests/test_mrf_publication_receipt_postgres.py \
     tests/test_provider_quality_reference_family_postgres.py \
     tests/test_reference_family_archive_postgres.py \
-    tests/test_reference_family_result_generation_postgres.py; do
+    tests/test_reference_family_result_generation_postgres.py \
+    tests/test_source_profile_result_archive_postgres.py \
+    tests/test_source_profile_ancestry_postgres.py \
+    tests/test_source_profile_pin_migration_postgres.py; do
     if [ -f "$repository_root/$test_path" ]; then
       collection_args+=(--ignore "$test_path")
     fi
@@ -1297,6 +1300,26 @@ run_provider_profile_postgres() {
       tests/test_provider_directory_profile_uhc_flex_postgres.py \
       tests/test_npi_provider_directory_profile_postgres.py \
       "$@"
+  local source_profile_tests=()
+  local source_profile_test
+  for source_profile_test in \
+    tests/test_source_profile_result_archive_postgres.py \
+    tests/test_source_profile_ancestry_postgres.py \
+    tests/test_source_profile_pin_migration_postgres.py; do
+    if [ -f "$repository_root/$source_profile_test" ]; then
+      source_profile_tests+=("$source_profile_test")
+    fi
+  done
+  if [ "${#source_profile_tests[@]}" -gt 0 ]; then
+    local database="hc_source_profile_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+    create_test_database "$database"
+    if ! HLTHPRT_SOURCE_PROFILE_ARCHIVE_TEST_DSN="${dsn%/*}/$database" \
+      timeout --foreground 295s python -m pytest -q "${source_profile_tests[@]}"; then
+      drop_test_database "$database"
+      return 1
+    fi
+    drop_test_database "$database"
+  fi
   fi
 }
 
