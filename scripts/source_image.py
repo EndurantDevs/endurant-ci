@@ -564,7 +564,7 @@ def stage(expected, directory):
     intent = {"schema": "public-source-image-intent-v1", "publication": expected, "producer": record,
               "package_id": identifier, "prior_version_ids": sorted(item["id"] for item in versions),
               "created_at": created.isoformat(), "expires_at": (created + timedelta(minutes=30)).isoformat()}
-    content = json.dumps(intent, sort_keys=True) + "\n"
+    content = json.dumps(intent, sort_keys=True, separators=(",", ":")) + "\n"
     if len(content.encode()) > 65536:
         raise ValueError("complete publication intent exceeds its metadata bound")
     destination = Path(os.environ["RUNNER_TEMP"]) / "public-image-intent"
