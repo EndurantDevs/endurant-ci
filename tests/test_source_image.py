@@ -599,6 +599,21 @@ class IntentChecks(unittest.TestCase):
                     transfer.stage(expected(), directory)
                 self.assertFalse((Path(temporary) / "public-image-intent").exists())
 
+    def test_stage_retains_inventory_when_compact_intent_fits(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "input"
+            directory.mkdir()
+            TransferChecks().setup_artifact(directory)
+            ids = list(range(10**9, 10**9 + 5500))
+            with patch.dict(os.environ, {"RUNNER_TEMP": temporary}), patch.object(transfer, "admit", return_value=expected()), \
+                    patch.object(transfer, "package_id", return_value=321), \
+                    patch.object(transfer, "package_versions", return_value=[{"id": value} for value in ids]), \
+                    patch.object(transfer, "require_absent_registry_tag"):
+                transfer.stage(expected(), directory)
+                content = (Path(temporary) / "public-image-intent/intent.json").read_bytes()
+                self.assertLessEqual(len(content), 65536)
+                self.assertEqual(json.loads(content)["prior_version_ids"], ids)
+
     def test_publisher_can_reconcile_after_another_step_fails_without_current_dev_admission(self):
         run, jobs, _ = AdmissionChecks().fixtures()
         jobs[0]["conclusion"] = "failure"
