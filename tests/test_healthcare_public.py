@@ -1137,8 +1137,8 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                 self.assertTrue(ignored[0].startswith("\t"))
                 self.assertEqual(executed, [f"{dsn}\t-m pytest -q {test_path}"])
 
-    def test_custom_import_postgres_tests_use_only_the_core_postgres_lane(self):
-        """Route database suites through core while preserving mixed unit coverage."""
+    def test_custom_import_postgres_tests_use_a_scoped_database(self):
+        """Route database suites through a disposable database while preserving unit coverage."""
 
         mixed_test_paths = (
             "tests/test_custom_import_provider_list.py",
@@ -1157,6 +1157,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_provider_hydration_postgres.py",
         ) + mixed_test_paths
         dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
+        archive_url = "postgresql://postgres:postgres@127.0.0.1:5440"
         present_path_sets = ((), *((test_path,) for test_path in test_paths), test_paths)
         for present_paths in present_path_sets:
             with self.subTest(present_paths=present_paths), tempfile.TemporaryDirectory() as temporary:
@@ -1172,6 +1173,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                     "CI_ROOT": str(ROOT),
                     "CI_DEPS_READY": "1",
                     "COVERAGE_BASE_SHA": "a" * 40,
+                    "HLTHPRT_DB_USER": "postgres",
                     "HLTHPRT_DB_PASSWORD": "postgres",
                     "HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN": "",
                     "CALL_LOG": str(call_log),
@@ -1181,6 +1183,7 @@ mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
 prepare_debug_rust_binaries() { :; }
 create_test_database() { :; }
 drop_test_database() { :; }
+run_scoped_archive_postgres() { printf '%s\n' "$*" >> "$CALL_LOG"; }
 python() {
   printf '%s\t%s\n' "${HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN:-}" "$*" >> "$CALL_LOG"
 }
@@ -1205,10 +1208,20 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                     if call.startswith(f"{dsn}\t-m pytest -q")
                     and any(test_path in call for test_path in test_paths)
                 ]
+                routes = [call for call in calls if call.startswith("hc_custom_import_test_")]
                 if present_paths:
-                    self.assertEqual(executions, [f"{dsn}\t-m pytest -q {' '.join(present_paths)}"])
+                    self.assertEqual(executions, [])
+                    self.assertEqual(len(routes), 1)
+                    self.assertRegex(
+                        routes[0],
+                        rf"^hc_custom_import_test_[0-9a-f]{{32}} "
+                        rf"HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN {re.escape(archive_url)}(?: |$)",
+                    )
+                    for test_path in test_paths:
+                        self.assertEqual(test_path in routes[0], test_path in present_paths)
                 else:
                     self.assertEqual(executions, [])
+                    self.assertEqual(routes, [])
 
     def test_optional_import_database_routes_cleanup_after_success_and_failure(self):
         routes = (
