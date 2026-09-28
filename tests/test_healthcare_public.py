@@ -1138,8 +1138,12 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                 self.assertEqual(executed, [f"{dsn}\t-m pytest -q {test_path}"])
 
     def test_custom_import_postgres_tests_use_only_the_core_postgres_lane(self):
-        """Route each optional custom-import database suite through core exactly once."""
+        """Route database suites through core while preserving mixed unit coverage."""
 
+        mixed_test_paths = (
+            "tests/test_custom_import_provider_list.py",
+            "tests/test_custom_import_provider_geo_sql.py",
+        )
         test_paths = (
             "tests/test_custom_import_execution_postgres.py",
             "tests/test_custom_import_publication_postgres.py",
@@ -1149,7 +1153,9 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_definition_store_postgres.py",
             "tests/test_custom_import_capture_store_postgres.py",
             "tests/test_custom_import_operator_postgres.py",
-        )
+            "tests/test_custom_import_provider_query_postgres.py",
+            "tests/test_custom_import_provider_hydration_postgres.py",
+        ) + mixed_test_paths
         dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
         present_path_sets = ((), *((test_path,) for test_path in test_paths), test_paths)
         for present_paths in present_path_sets:
@@ -1183,13 +1189,13 @@ timeout() {
   "$@"
 }
 run_python_main 0
-run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
+run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" core-imports
 '''
                 subprocess.run(["bash", "-euc", script], cwd=source, env=env, check=True)
                 calls = call_log.read_text().splitlines()
                 main_call = next(call for call in calls if "--ci-shard-count 4" in call)
                 for test_path in test_paths:
-                    if test_path in present_paths:
+                    if test_path in present_paths and test_path not in mixed_test_paths:
                         self.assertIn(f"--ignore {test_path}", main_call)
                     else:
                         self.assertNotIn(test_path, main_call)
