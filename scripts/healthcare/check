@@ -877,9 +877,11 @@ run_core_postgres() {
     fi
   done
   if [ "${#custom_import_postgres_tests[@]}" -gt 0 ]; then
-    HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN=$dsn \
-      timeout --foreground 295s python -m pytest -q \
-        "${custom_import_postgres_tests[@]}"
+    local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
+    run_scoped_archive_postgres \
+      "hc_custom_import_test_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')" \
+      HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN "$archive_url" \
+      "${custom_import_postgres_tests[@]}"
   fi
 
   local reference_family_postgres_tests=()
