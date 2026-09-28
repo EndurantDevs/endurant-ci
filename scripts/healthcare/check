@@ -199,6 +199,8 @@ run_python_main() {
     tests/test_custom_import_definition_store_postgres.py \
     tests/test_custom_import_capture_store_postgres.py \
     tests/test_custom_import_operator_postgres.py \
+    tests/test_custom_import_provider_query_postgres.py \
+    tests/test_custom_import_provider_hydration_postgres.py \
     tests/test_entity_address_result_generation_postgres.py \
     tests/test_mrf_result_archive_postgres.py \
     tests/test_cms_doctors_archive_postgres.py \
@@ -865,7 +867,11 @@ run_core_postgres() {
     tests/test_custom_import_runner_postgres.py \
     tests/test_custom_import_definition_store_postgres.py \
     tests/test_custom_import_capture_store_postgres.py \
-    tests/test_custom_import_operator_postgres.py; do
+    tests/test_custom_import_operator_postgres.py \
+    tests/test_custom_import_provider_query_postgres.py \
+    tests/test_custom_import_provider_hydration_postgres.py \
+    tests/test_custom_import_provider_list.py \
+    tests/test_custom_import_provider_geo_sql.py; do
     if [ -f "$repository_root/$custom_import_test_path" ]; then
       custom_import_postgres_tests+=("$custom_import_test_path")
     fi
