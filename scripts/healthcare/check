@@ -1113,6 +1113,24 @@ run_core_postgres() {
   fi
 }
 
+run_owned_provider_directory_postgres() (
+  local prefix=$1 variable=$2
+  shift 2
+  local database="${prefix}_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+  cleanup_owned_database() {
+    local status=$?
+    trap - EXIT
+    if ! PGDATABASE=postgres drop_test_database "$database"; then
+      [ "$status" -ne 0 ] || status=1
+    fi
+    exit "$status"
+  }
+  trap cleanup_owned_database EXIT
+  create_test_database "$database"
+  local dsn="postgresql+asyncpg://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@${HLTHPRT_DB_HOST}:${HLTHPRT_DB_PORT}/${database}"
+  env "$variable=$dsn" timeout --foreground 295s python -m pytest -q "$@"
+)
+
 run_provider_directory_postgres() {
   local dsn=$1
   local lane=${2:-all}
@@ -1141,6 +1159,22 @@ run_provider_directory_postgres() {
       tests/test_provider_directory_terminal_root_retirement_repair_postgres.py \
       tests/test_provider_directory_terminal_root_retirement_v2_postgres.py \
       tests/test_provider_directory_terminal_root_retirement_v2_topology_postgres.py
+
+  run_owned_provider_directory_postgres hc_directory_entities HLTHPRT_DIRECTORY_ENTITIES_TEST_DSN \
+    tests/test_provider_directory_entities_postgres.py \
+    tests/test_provider_directory_cms_entities.py \
+    tests/test_provider_directory_cms_payers.py \
+    tests/test_provider_directory_cms_practitioner_navigation.py
+  run_owned_provider_directory_postgres cms_network_test CMS_NETWORK_TEST_DATABASE \
+    tests/test_provider_directory_insurance_network_identity.py
+  (
+    artifact_root=$(mktemp -d "${RUNNER_TEMP:-/tmp}/cms-npd-admission.XXXXXX")
+    trap 'rmdir "$artifact_root"' EXIT
+    export HLTHPRT_CMS_NPD_ADMISSION_TEST_ARTIFACT_ROOT="$artifact_root"
+    run_owned_provider_directory_postgres hc_cms_admission_test HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN \
+      tests/test_cms_npd_admission_postgres.py
+  )
+  timeout --foreground 295s python -m pytest -q tests/test_provider_directory_entity_redirect.py
 
   HLTHPRT_FHIR_FORMULARY_MIGRATION_POSTGRES_DSN=$dsn \
     timeout --foreground 295s python -m pytest -q \
