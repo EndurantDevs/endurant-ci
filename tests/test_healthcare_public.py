@@ -52,7 +52,7 @@ class HealthcarePublicChecks(unittest.TestCase):
                 calls_path, lifecycle = root / "calls", root / "lifecycle"
                 command = root / "timeout"
                 command.write_text('#!/bin/bash\n' + r'''
-printf '%s\t%s\n' "${HLTHPRT_CMS_NPD_ADMISSION_TEST_ARTIFACT_ROOT:-}" "$*" >> "$CALL_LOG"
+printf '%s\t%s\t%s\t%s\n' "${HLTHPRT_CMS_NPD_ADMISSION_TEST_ARTIFACT_ROOT:-}" "${DB_SCHEMA-<unset>}" "${HLTHPRT_DB_SCHEMA-<unset>}" "$*" >> "$CALL_LOG"
 for test_path in "$@"; do
   if [[ " $CMS_TEST_PATHS " = *" $test_path "* ]]; then
     test -f "$test_path" || exit 4
@@ -65,6 +65,7 @@ done
                     "RUNNER_TEMP": str(root), "CALL_LOG": str(calls_path), "LIFECYCLE": str(lifecycle),
                     "PATH": str(root) + os.pathsep + os.environ["PATH"],
                     "CMS_TEST_PATHS": " ".join(required + optional), "FAIL_FILE": failure or "",
+                    "DB_SCHEMA": "mrf", "HLTHPRT_DB_SCHEMA": "directory_synthetic",
                     "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "synthetic",
                     "HLTHPRT_DB_HOST": "127.0.0.1", "HLTHPRT_DB_PORT": "5432"}
                 script = CHECK_FUNCTIONS + r'''
@@ -75,8 +76,8 @@ run_provider_directory_postgres postgresql://synthetic/test directory-source
                 result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
                 expected = 4 if missing else 17 if failure else 0
                 self.assertEqual(result.returncode, expected, result.stderr)
-                calls = [line.split("\t", 1) for line in calls_path.read_text().splitlines()]
-                arguments = [call.split() for _, call in calls]
+                calls = [line.split("\t", 3) for line in calls_path.read_text().splitlines()]
+                arguments = [call.split() for _, _, _, call in calls]
                 if missing:
                     self.assertIn(missing, arguments[-1])
                 elif not failure:
@@ -86,7 +87,11 @@ run_provider_directory_postgres postgresql://synthetic/test directory-source
                         self.assertEqual(sum(call.count(path) for call in arguments), int(path in present))
                 for call in arguments:
                     self.assertEqual(call[:6], ["--foreground", "295s", "python", "-m", "pytest", "-q"])
-                admission_roots = [artifact for artifact, call in calls if optional[1] in call.split()]
+                for _, schema_alias, runtime_schema, call in calls:
+                    owned = any(path in call.split() for path in required + optional[:2])
+                    self.assertEqual(schema_alias, "<unset>" if owned else "mrf")
+                    self.assertEqual(runtime_schema, "directory_synthetic")
+                admission_roots = [artifact for artifact, _, _, call in calls if optional[1] in call.split()]
                 for artifact in admission_roots:
                     self.assertTrue(artifact)
                     self.assertFalse(Path(artifact).exists())
