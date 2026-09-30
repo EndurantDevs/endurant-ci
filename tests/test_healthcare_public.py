@@ -1153,6 +1153,9 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_definition_store_postgres.py",
             "tests/test_custom_import_capture_store_postgres.py",
             "tests/test_custom_import_operator_postgres.py",
+            "tests/test_custom_import_registration_authority_postgres.py",
+            "tests/test_custom_import_registration_authority_route_postgres.py",
+            "tests/test_custom_import_registration_authority_migration_postgres.py",
             "tests/test_custom_import_provider_query_postgres.py",
             "tests/test_custom_import_provider_hydration_postgres.py",
         ) + mixed_test_paths
