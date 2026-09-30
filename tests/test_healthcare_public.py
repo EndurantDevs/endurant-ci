@@ -1310,9 +1310,10 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             ("pharmacy_economics_snapshot", "HLTHPRT_PHARMACY_ECON_POSTGRES_DSN", None),
         )
         dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
+        cases = [(lane, fail) for lane in ("core-imports", "core-services", "all") for fail in (False, True)]
         for module, variable, prefix in routes:
-            for fail in (False, True):
-                with self.subTest(module=module, fail=fail), tempfile.TemporaryDirectory() as temporary:
+            for lane, fail in cases:
+                with self.subTest(module=module, lane=lane, fail=fail), tempfile.TemporaryDirectory() as temporary:
                     root = Path(temporary)
                     source = root / "source"
                     (source / "tests").mkdir(parents=True)
@@ -1324,7 +1325,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                         "CI_DEPS_READY": "1", "COVERAGE_BASE_SHA": "a" * 40,
                         "HLTHPRT_DB_PASSWORD": "postgres", "CALL_LOG": str(call_log),
                         "ROUTE_TEST": test_path, "ROUTE_VARIABLE": variable,
-                        "ROUTE_FAILURE": "1" if fail else "0",
+                        "ROUTE_FAILURE": "1" if fail else "0", "ROUTE_LANE": lane,
                     }
                     script = CHECK_FUNCTIONS + r'''
 mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
@@ -1339,14 +1340,19 @@ python() {
 }
 timeout() { shift 2; "$@"; }
 run_python_main 0
-run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" core-imports
+run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" "$ROUTE_LANE"
 '''
                     result = subprocess.run(["bash", "-euc", script], cwd=source, env=env, capture_output=True, text=True)
-                    self.assertEqual(result.returncode == 0, not fail, result.stderr)
+                    self.assertEqual(result.returncode == 0, not (fail and lane != "core-services"), result.stderr)
                     calls = call_log.read_text().splitlines()
                     main_call = next(call for call in calls if "--ci-shard-count 4" in call)
                     self.assertIn(f"--ignore {test_path}", main_call)
                     executions = [call for call in calls if call.endswith(f"\t-m pytest -q {test_path}")]
+                    if lane == "core-services":
+                        self.assertEqual(executions, [])
+                        if prefix is not None:
+                            self.assertFalse(any(prefix in call for call in calls))
+                        continue
                     self.assertEqual(len(executions), 1)
                     actual_dsn = executions[0].split("\t", 1)[0]
                     if prefix is None:
@@ -1359,7 +1365,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                         self.assertLess(calls.index(f"create\t{database}"), calls.index(executions[0]))
                         self.assertGreater(calls.index(f"drop\t{database}"), calls.index(executions[0]))
 
-    def test_result_archive_postgres_tests_use_isolated_core_import_databases(self):
+    def test_result_archive_postgres_tests_use_isolated_databases(self):
         test_paths = (
             "tests/test_entity_address_result_generation_postgres.py",
             "tests/test_mrf_result_archive_postgres.py",
@@ -1372,23 +1378,33 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_provider_quality_reference_family_postgres.py",
         )
         dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source = root / "source"
-            (source / "tests").mkdir(parents=True)
-            for test_path in test_paths:
-                (source / test_path).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
-            call_log = root / "calls"
-            env = {
-                **os.environ,
-                "SOURCE_ROOT": str(source),
-                "CI_ROOT": str(ROOT),
-                "CI_DEPS_READY": "1",
-                "COVERAGE_BASE_SHA": "a" * 40,
-                "HLTHPRT_DB_PASSWORD": "postgres",
-                "CALL_LOG": str(call_log),
-            }
-            script = CHECK_FUNCTIONS + r'''
+        routes = (
+            (test_paths[2:], 0, "hc_reference_family_"),
+            ((test_paths[0],), 1, "hc_address_generation_"),
+            ((test_paths[1],), 2, "hc_mrf_archive_"),
+        )
+        cases = [(lane, failed_path) for lane in ("core-services", "core-imports", "all")
+                 for failed_path in ("", test_paths[2], test_paths[0], test_paths[1])]
+        for lane, failed_path in cases:
+            with self.subTest(lane=lane, failed_path=failed_path), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "source"
+                (source / "tests").mkdir(parents=True)
+                for test_path in test_paths:
+                    (source / test_path).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
+                call_log = root / "calls"
+                env = {
+                    **os.environ,
+                    "SOURCE_ROOT": str(source),
+                    "CI_ROOT": str(ROOT),
+                    "CI_DEPS_READY": "1",
+                    "COVERAGE_BASE_SHA": "a" * 40,
+                    "HLTHPRT_DB_PASSWORD": "postgres",
+                    "CALL_LOG": str(call_log),
+                    "ROUTE_LANE": lane,
+                    "ROUTE_FAILURE": failed_path,
+                }
+                script = CHECK_FUNCTIONS + r'''
 mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
 prepare_debug_rust_binaries() { :; }
 create_test_database() { printf 'create\t%s\n' "$1" >> "$CALL_LOG"; }
@@ -1399,35 +1415,44 @@ python() {
     "${HLTHPRT_ENTITY_ADDRESS_GENERATION_TEST_DSN:-}" \
     "${HLTHPRT_MRF_RESULT_ARCHIVE_TEST_DSN:-}" \
     "$*" >> "$CALL_LOG"
+  if [[ -n "$ROUTE_FAILURE" && "$*" != *"--ignore"* && " $* " = *" $ROUTE_FAILURE "* ]]; then
+    return 23
+  fi
 }
 timeout() {
   shift 2
   "$@"
 }
 run_python_main 0
-run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" core-imports
+run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" "$ROUTE_LANE"
 '''
-            subprocess.run(["bash", "-euc", script], cwd=source, env=env, check=True)
-            calls = call_log.read_text().splitlines()
-            main_call = next(call for call in calls if "--ci-shard-count 4" in call)
-            for test_path in test_paths:
-                self.assertIn(f"--ignore {test_path}", main_call)
+                result = subprocess.run(["bash", "-euc", script], cwd=source, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, int(bool(failed_path) and lane != "core-imports"), result.stderr)
+                calls = call_log.read_text().splitlines()
+                main_call = next(call for call in calls if "--ci-shard-count 4" in call)
+                for test_path in test_paths:
+                    self.assertIn(f"--ignore {test_path}", main_call)
 
-            reference_call = next(call for call in calls if test_paths[2] in call and "--ignore" not in call)
-            for test_path in test_paths[3:]:
-                self.assertIn(test_path, reference_call)
-            entity_call = next(call for call in calls if test_paths[0] in call and "--ignore" not in call)
-            mrf_call = next(call for call in calls if test_paths[1] in call and "--ignore" not in call)
-            reference_dsn = reference_call.split("\t", 1)[0]
-            entity_dsn = entity_call.split("\t", 2)[1]
-            mrf_dsn = mrf_call.split("\t", 3)[2]
-            self.assertRegex(reference_dsn, rf"^{dsn.rsplit('/', 1)[0]}/hc_reference_family_[0-9a-f]{{32}}$")
-            self.assertRegex(entity_dsn, rf"^{dsn.rsplit('/', 1)[0]}/hc_address_generation_[0-9a-f]{{32}}$")
-            self.assertRegex(mrf_dsn, rf"^{dsn.rsplit('/', 1)[0]}/hc_mrf_archive_[0-9a-f]{{32}}$")
-            databases = tuple(value.rsplit("/", 1)[1] for value in (reference_dsn, entity_dsn, mrf_dsn))
-            for database in databases:
-                self.assertEqual(calls.count(f"create\t{database}"), 1)
-                self.assertEqual(calls.count(f"drop\t{database}"), 1)
+                stopped = False
+                for paths, column, prefix in routes:
+                    executions = [call for call in calls if "--ignore" not in call
+                                  and any(test_path in call for test_path in paths)]
+                    selected = lane != "core-imports" and not stopped
+                    self.assertEqual(len(executions), int(selected))
+                    if not selected:
+                        self.assertFalse(any(prefix in call for call in calls))
+                        continue
+                    execution = executions[0]
+                    fields = execution.split("\t")
+                    self.assertEqual(shlex.split(fields[-1]), ["-m", "pytest", "-q", *paths])
+                    actual_dsn = fields[column]
+                    self.assertRegex(actual_dsn, rf"^{dsn.rsplit('/', 1)[0]}/{prefix}[0-9a-f]{{32}}$")
+                    database = actual_dsn.rsplit("/", 1)[1]
+                    self.assertEqual(calls.count(f"create\t{database}"), 1)
+                    self.assertEqual(calls.count(f"drop\t{database}"), 1)
+                    self.assertLess(calls.index(f"create\t{database}"), calls.index(execution))
+                    self.assertGreater(calls.index(f"drop\t{database}"), calls.index(execution))
+                    stopped = failed_path in paths
 
 
 if __name__ == "__main__":
