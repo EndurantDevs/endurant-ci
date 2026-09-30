@@ -199,6 +199,9 @@ run_python_main() {
     tests/test_custom_import_definition_store_postgres.py \
     tests/test_custom_import_capture_store_postgres.py \
     tests/test_custom_import_operator_postgres.py \
+    tests/test_custom_import_registration_authority_postgres.py \
+    tests/test_custom_import_registration_authority_route_postgres.py \
+    tests/test_custom_import_registration_authority_migration_postgres.py \
     tests/test_custom_import_provider_query_postgres.py \
     tests/test_custom_import_provider_hydration_postgres.py \
     tests/test_entity_address_result_generation_postgres.py \
@@ -868,6 +871,9 @@ run_core_postgres() {
     tests/test_custom_import_definition_store_postgres.py \
     tests/test_custom_import_capture_store_postgres.py \
     tests/test_custom_import_operator_postgres.py \
+    tests/test_custom_import_registration_authority_postgres.py \
+    tests/test_custom_import_registration_authority_route_postgres.py \
+    tests/test_custom_import_registration_authority_migration_postgres.py \
     tests/test_custom_import_provider_query_postgres.py \
     tests/test_custom_import_provider_hydration_postgres.py \
     tests/test_custom_import_provider_list.py \
