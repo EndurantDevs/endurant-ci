@@ -25,6 +25,78 @@ IMAGE_VALIDATORS = (
 
 
 class HealthcarePublicChecks(unittest.TestCase):
+    def test_cms_directory_routes_present_suites_and_keeps_common_tests_required(self):
+        required = (
+            "tests/test_provider_directory_entities_postgres.py",
+            "tests/test_provider_directory_cms_entities.py",
+            "tests/test_provider_directory_cms_payers.py",
+            "tests/test_provider_directory_insurance_network_identity.py",
+        )
+        optional = (
+            "tests/test_provider_directory_cms_practitioner_navigation.py",
+            "tests/test_cms_npd_admission_postgres.py",
+            "tests/test_provider_directory_entity_redirect.py",
+        )
+        cases = [(present, None, None) for present in ((), *((path,) for path in optional), optional)]
+        cases += [((), missing, None) for missing in required]
+        cases.append((optional, None, optional[1]))
+        for present, missing, failure in cases:
+            with self.subTest(present=present, missing=missing, failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "source"
+                (source / "tests").mkdir(parents=True)
+                for path in required + present:
+                    (source / path).touch()
+                if missing:
+                    (source / missing).unlink()
+                calls_path, lifecycle = root / "calls", root / "lifecycle"
+                command = root / "timeout"
+                command.write_text('#!/bin/bash\n' + r'''
+printf '%s\t%s\n' "${HLTHPRT_CMS_NPD_ADMISSION_TEST_ARTIFACT_ROOT:-}" "$*" >> "$CALL_LOG"
+for test_path in "$@"; do
+  if [[ " $CMS_TEST_PATHS " = *" $test_path "* ]]; then
+    test -f "$test_path" || exit 4
+  fi
+  test "$test_path" != "$FAIL_FILE" || exit 17
+done
+''')
+                command.chmod(0o755)
+                environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                    "RUNNER_TEMP": str(root), "CALL_LOG": str(calls_path), "LIFECYCLE": str(lifecycle),
+                    "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                    "CMS_TEST_PATHS": " ".join(required + optional), "FAIL_FILE": failure or "",
+                    "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "synthetic",
+                    "HLTHPRT_DB_HOST": "127.0.0.1", "HLTHPRT_DB_PORT": "5432"}
+                script = CHECK_FUNCTIONS + r'''
+create_test_database() { printf 'create:%s\n' "$1" >> "$LIFECYCLE"; }
+drop_test_database() { printf 'drop:%s\n' "$1" >> "$LIFECYCLE"; }
+run_provider_directory_postgres postgresql://synthetic/test directory-source
+'''
+                result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+                expected = 4 if missing else 17 if failure else 0
+                self.assertEqual(result.returncode, expected, result.stderr)
+                calls = [line.split("\t", 1) for line in calls_path.read_text().splitlines()]
+                arguments = [call.split() for _, call in calls]
+                if missing:
+                    self.assertIn(missing, arguments[-1])
+                elif not failure:
+                    for path in required:
+                        self.assertEqual(sum(call.count(path) for call in arguments), 1)
+                    for path in optional:
+                        self.assertEqual(sum(call.count(path) for call in arguments), int(path in present))
+                for call in arguments:
+                    self.assertEqual(call[:6], ["--foreground", "295s", "python", "-m", "pytest", "-q"])
+                admission_roots = [artifact for artifact, call in calls if optional[1] in call.split()]
+                for artifact in admission_roots:
+                    self.assertTrue(artifact)
+                    self.assertFalse(Path(artifact).exists())
+                events = lifecycle.read_text().splitlines()
+                self.assertEqual(
+                    [event.removeprefix("create:") for event in events if event.startswith("create:")],
+                    [event.removeprefix("drop:") for event in events if event.startswith("drop:")],
+                )
+                self.assertEqual(set(root.iterdir()), {source, command, calls_path, lifecycle})
+
     def test_available_archive_suites_route_into_database_lane(self):
         names = (
             "test_code_sets_result_archive_postgres.py",
