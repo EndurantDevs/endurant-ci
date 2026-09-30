@@ -1135,7 +1135,7 @@ run_owned_provider_directory_postgres() (
   trap cleanup_owned_database EXIT
   create_test_database "$owned_directory_database"
   local dsn="postgresql+asyncpg://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@${HLTHPRT_DB_HOST}:${HLTHPRT_DB_PORT}/${owned_directory_database}"
-  env "$variable=$dsn" timeout --foreground 295s python -m pytest -q "$@"
+  env -u DB_SCHEMA "$variable=$dsn" timeout --foreground 295s python -m pytest -q "$@"
 )
 
 run_provider_directory_postgres() {
