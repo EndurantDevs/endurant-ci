@@ -1142,7 +1142,44 @@ run_owned_provider_directory_postgres() (
   trap cleanup_owned_database EXIT
   create_test_database "$owned_directory_database"
   local dsn="postgresql+asyncpg://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@${HLTHPRT_DB_HOST}:${HLTHPRT_DB_PORT}/${owned_directory_database}"
-  env -u DB_SCHEMA "$variable=$dsn" timeout --foreground 295s python -m pytest -q "$@"
+  env -u DB_SCHEMA -u HLTHPRT_DB_DATABASE_OVERRIDE \
+    "$variable=$dsn" HLTHPRT_DB_DATABASE="$owned_directory_database" \
+    timeout --foreground 295s python -m pytest -q "$@"
+)
+
+run_available_cms_postgres() (
+  local database_scope=$1 test_path
+  shift
+  local selected=()
+  for test_path in "$@"; do
+    if [ -f "$repository_root/${test_path%%::*}" ]; then
+      selected+=("$test_path")
+    fi
+  done
+  [ "${#selected[@]}" -gt 0 ] || exit 0
+  case "$database_scope" in
+    owned)
+      artifact_root=
+      cleanup_cms_artifacts() {
+        local status=$?
+        trap - EXIT
+        if [ -n "$artifact_root" ] && ! rmdir "$artifact_root"; then
+          [ "$status" -ne 0 ] || status=1
+        fi
+        exit "$status"
+      }
+      trap cleanup_cms_artifacts EXIT
+      artifact_root=$(mktemp -d "${RUNNER_TEMP:-/tmp}/cms-npd-admission.XXXXXX")
+      export HLTHPRT_CMS_NPD_ADMISSION_TEST_ARTIFACT_ROOT="$artifact_root"
+      run_owned_provider_directory_postgres hc_cms_admission_test HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN \
+        "${selected[@]}"
+      ;;
+    runtime)
+      env -u DB_SCHEMA -u HLTHPRT_DB_DATABASE_OVERRIDE \
+        timeout --foreground 295s python -m pytest -q "${selected[@]}"
+      ;;
+    *) exit 2 ;;
+  esac
 )
 
 run_provider_directory_postgres() {
@@ -1186,15 +1223,15 @@ run_provider_directory_postgres() {
     "${directory_entity_tests[@]}"
   run_owned_provider_directory_postgres cms_network_test CMS_NETWORK_TEST_DATABASE \
     tests/test_provider_directory_insurance_network_identity.py
-  if [ -f "$repository_root/tests/test_cms_npd_admission_postgres.py" ]; then
-    (
-      artifact_root=$(mktemp -d "${RUNNER_TEMP:-/tmp}/cms-npd-admission.XXXXXX")
-      trap 'rmdir "$artifact_root"' EXIT
-      export HLTHPRT_CMS_NPD_ADMISSION_TEST_ARTIFACT_ROOT="$artifact_root"
-      run_owned_provider_directory_postgres hc_cms_admission_test HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN \
-        tests/test_cms_npd_admission_postgres.py
-    )
-  fi
+  run_available_cms_postgres owned tests/test_cms_npd_admission_postgres.py
+  run_available_cms_postgres owned \
+    tests/test_cms_npd_candidate_coverage_postgres.py \
+    tests/test_cms_npd_intake_postgres.py \
+    tests/test_provider_directory_cms_retained_relations_postgres.py
+  run_available_cms_postgres owned \
+    tests/test_cms_capacity_preflight_receipt_migration.py \
+    tests/test_provider_directory_cms_preflight_postgres.py \
+    tests/test_provider_directory_cms_wal_budget_postgres.py
   if [ -f "$repository_root/tests/test_provider_directory_entity_redirect.py" ]; then
     timeout --foreground 295s python -m pytest -q tests/test_provider_directory_entity_redirect.py
   fi
@@ -1224,6 +1261,12 @@ run_provider_directory_postgres() {
     "HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS=1"
   )
   if [[ "$lane" = directory-storage || "$lane" = all ]]; then
+  run_available_cms_postgres runtime \
+    tests/test_provider_directory_cms_execution_settings_postgres.py \
+    tests/test_provider_directory_cms_replay_postgres.py \
+    tests/test_provider_directory_cms_serving_bounds_postgres.py \
+    tests/test_provider_directory_cms_capacity_ledger.py::test_native_two_purposes_share_one_run_and_reject_conflicts \
+    tests/test_provider_directory_prepared_bundle.py::test_prepared_bundle_obeys_outer_commit_and_rollback
   env "${common_env[@]}" timeout --foreground 295s python -m pytest -q \
     -o asyncio_default_test_loop_scope=session \
     -o asyncio_default_fixture_loop_scope=session \
@@ -1248,6 +1291,21 @@ run_provider_directory_postgres() {
   fi
 
   if [[ "$lane" = directory-address || "$lane" = all ]]; then
+  run_available_cms_postgres runtime \
+    tests/test_entity_address_candidate_preparation_postgres.py \
+    tests/test_entity_address_preparation_admission_postgres.py \
+    tests/test_entity_address_preparation_ownership_postgres.py \
+    tests/test_entity_address_prepared_archive.py::test_real_coordinate_read_preserves_incumbent_archive \
+    tests/test_entity_address_semantic_date.py::test_backdated_freshness_uses_inclusive_pinned_boundary \
+    tests/test_entity_address_semantic_date.py::test_missing_overlay_time_is_stable_across_session_timezones
+  run_available_cms_postgres runtime \
+    tests/test_provider_directory_cms_archive_postgres.py \
+    tests/test_provider_directory_cms_native_inputs_postgres.py \
+    tests/test_provider_directory_cms_native_layout_postgres.py \
+    tests/test_provider_directory_cms_native_projection_postgres.py \
+    tests/test_provider_directory_cms_overlay_projection_postgres.py \
+    tests/test_provider_directory_cms_preparation.py::test_native_scope_loads_all_heaps_before_indexes_and_exposure \
+    tests/test_provider_directory_cms_preparation.py::test_native_cleanup_preserves_replacement_oid
   env "${common_env[@]}" timeout --foreground 295s python -m pytest -q \
     -o asyncio_default_test_loop_scope=session \
     -o asyncio_default_fixture_loop_scope=session \
@@ -1403,6 +1461,17 @@ run_provider_profile_postgres() {
   fi
 
   if [[ "$lane" = profile-publication || "$lane" = all ]]; then
+  run_available_cms_postgres owned \
+    tests/test_cms_doctors_preparation_postgres.py \
+    tests/test_cms_doctors_preparation_seal_postgres.py \
+    tests/test_cms_doctors_source_provenance_postgres.py \
+    tests/test_entity_address_prepared_doctors_postgres.py \
+    tests/test_provider_profile_detail_load_postgres.py
+  run_available_cms_postgres owned \
+    tests/test_cms_archive_publication_postgres.py \
+    tests/test_cms_serving_publication_postgres.py \
+    tests/test_entity_address_serving_receipt_postgres.py \
+    tests/test_provider_directory_cms_serving_receipt_postgres.py
   set --
   if [ -f "$repository_root/tests/test_cms_doctors_education.py" ]; then
     set -- tests/test_cms_doctors_education.py::test_native_postgres_publication_rolls_back_both_tables_on_education_failure
