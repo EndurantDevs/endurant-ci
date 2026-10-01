@@ -25,6 +25,175 @@ IMAGE_VALIDATORS = (
 
 
 class HealthcarePublicChecks(unittest.TestCase):
+    def test_cms_native_coverage_routes_and_owns_required_fixture_environments(self):
+        routes = {
+            "directory-source": (
+                "tests/test_cms_npd_admission_postgres.py",
+                "tests/test_cms_npd_candidate_coverage_postgres.py",
+                "tests/test_cms_npd_intake_postgres.py",
+                "tests/test_provider_directory_cms_retained_relations_postgres.py",
+                "tests/test_cms_capacity_preflight_receipt_migration.py",
+                "tests/test_provider_directory_cms_preflight_postgres.py",
+                "tests/test_provider_directory_cms_wal_budget_postgres.py",
+            ),
+            "directory-storage": (
+                "tests/test_provider_directory_cms_execution_settings_postgres.py",
+                "tests/test_provider_directory_cms_replay_postgres.py",
+                "tests/test_provider_directory_cms_serving_bounds_postgres.py",
+                "tests/test_provider_directory_cms_capacity_ledger.py::test_native_two_purposes_share_one_run_and_reject_conflicts",
+                "tests/test_provider_directory_prepared_bundle.py::test_prepared_bundle_obeys_outer_commit_and_rollback",
+            ),
+            "directory-address": (
+                "tests/test_entity_address_candidate_preparation_postgres.py",
+                "tests/test_entity_address_preparation_admission_postgres.py",
+                "tests/test_entity_address_preparation_ownership_postgres.py",
+                "tests/test_entity_address_prepared_archive.py::test_real_coordinate_read_preserves_incumbent_archive",
+                "tests/test_entity_address_semantic_date.py::test_backdated_freshness_uses_inclusive_pinned_boundary",
+                "tests/test_entity_address_semantic_date.py::test_missing_overlay_time_is_stable_across_session_timezones",
+                "tests/test_provider_directory_cms_archive_postgres.py",
+                "tests/test_provider_directory_cms_native_inputs_postgres.py",
+                "tests/test_provider_directory_cms_native_layout_postgres.py",
+                "tests/test_provider_directory_cms_native_projection_postgres.py",
+                "tests/test_provider_directory_cms_overlay_projection_postgres.py",
+                "tests/test_provider_directory_cms_preparation.py::test_native_scope_loads_all_heaps_before_indexes_and_exposure",
+                "tests/test_provider_directory_cms_preparation.py::test_native_cleanup_preserves_replacement_oid",
+            ),
+            "profile-publication": (
+                "tests/test_cms_doctors_preparation_postgres.py",
+                "tests/test_cms_doctors_preparation_seal_postgres.py",
+                "tests/test_cms_doctors_source_provenance_postgres.py",
+                "tests/test_entity_address_prepared_doctors_postgres.py",
+                "tests/test_provider_profile_detail_load_postgres.py",
+                "tests/test_cms_archive_publication_postgres.py",
+                "tests/test_cms_serving_publication_postgres.py",
+                "tests/test_entity_address_serving_receipt_postgres.py",
+                "tests/test_provider_directory_cms_serving_receipt_postgres.py",
+            ),
+        }
+        all_paths = tuple(path for paths in routes.values() for path in paths)
+        cases = [
+            (lane, present, "", "", 0)
+            for lane, paths in routes.items()
+            for present in (all_paths, (), (paths[-1],))
+        ]
+        cases += [(lane, all_paths, paths[-1], "", 17) for lane, paths in routes.items()]
+        cases += [
+            ("profile-publication", all_paths, "", "create", 17),
+            ("profile-publication", all_paths, "", "drop", 1),
+            ("profile-publication", all_paths, "", "artifact", 1),
+        ]
+        for lane, present, failure, cleanup_failure, expected in cases:
+            with self.subTest(lane=lane, present=len(present), failure=failure, cleanup=cleanup_failure):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    source = root / "source"
+                    (source / "tests").mkdir(parents=True)
+                    for path in present:
+                        (source / path.split("::", 1)[0]).touch()
+                    calls_path, lifecycle = root / "calls", root / "lifecycle"
+                    calls_path.touch()
+                    lifecycle.touch()
+                    command = root / "timeout"
+                    command.write_text(f"#!{sys.executable}\n" + '''
+import json, os, pathlib, sys
+arguments = sys.argv[1:]
+tracked = json.loads(os.environ["NATIVE_TEST_PATHS"])
+selected = [path for path in arguments if path in tracked]
+if selected:
+    for path in selected:
+        if not pathlib.Path(path.split("::", 1)[0]).is_file():
+            sys.exit(4)
+    artifact = os.environ.get("HLTHPRT_CMS_NPD_ADMISSION_TEST_ARTIFACT_ROOT")
+    record = {"arguments": arguments, "selected": selected,
+              "database": os.environ.get("HLTHPRT_DB_DATABASE"),
+              "override": os.environ.get("HLTHPRT_DB_DATABASE_OVERRIDE"),
+              "dsn": os.environ.get("HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN"),
+              "schema_alias": os.environ.get("DB_SCHEMA"),
+              "schema": os.environ.get("HLTHPRT_DB_SCHEMA"),
+              "allow_schema": os.environ.get("HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS"),
+              "artifact": artifact, "artifact_exists": bool(artifact and pathlib.Path(artifact).is_dir()),
+              "coverage_file": os.environ.get("COVERAGE_FILE"),
+              "pytest_addopts": os.environ.get("PYTEST_ADDOPTS")}
+    with open(os.environ["CALL_LOG"], "a") as output:
+        output.write(json.dumps(record) + "\\n")
+    if artifact and os.environ["CLEANUP_FAILURE"] == "artifact":
+        pathlib.Path(artifact, "unfinished-fixture").touch()
+    if os.environ["FAIL_FILE"] in selected:
+        sys.exit(17)
+''')
+                    command.chmod(0o755)
+                    environment = {
+                        **os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                        "RUNNER_TEMP": str(root), "CALL_LOG": str(calls_path), "LIFECYCLE": str(lifecycle),
+                        "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                        "NATIVE_TEST_PATHS": json.dumps(all_paths), "FAIL_FILE": failure,
+                        "CLEANUP_FAILURE": cleanup_failure, "DB_SCHEMA": "stale_alias",
+                        "HLTHPRT_DB_SCHEMA": "mrf", "HLTHPRT_DB_DATABASE": "native_directory_test_runner",
+                        "HLTHPRT_DB_DATABASE_OVERRIDE": "wrong_database", "HLTHPRT_DB_USER": "postgres",
+                        "HLTHPRT_DB_PASSWORD": "synthetic", "HLTHPRT_DB_HOST": "127.0.0.1",
+                        "HLTHPRT_DB_PORT": "5432", "COVERAGE_FILE": str(root / ".coverage.native"),
+                        "PYTEST_ADDOPTS": "--cov=process --cov-branch --cov-append --cov-report=",
+                    }
+                    for name in ("HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN", "HLTHPRT_CMS_NPD_ADMISSION_TEST_ARTIFACT_ROOT",
+                                 "HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS"):
+                        environment.pop(name, None)
+                    function = "run_provider_profile_postgres" if lane.startswith("profile") else "run_provider_directory_postgres"
+                    script = CHECK_FUNCTIONS + r'''
+create_test_database() {
+  printf 'create:%s\n' "$1" >> "$LIFECYCLE"
+  if [[ "$1" = hc_cms_admission_test_* && "$CLEANUP_FAILURE" = create ]]; then return 17; fi
+}
+drop_test_database() {
+  test "$PGDATABASE" = postgres
+  printf 'drop:%s\n' "$1" >> "$LIFECYCLE"
+  if [[ "$1" = hc_cms_admission_test_* && "$CLEANUP_FAILURE" = drop ]]; then return 7; fi
+}
+''' + f'\n{function} postgresql://synthetic/native_directory_test_runner {lane}\n' + r'''
+test "$DB_SCHEMA:$HLTHPRT_DB_DATABASE_OVERRIDE" = stale_alias:wrong_database
+test "$HLTHPRT_DB_DATABASE" = native_directory_test_runner
+test -z "${HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN:-}"
+test -z "${HLTHPRT_CMS_NPD_ADMISSION_TEST_ARTIFACT_ROOT:-}"
+'''
+                    result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
+                    observed = [path for call in calls for path in call["selected"]]
+                    if not expected:
+                        expected_paths = [path for path in routes[lane] if (source / path.split("::", 1)[0]).exists()]
+                        self.assertEqual(observed, expected_paths)
+                    elif failure:
+                        self.assertIn(failure, observed)
+                    for call in calls:
+                        self.assertEqual(call["arguments"][:6], ["--foreground", "295s", "python", "-m", "pytest", "-q"])
+                        self.assertIsNone(call["schema_alias"])
+                        self.assertIsNone(call["override"])
+                        self.assertEqual(call["schema"], "mrf")
+                        self.assertEqual(call["coverage_file"], environment["COVERAGE_FILE"])
+                        self.assertEqual(call["pytest_addopts"], environment["PYTEST_ADDOPTS"])
+                        if lane in {"directory-source", "profile-publication"}:
+                            self.assertRegex(call["database"], r"^hc_cms_admission_test_[0-9a-f]{32}$")
+                            self.assertEqual(call["dsn"], "postgresql+asyncpg://postgres:synthetic@127.0.0.1:5432/" + call["database"])
+                            self.assertTrue(call["artifact_exists"])
+                        else:
+                            self.assertEqual(call["database"], "native_directory_test_runner")
+                            self.assertIsNone(call["allow_schema"])
+                            self.assertIsNone(call["dsn"])
+                            self.assertIsNone(call["artifact"])
+                    events = lifecycle.read_text().splitlines()
+                    self.assertEqual(
+                        [event.removeprefix("create:") for event in events if event.startswith("create:")],
+                        [event.removeprefix("drop:") for event in events if event.startswith("drop:")],
+                    )
+                    leftovers = set(root.iterdir()) - {source, command, calls_path, lifecycle}
+                    if cleanup_failure == "artifact":
+                        self.assertEqual(len(leftovers), 1)
+                        artifact = leftovers.pop()
+                        self.assertEqual([path.name for path in artifact.iterdir()], ["unfinished-fixture"])
+                        (artifact / "unfinished-fixture").unlink()
+                        artifact.rmdir()
+                    else:
+                        self.assertFalse(leftovers)
+
     def test_cms_directory_routes_present_suites_and_keeps_common_tests_required(self):
         required = (
             "tests/test_provider_directory_entities_postgres.py",
