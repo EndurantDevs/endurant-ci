@@ -1297,7 +1297,8 @@ run_provider_directory_postgres() {
     tests/test_entity_address_preparation_ownership_postgres.py \
     tests/test_entity_address_prepared_archive.py::test_real_coordinate_read_preserves_incumbent_archive \
     tests/test_entity_address_semantic_date.py::test_backdated_freshness_uses_inclusive_pinned_boundary \
-    tests/test_entity_address_semantic_date.py::test_missing_overlay_time_is_stable_across_session_timezones
+    tests/test_entity_address_semantic_date.py::test_missing_overlay_time_is_stable_across_session_timezones \
+    tests/test_provider_directory_practitioner_address_overlay_db.py
   run_available_cms_postgres owned \
     tests/test_provider_directory_cms_archive_postgres.py \
     tests/test_provider_directory_cms_native_inputs_postgres.py \
@@ -1458,6 +1459,29 @@ run_provider_profile_postgres() {
     tests/test_provider_directory_projection_finalizer_postgres.py \
     tests/test_provider_directory_projection_decoded_census_migration_postgres.py \
     tests/test_uhc_organization_evidence_schema.py
+
+  run_available_cms_postgres owned \
+    tests/test_provider_directory_capacity_reservation_snapshot_postgres.py \
+    tests/test_provider_directory_capacity_reservation_snapshot_api_postgres.py \
+    tests/test_provider_directory_profile_receipt_guard_postgres.py \
+    tests/test_provider_directory_profile_serving_receipt_postgres.py
+  local profile_snapshot_tests=() profile_snapshot_test
+  for profile_snapshot_test in \
+    tests/test_provider_profile_snapshot_postgres.py \
+    tests/test_provider_profile_snapshot_receipt_postgres.py; do
+    if [ -f "$repository_root/$profile_snapshot_test" ]; then
+      profile_snapshot_tests+=("$profile_snapshot_test")
+    fi
+  done
+  if [ "${#profile_snapshot_tests[@]}" -gt 0 ]; then
+    run_owned_provider_directory_postgres hc_directory_entities HLTHPRT_DIRECTORY_ENTITIES_TEST_DSN \
+      "${profile_snapshot_tests[@]}"
+  fi
+  HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS=1 \
+    run_available_cms_postgres runtime \
+      tests/test_provider_directory_profile_selection_desired_db.py \
+      tests/test_provider_directory_profile_desired_snapshot_postgres.py \
+      tests/test_provider_directory_publication_liveness_postgres.py
   fi
 
   if [[ "$lane" = profile-publication || "$lane" = all ]]; then

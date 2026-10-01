@@ -50,6 +50,7 @@ class HealthcarePublicChecks(unittest.TestCase):
                 "tests/test_entity_address_prepared_archive.py::test_real_coordinate_read_preserves_incumbent_archive",
                 "tests/test_entity_address_semantic_date.py::test_backdated_freshness_uses_inclusive_pinned_boundary",
                 "tests/test_entity_address_semantic_date.py::test_missing_overlay_time_is_stable_across_session_timezones",
+                "tests/test_provider_directory_practitioner_address_overlay_db.py",
                 "tests/test_provider_directory_cms_archive_postgres.py",
                 "tests/test_provider_directory_cms_native_inputs_postgres.py",
                 "tests/test_provider_directory_cms_native_layout_postgres.py",
@@ -57,6 +58,17 @@ class HealthcarePublicChecks(unittest.TestCase):
                 "tests/test_provider_directory_cms_overlay_projection_postgres.py",
                 "tests/test_provider_directory_cms_preparation.py::test_native_scope_loads_all_heaps_before_indexes_and_exposure",
                 "tests/test_provider_directory_cms_preparation.py::test_native_cleanup_preserves_replacement_oid",
+            ),
+            "profile-storage": (
+                "tests/test_provider_directory_capacity_reservation_snapshot_postgres.py",
+                "tests/test_provider_directory_capacity_reservation_snapshot_api_postgres.py",
+                "tests/test_provider_directory_profile_receipt_guard_postgres.py",
+                "tests/test_provider_directory_profile_serving_receipt_postgres.py",
+                "tests/test_provider_profile_snapshot_postgres.py",
+                "tests/test_provider_profile_snapshot_receipt_postgres.py",
+                "tests/test_provider_directory_profile_selection_desired_db.py",
+                "tests/test_provider_directory_profile_desired_snapshot_postgres.py",
+                "tests/test_provider_directory_publication_liveness_postgres.py",
             ),
             "profile-publication": (
                 "tests/test_cms_doctors_preparation_postgres.py",
@@ -71,6 +83,9 @@ class HealthcarePublicChecks(unittest.TestCase):
             ),
         }
         all_paths = tuple(path for paths in routes.values() for path in paths)
+        cms_paths = set(routes["directory-source"] + routes["profile-publication"]
+                        + routes["directory-address"][7:] + routes["profile-storage"][:4])
+        entities_paths = set(routes["profile-storage"][4:6])
         cases = [
             (lane, present, "", "", 0)
             for lane, paths in routes.items()
@@ -79,8 +94,16 @@ class HealthcarePublicChecks(unittest.TestCase):
         cases += [(lane, all_paths, paths[-1], "", 17) for lane, paths in routes.items()]
         cases += [
             (lane, all_paths, "", cleanup, expected)
-            for lane in ("directory-address", "profile-publication")
+            for lane in ("directory-address", "profile-publication", "profile-storage")
             for cleanup, expected in (("create", 17), ("drop", 1), ("artifact", 1))
+        ]
+        cases += [
+            ("profile-storage", all_paths, routes["profile-storage"][index], "", 17)
+            for index in (0, 4)
+        ]
+        cases += [
+            ("profile-storage", (routes["profile-storage"][4],), "", cleanup, expected)
+            for cleanup, expected in (("create", 17), ("drop", 1))
         ]
         for lane, present, failure, cleanup_failure, expected in cases:
             with self.subTest(lane=lane, present=len(present), failure=failure, cleanup=cleanup_failure):
@@ -108,6 +131,7 @@ if selected:
               "database": os.environ.get("HLTHPRT_DB_DATABASE"),
               "override": os.environ.get("HLTHPRT_DB_DATABASE_OVERRIDE"),
               "dsn": os.environ.get("HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN"),
+              "entities_dsn": os.environ.get("HLTHPRT_DIRECTORY_ENTITIES_TEST_DSN"),
               "schema_alias": os.environ.get("DB_SCHEMA"),
               "schema": os.environ.get("HLTHPRT_DB_SCHEMA"),
               "allow_schema": os.environ.get("HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS"),
@@ -135,24 +159,27 @@ if selected:
                         "PYTEST_ADDOPTS": "--cov=process --cov-branch --cov-append --cov-report=",
                     }
                     for name in ("HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN", "HLTHPRT_CMS_NPD_ADMISSION_TEST_ARTIFACT_ROOT",
+                                 "HLTHPRT_DIRECTORY_ENTITIES_TEST_DSN",
                                  "HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS"):
                         environment.pop(name, None)
                     function = "run_provider_profile_postgres" if lane.startswith("profile") else "run_provider_directory_postgres"
                     script = CHECK_FUNCTIONS + r'''
 create_test_database() {
   printf 'create:%s\n' "$1" >> "$LIFECYCLE"
-  if [[ "$1" = hc_cms_admission_test_* && "$CLEANUP_FAILURE" = create ]]; then return 17; fi
+  if [[ ( "$1" = hc_cms_admission_test_* || "$1" = hc_directory_entities_* ) && "$CLEANUP_FAILURE" = create ]]; then return 17; fi
 }
 drop_test_database() {
-  test "$PGDATABASE" = postgres
+  if [[ "$1" = hc_cms_admission_test_* || "$1" = hc_directory_entities_* ]]; then test "$PGDATABASE" = postgres; fi
   printf 'drop:%s\n' "$1" >> "$LIFECYCLE"
-  if [[ "$1" = hc_cms_admission_test_* && "$CLEANUP_FAILURE" = drop ]]; then return 7; fi
+  if [[ ( "$1" = hc_cms_admission_test_* || "$1" = hc_directory_entities_* ) && "$CLEANUP_FAILURE" = drop ]]; then return 7; fi
 }
 ''' + f'\n{function} postgresql://synthetic/native_directory_test_runner {lane}\n' + r'''
 test "$DB_SCHEMA:$HLTHPRT_DB_DATABASE_OVERRIDE" = stale_alias:wrong_database
 test "$HLTHPRT_DB_DATABASE" = native_directory_test_runner
 test -z "${HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN:-}"
 test -z "${HLTHPRT_CMS_NPD_ADMISSION_TEST_ARTIFACT_ROOT:-}"
+test -z "${HLTHPRT_DIRECTORY_ENTITIES_TEST_DSN:-}"
+test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
 '''
                     result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True, timeout=30)
                     self.assertEqual(result.returncode, expected, result.stderr)
@@ -170,18 +197,27 @@ test -z "${HLTHPRT_CMS_NPD_ADMISSION_TEST_ARTIFACT_ROOT:-}"
                         self.assertEqual(call["schema"], "mrf")
                         self.assertEqual(call["coverage_file"], environment["COVERAGE_FILE"])
                         self.assertEqual(call["pytest_addopts"], environment["PYTEST_ADDOPTS"])
-                        owns_database = lane in {"directory-source", "profile-publication"} or (
-                            lane == "directory-address"
-                            and any(path in routes[lane][6:] for path in call["selected"])
-                        )
-                        if owns_database:
+                        dsn_prefix = (f"postgresql+asyncpg://{environment['HLTHPRT_DB_USER']}:"
+                                      f"{environment['HLTHPRT_DB_PASSWORD']}@{environment['HLTHPRT_DB_HOST']}:"
+                                      f"{environment['HLTHPRT_DB_PORT']}/")
+                        selected = set(call["selected"])
+                        if selected & cms_paths:
+                            self.assertTrue(selected <= cms_paths)
                             self.assertRegex(call["database"], r"^hc_cms_admission_test_[0-9a-f]{32}$")
-                            self.assertEqual(call["dsn"], "postgresql+asyncpg://postgres:synthetic@127.0.0.1:5432/" + call["database"])
+                            self.assertEqual(call["dsn"], dsn_prefix + call["database"])
                             self.assertTrue(call["artifact_exists"])
+                            self.assertIsNone(call["entities_dsn"])
+                        elif selected & entities_paths:
+                            self.assertTrue(selected <= entities_paths)
+                            self.assertRegex(call["database"], r"^hc_directory_entities_[0-9a-f]{32}$")
+                            self.assertEqual(call["entities_dsn"], dsn_prefix + call["database"])
+                            self.assertIsNone(call["artifact"])
+                            self.assertIsNone(call["dsn"])
                         else:
                             self.assertEqual(call["database"], "native_directory_test_runner")
-                            self.assertIsNone(call["allow_schema"])
+                            self.assertEqual(call["allow_schema"], "1" if lane == "profile-storage" else None)
                             self.assertIsNone(call["dsn"])
+                            self.assertIsNone(call["entities_dsn"])
                             self.assertIsNone(call["artifact"])
                     events = lifecycle.read_text().splitlines()
                     self.assertEqual(
