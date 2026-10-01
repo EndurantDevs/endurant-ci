@@ -80,6 +80,11 @@ class HealthcarePublicChecks(unittest.TestCase):
                 "tests/test_cms_serving_publication_postgres.py",
                 "tests/test_entity_address_serving_receipt_postgres.py",
                 "tests/test_provider_directory_cms_serving_receipt_postgres.py",
+                "tests/test_provider_directory_profile_failed_cleanup_postgres.py",
+                "tests/test_provider_directory_profile_initial_migration.py::test_native_initial_receipt_guards",
+                "tests/test_provider_directory_import_run_guards.py::test_native_complete_guard_catalog_and_ordinary_update",
+                "tests/test_provider_directory_profile_initial_cutover_postgres.py",
+                "tests/test_provider_directory_profile_initial_replay.py",
             ),
         }
         all_paths = tuple(path for paths in routes.values() for path in paths)
@@ -92,6 +97,10 @@ class HealthcarePublicChecks(unittest.TestCase):
             for present in (all_paths, (), (paths[-1],))
         ]
         cases += [(lane, all_paths, paths[-1], "", 17) for lane, paths in routes.items()]
+        cases += [("profile-publication", (path,), "", "", 0)
+                  for path in routes["profile-publication"][-5:]]
+        cases += [("profile-publication", all_paths, path, "", 17)
+                  for path in routes["profile-publication"][-5:-1]]
         cases += [
             (lane, all_paths, "", cleanup, expected)
             for lane in ("directory-address", "profile-publication", "profile-storage")
@@ -678,7 +687,8 @@ run_python_inference
         self.assertNotIn("process/fhir_request_failure_policy.py", CHECK_FUNCTIONS)
 
     def test_state_profile_native_selection_is_source_aware_and_has_database_dsn(self):
-        tennessee_paths = (
+        profile_paths = (
+            "tests/test_provider_directory_profile_bounded_capacity_postgres.py",
             "tests/test_tennessee_profile_registry.py",
             "tests/test_tennessee_profile_store.py",
         )
@@ -689,9 +699,9 @@ run_python_inference
             "new_york_profile_store",
         )
         native_paths = tuple(f"tests/test_{name}_postgres.py" for name in native_modules)
-        cases = [((), (), None), (tennessee_paths, (), None)]
+        cases = [((), (), None), (profile_paths, (), None)]
         cases += [((path,), (name,), None) for name, path in zip(native_modules, native_paths)]
-        cases.append((tennessee_paths + native_paths, native_modules, None))
+        cases.append((profile_paths + native_paths, native_modules, None))
         cases += [((), (name,), name) for name in native_modules]
         for present_paths, present_modules, missing_test in cases:
             with self.subTest(modules=present_modules, missing=missing_test), tempfile.TemporaryDirectory() as temporary:
@@ -731,7 +741,7 @@ run_python_inference
                 self.assertEqual(len(calls), 2)
                 self.assertEqual(calls[1][0], "postgresql://synthetic/test")
                 self.assertEqual(calls[1].count(retained_path), 1)
-                for relative in tennessee_paths + native_paths:
+                for relative in profile_paths + native_paths:
                     self.assertNotIn(relative, calls[0])
                     self.assertEqual(calls[1].count(relative), int(relative in present_paths))
 

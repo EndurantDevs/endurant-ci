@@ -1496,12 +1496,19 @@ run_provider_profile_postgres() {
     tests/test_cms_serving_publication_postgres.py \
     tests/test_entity_address_serving_receipt_postgres.py \
     tests/test_provider_directory_cms_serving_receipt_postgres.py
+  run_available_cms_postgres owned \
+    tests/test_provider_directory_profile_failed_cleanup_postgres.py \
+    tests/test_provider_directory_profile_initial_migration.py::test_native_initial_receipt_guards \
+    tests/test_provider_directory_import_run_guards.py::test_native_complete_guard_catalog_and_ordinary_update \
+    tests/test_provider_directory_profile_initial_cutover_postgres.py \
+    tests/test_provider_directory_profile_initial_replay.py
   set --
   if [ -f "$repository_root/tests/test_cms_doctors_education.py" ]; then
     set -- tests/test_cms_doctors_education.py::test_native_postgres_publication_rolls_back_both_tables_on_education_failure
   fi
   local profile_test
   for profile_test in \
+    tests/test_provider_directory_profile_bounded_capacity_postgres.py \
     tests/test_kentucky_profile_acquisition.py \
     tests/test_kentucky_profile_store.py \
     tests/test_kentucky_profile_completion.py \
