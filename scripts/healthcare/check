@@ -1298,7 +1298,7 @@ run_provider_directory_postgres() {
     tests/test_entity_address_prepared_archive.py::test_real_coordinate_read_preserves_incumbent_archive \
     tests/test_entity_address_semantic_date.py::test_backdated_freshness_uses_inclusive_pinned_boundary \
     tests/test_entity_address_semantic_date.py::test_missing_overlay_time_is_stable_across_session_timezones
-  run_available_cms_postgres runtime \
+  run_available_cms_postgres owned \
     tests/test_provider_directory_cms_archive_postgres.py \
     tests/test_provider_directory_cms_native_inputs_postgres.py \
     tests/test_provider_directory_cms_native_layout_postgres.py \

@@ -78,9 +78,9 @@ class HealthcarePublicChecks(unittest.TestCase):
         ]
         cases += [(lane, all_paths, paths[-1], "", 17) for lane, paths in routes.items()]
         cases += [
-            ("profile-publication", all_paths, "", "create", 17),
-            ("profile-publication", all_paths, "", "drop", 1),
-            ("profile-publication", all_paths, "", "artifact", 1),
+            (lane, all_paths, "", cleanup, expected)
+            for lane in ("directory-address", "profile-publication")
+            for cleanup, expected in (("create", 17), ("drop", 1), ("artifact", 1))
         ]
         for lane, present, failure, cleanup_failure, expected in cases:
             with self.subTest(lane=lane, present=len(present), failure=failure, cleanup=cleanup_failure):
@@ -170,7 +170,11 @@ test -z "${HLTHPRT_CMS_NPD_ADMISSION_TEST_ARTIFACT_ROOT:-}"
                         self.assertEqual(call["schema"], "mrf")
                         self.assertEqual(call["coverage_file"], environment["COVERAGE_FILE"])
                         self.assertEqual(call["pytest_addopts"], environment["PYTEST_ADDOPTS"])
-                        if lane in {"directory-source", "profile-publication"}:
+                        owns_database = lane in {"directory-source", "profile-publication"} or (
+                            lane == "directory-address"
+                            and any(path in routes[lane][6:] for path in call["selected"])
+                        )
+                        if owns_database:
                             self.assertRegex(call["database"], r"^hc_cms_admission_test_[0-9a-f]{32}$")
                             self.assertEqual(call["dsn"], "postgresql+asyncpg://postgres:synthetic@127.0.0.1:5432/" + call["database"])
                             self.assertTrue(call["artifact_exists"])
