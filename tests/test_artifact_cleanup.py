@@ -438,6 +438,8 @@ class ArtifactCleanupChecks(unittest.TestCase):
                         continue
                     upload = step["with"]
                     self.assertEqual(upload["retention-days"], "1")
+                    if upload["name"].startswith("healthcare-rust-debug-"):
+                        self.assertEqual(upload["compression-level"], "6")
                     if "public-measurement" in upload["name"]:
                         continue
                     for row in definition.get("strategy", {}).get("matrix", {}).get("include", [{}]):
