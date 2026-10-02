@@ -231,6 +231,11 @@ run_python_main() {
       collection_args+=(--ignore "$test_path")
     fi
   done
+  collection_args+=(
+    --ignore tests/test_custom_import_snowflake_statement_snapshot_postgres.py
+    --ignore tests/test_custom_import_identical_children_postgres.py
+    --ignore tests/test_custom_import_grouped_child_read_postgres.py
+  )
   export COVERAGE_FILE=${COVERAGE_FILE:-$(artifact_path ".coverage.main.${shard}")}
   ci_phase_begin python-tests
   timeout --foreground 420s python -m pytest -q -n 1 --dist loadscope --durations=20 \
@@ -868,6 +873,16 @@ run_core_postgres() {
   fi
 
   if [[ "$lane" = core-imports || "$lane" = all ]]; then
+  local required_import_test_path
+  for required_import_test_path in \
+    tests/test_custom_import_snowflake_statement_snapshot_postgres.py \
+    tests/test_custom_import_identical_children_postgres.py \
+    tests/test_custom_import_grouped_child_read_postgres.py; do
+    [ -f "$repository_root/$required_import_test_path" ] || {
+      printf 'Missing required native import test: %s\n' "$required_import_test_path" >&2
+      return 1
+    }
+  done
   local custom_import_postgres_tests=()
   local custom_import_test_path
   for custom_import_test_path in \
@@ -885,6 +900,7 @@ run_core_postgres() {
       custom_import_postgres_tests+=("$custom_import_test_path")
     fi
   done
+  custom_import_postgres_tests+=(tests/test_custom_import_snowflake_statement_snapshot_postgres.py)
   if [ "${#custom_import_postgres_tests[@]}" -gt 0 ]; then
     local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
     run_scoped_archive_postgres \
@@ -912,6 +928,10 @@ run_core_postgres() {
       custom_import_postgres_tests+=("$custom_import_test_path")
     fi
   done
+  custom_import_postgres_tests+=(
+    tests/test_custom_import_identical_children_postgres.py
+    tests/test_custom_import_grouped_child_read_postgres.py
+  )
   if [ "${#custom_import_postgres_tests[@]}" -gt 0 ]; then
     local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
     run_scoped_archive_postgres \

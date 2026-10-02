@@ -22,6 +22,11 @@ IMAGE_VALIDATORS = (
     "scripts/research/provider_directory_fhir_harness.py",
     "scripts/devops/ptg2_strict_v3_cutover_ready.py",
 )
+REQUIRED_IMPORT_NATIVE_TESTS = (
+    "tests/test_custom_import_snowflake_statement_snapshot_postgres.py",
+    "tests/test_custom_import_identical_children_postgres.py",
+    "tests/test_custom_import_grouped_child_read_postgres.py",
+)
 
 
 class HealthcarePublicChecks(unittest.TestCase):
@@ -1393,6 +1398,8 @@ run_container_package
                 root = Path(temporary)
                 source = root / "source"
                 (source / "tests").mkdir(parents=True)
+                for required in REQUIRED_IMPORT_NATIVE_TESTS:
+                    (source / required).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
                 if present:
                     (source / test_path).write_text("# optional PostgreSQL test\n")
                 call_log = root / "calls"
@@ -1402,6 +1409,7 @@ run_container_package
                     "CI_ROOT": str(ROOT),
                     "CI_DEPS_READY": "1",
                     "COVERAGE_BASE_SHA": "a" * 40,
+                    "HLTHPRT_DB_USER": "postgres",
                     "HLTHPRT_DB_PASSWORD": "postgres",
                     "HLTHPRT_NPI_RESULT_ARCHIVE_TEST_DSN": "",
                     "CALL_LOG": str(call_log),
@@ -1411,6 +1419,7 @@ mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
 prepare_debug_rust_binaries() { :; }
 create_test_database() { :; }
 drop_test_database() { :; }
+run_scoped_archive_postgres() { :; }
 python() {
   printf '%s\t%s\n' "${HLTHPRT_NPI_RESULT_ARCHIVE_TEST_DSN:-}" "$*" >> "$CALL_LOG"
 }
@@ -1436,6 +1445,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
     def test_custom_import_postgres_tests_use_bounded_scoped_databases(self):
         """Split capture and build suites without changing membership or unit coverage."""
 
+        required_test_paths = REQUIRED_IMPORT_NATIVE_TESTS
         mixed_test_paths = (
             "tests/test_custom_import_provider_list.py",
             "tests/test_custom_import_provider_geo_sql.py",
@@ -1451,6 +1461,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_segmented_capture_postgres.py",
             "tests/test_custom_import_capture_pending_postgres.py",
             "tests/test_custom_import_snowflake_capture_postgres.py",
+            required_test_paths[0],
         )
         build_test_paths = (
             "tests/test_custom_import_bounded_build_postgres.py",
@@ -1464,15 +1475,21 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_registration_authority_migration_postgres.py",
             "tests/test_custom_import_provider_query_postgres.py",
             "tests/test_custom_import_provider_hydration_postgres.py",
-        ) + mixed_test_paths
+        ) + mixed_test_paths + required_test_paths[1:]
         test_groups = (capture_test_paths, build_test_paths)
         test_paths = capture_test_paths + build_test_paths
+        optional_capture_paths = capture_test_paths[:-1]
+        optional_build_paths = build_test_paths[:-2]
+        optional_test_paths = optional_capture_paths + optional_build_paths
         dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
         archive_url = "postgresql://postgres:postgres@127.0.0.1:5440"
-        present_path_sets = ((), *((test_path,) for test_path in test_paths), *test_groups, test_paths)
-        cases = [(paths, "") for paths in present_path_sets]
-        cases += [(test_paths, group[0]) for group in test_groups]
-        for present_paths, failure_path in cases:
+        present_path_sets = ((), *((path,) for path in optional_test_paths),
+                             optional_capture_paths, optional_build_paths, optional_test_paths)
+        cases = [((*required_test_paths, *paths), "", "") for paths in present_path_sets]
+        cases += [(test_paths, group[0], "") for group in test_groups]
+        cases += [(tuple(path for path in required_test_paths if path != missing), "", missing)
+                  for missing in required_test_paths]
+        for present_paths, failure_path, missing_path in cases:
             with self.subTest(present_paths=present_paths, failure=failure_path), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 source = root / "source"
@@ -1515,7 +1532,10 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
 '''
                 result = subprocess.run(["bash", "-euc", script], cwd=source, env=env,
                                         capture_output=True, text=True, check=False)
-                self.assertEqual(result.returncode, 17 if failure_path else 0, result.stderr)
+                self.assertEqual(result.returncode, 1 if missing_path else (17 if failure_path else 0), result.stderr)
+                if missing_path:
+                    self.assertIn(f"Missing required native import test: {missing_path}", result.stderr)
+                    continue
                 calls = call_log.read_text().splitlines()
                 main_call = next(call for call in calls if "--ci-shard-count 4" in call)
                 for test_path in test_paths:
@@ -1563,12 +1583,15 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                     root = Path(temporary)
                     source = root / "source"
                     (source / "tests").mkdir(parents=True)
+                    for required in REQUIRED_IMPORT_NATIVE_TESTS:
+                        (source / required).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
                     test_path = f"tests/test_{module}_postgres.py"
                     (source / test_path).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
                     call_log = root / "calls"
                     env = {
                         **os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
                         "CI_DEPS_READY": "1", "COVERAGE_BASE_SHA": "a" * 40,
+                        "HLTHPRT_DB_USER": "postgres",
                         "HLTHPRT_DB_PASSWORD": "postgres", "CALL_LOG": str(call_log),
                         "ROUTE_TEST": test_path, "ROUTE_VARIABLE": variable,
                         "ROUTE_FAILURE": "1" if fail else "0", "ROUTE_LANE": lane,
@@ -1578,6 +1601,7 @@ mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
 prepare_debug_rust_binaries() { :; }
 create_test_database() { printf 'create\t%s\n' "$1" >> "$CALL_LOG"; }
 drop_test_database() { printf 'drop\t%s\n' "$1" >> "$CALL_LOG"; }
+run_scoped_archive_postgres() { :; }
 python() {
   printf '%s\t%s\n' "${!ROUTE_VARIABLE:-}" "$*" >> "$CALL_LOG"
   if [[ "$*" = "-m pytest -q $ROUTE_TEST" && "$ROUTE_FAILURE" = 1 ]]; then
@@ -1636,6 +1660,8 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                 root = Path(temporary)
                 source = root / "source"
                 (source / "tests").mkdir(parents=True)
+                for required in REQUIRED_IMPORT_NATIVE_TESTS:
+                    (source / required).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
                 for test_path in test_paths:
                     (source / test_path).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
                 call_log = root / "calls"
@@ -1645,6 +1671,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                     "CI_ROOT": str(ROOT),
                     "CI_DEPS_READY": "1",
                     "COVERAGE_BASE_SHA": "a" * 40,
+                    "HLTHPRT_DB_USER": "postgres",
                     "HLTHPRT_DB_PASSWORD": "postgres",
                     "CALL_LOG": str(call_log),
                     "ROUTE_LANE": lane,
@@ -1655,6 +1682,7 @@ mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
 prepare_debug_rust_binaries() { :; }
 create_test_database() { printf 'create\t%s\n' "$1" >> "$CALL_LOG"; }
 drop_test_database() { printf 'drop\t%s\n' "$1" >> "$CALL_LOG"; }
+run_scoped_archive_postgres() { :; }
 python() {
   printf '%s\t%s\t%s\t%s\n' \
     "${HLTHPRT_REFERENCE_FAMILY_ARCHIVE_TEST_DSN:-}" \
