@@ -76,7 +76,7 @@ jobs:
 
           rust-debug-binaries/uhc_semantic_facts'
         if-no-files-found: error
-        compression-level: 0
+        compression-level: 6
         retention-days: 1
     outputs:
       rust_artifact_id: ${{ steps.rust-artifact.outputs.artifact-id }}
