@@ -1433,14 +1433,14 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                 self.assertTrue(ignored[0].startswith("\t"))
                 self.assertEqual(executed, [f"{dsn}\t-m pytest -q {test_path}"])
 
-    def test_custom_import_postgres_tests_use_a_scoped_database(self):
-        """Route database suites through a disposable database while preserving unit coverage."""
+    def test_custom_import_postgres_tests_use_bounded_scoped_databases(self):
+        """Split capture and build suites without changing membership or unit coverage."""
 
         mixed_test_paths = (
             "tests/test_custom_import_provider_list.py",
             "tests/test_custom_import_provider_geo_sql.py",
         )
-        test_paths = (
+        capture_test_paths = (
             "tests/test_custom_import_execution_postgres.py",
             "tests/test_custom_import_publication_postgres.py",
             "tests/test_custom_import_materialization_postgres.py",
@@ -1451,6 +1451,8 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_segmented_capture_postgres.py",
             "tests/test_custom_import_capture_pending_postgres.py",
             "tests/test_custom_import_snowflake_capture_postgres.py",
+        )
+        build_test_paths = (
             "tests/test_custom_import_bounded_build_postgres.py",
             "tests/test_custom_import_build_source_postgres.py",
             "tests/test_custom_import_build_source_batch_postgres.py",
@@ -1463,11 +1465,15 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_provider_query_postgres.py",
             "tests/test_custom_import_provider_hydration_postgres.py",
         ) + mixed_test_paths
+        test_groups = (capture_test_paths, build_test_paths)
+        test_paths = capture_test_paths + build_test_paths
         dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
         archive_url = "postgresql://postgres:postgres@127.0.0.1:5440"
-        present_path_sets = ((), *((test_path,) for test_path in test_paths), test_paths)
-        for present_paths in present_path_sets:
-            with self.subTest(present_paths=present_paths), tempfile.TemporaryDirectory() as temporary:
+        present_path_sets = ((), *((test_path,) for test_path in test_paths), *test_groups, test_paths)
+        cases = [(paths, "") for paths in present_path_sets]
+        cases += [(test_paths, group[0]) for group in test_groups]
+        for present_paths, failure_path in cases:
+            with self.subTest(present_paths=present_paths, failure=failure_path), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 source = root / "source"
                 (source / "tests").mkdir(parents=True)
@@ -1484,13 +1490,19 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                     "HLTHPRT_DB_PASSWORD": "postgres",
                     "HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN": "",
                     "CALL_LOG": str(call_log),
+                    "FAILURE_PATH": failure_path,
                 }
                 script = CHECK_FUNCTIONS + r'''
 mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
 prepare_debug_rust_binaries() { :; }
 create_test_database() { :; }
 drop_test_database() { :; }
-run_scoped_archive_postgres() { printf '%s\n' "$*" >> "$CALL_LOG"; }
+run_scoped_archive_postgres() {
+  printf '%s\n' "$*" >> "$CALL_LOG"
+  for test_path in "$@"; do
+    if [ "$test_path" = "$FAILURE_PATH" ]; then return 17; fi
+  done
+}
 python() {
   printf '%s\t%s\n' "${HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN:-}" "$*" >> "$CALL_LOG"
 }
@@ -1501,7 +1513,9 @@ timeout() {
 run_python_main 0
 run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" core-imports
 '''
-                subprocess.run(["bash", "-euc", script], cwd=source, env=env, check=True)
+                result = subprocess.run(["bash", "-euc", script], cwd=source, env=env,
+                                        capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 17 if failure_path else 0, result.stderr)
                 calls = call_log.read_text().splitlines()
                 main_call = next(call for call in calls if "--ci-shard-count 4" in call)
                 for test_path in test_paths:
@@ -1516,19 +1530,24 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                     and any(test_path in call for test_path in test_paths)
                 ]
                 routes = [call for call in calls if call.startswith("hc_custom_import_test_")]
-                if present_paths:
-                    self.assertEqual(executions, [])
-                    self.assertEqual(len(routes), 1)
+                expected_groups = [
+                    [path for path in group if path in present_paths]
+                    for group in test_groups if any(path in present_paths for path in group)
+                ]
+                if failure_path:
+                    failed_group = next(i for i, group in enumerate(expected_groups) if failure_path in group)
+                    expected_groups = expected_groups[:failed_group + 1]
+                self.assertEqual(executions, [])
+                self.assertEqual(len(routes), len(expected_groups))
+                databases = [route.split()[0] for route in routes]
+                self.assertEqual(len(databases), len(set(databases)))
+                for route, expected_paths in zip(routes, expected_groups):
                     self.assertRegex(
-                        routes[0],
+                        route,
                         rf"^hc_custom_import_test_[0-9a-f]{{32}} "
                         rf"HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN {re.escape(archive_url)}(?: |$)",
                     )
-                    for test_path in test_paths:
-                        self.assertEqual(test_path in routes[0], test_path in present_paths)
-                else:
-                    self.assertEqual(executions, [])
-                    self.assertEqual(routes, [])
+                    self.assertEqual(route.split()[3:], expected_paths)
 
     def test_optional_import_database_routes_cleanup_after_success_and_failure(self):
         routes = (
