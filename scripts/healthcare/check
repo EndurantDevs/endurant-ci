@@ -224,6 +224,9 @@ run_python_main() {
     tests/test_provider_quality_reference_family_postgres.py \
     tests/test_reference_family_archive_postgres.py \
     tests/test_reference_family_result_generation_postgres.py \
+    tests/test_clinical_reference_family_postgres.py \
+    tests/test_clinical_reference_generation_migration_postgres.py \
+    tests/test_clinical_reference_bootstrap_postgres.py \
     tests/test_source_profile_result_archive_postgres.py \
     tests/test_source_profile_ancestry_postgres.py \
     tests/test_source_profile_pin_migration_postgres.py; do
@@ -951,7 +954,10 @@ run_core_postgres() {
     tests/test_geo_reference_family_postgres.py \
     tests/test_mrf_address_publication_postgres.py \
     tests/test_mrf_publication_receipt_postgres.py \
-    tests/test_provider_quality_reference_family_postgres.py; do
+    tests/test_provider_quality_reference_family_postgres.py \
+    tests/test_clinical_reference_family_postgres.py \
+    tests/test_clinical_reference_generation_migration_postgres.py \
+    tests/test_clinical_reference_bootstrap_postgres.py; do
     if [ -f "$repository_root/$test_path" ]; then
       reference_family_postgres_tests+=("$test_path")
     fi
