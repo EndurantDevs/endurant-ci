@@ -1646,6 +1646,9 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_mrf_address_publication_postgres.py",
             "tests/test_mrf_publication_receipt_postgres.py",
             "tests/test_provider_quality_reference_family_postgres.py",
+            "tests/test_clinical_reference_family_postgres.py",
+            "tests/test_clinical_reference_generation_migration_postgres.py",
+            "tests/test_clinical_reference_bootstrap_postgres.py",
         )
         dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
         routes = (
@@ -1654,7 +1657,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             ((test_paths[1],), 2, "hc_mrf_archive_"),
         )
         cases = [(lane, failed_path) for lane in ("core-services", "core-imports", "all")
-                 for failed_path in ("", test_paths[2], test_paths[0], test_paths[1])]
+                 for failed_path in ("", test_paths[2], test_paths[0], test_paths[1], *test_paths[-3:])]
         for lane, failed_path in cases:
             with self.subTest(lane=lane, failed_path=failed_path), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
