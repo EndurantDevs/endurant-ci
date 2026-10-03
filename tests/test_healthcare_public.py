@@ -88,6 +88,8 @@ class HealthcarePublicChecks(unittest.TestCase):
                 "tests/test_provider_directory_profile_failed_cleanup_postgres.py",
                 "tests/test_provider_directory_profile_initial_migration.py::test_native_initial_receipt_guards",
                 "tests/test_provider_directory_import_run_guards.py::test_native_complete_guard_catalog_and_ordinary_update",
+                "tests/test_provider_directory_profile_initial_cleanup_postgres.py",
+                "tests/test_provider_directory_profile_initial_reader_postgres.py",
                 "tests/test_provider_directory_profile_initial_cutover_postgres.py",
                 "tests/test_provider_directory_profile_initial_replay.py",
             ),
@@ -103,9 +105,9 @@ class HealthcarePublicChecks(unittest.TestCase):
         ]
         cases += [(lane, all_paths, paths[-1], "", 17) for lane, paths in routes.items()]
         cases += [("profile-publication", (path,), "", "", 0)
-                  for path in routes["profile-publication"][-5:]]
+                  for path in routes["profile-publication"][-7:]]
         cases += [("profile-publication", all_paths, path, "", 17)
-                  for path in routes["profile-publication"][-5:-1]]
+                  for path in routes["profile-publication"][-7:-1]]
         cases += [
             (lane, all_paths, "", cleanup, expected)
             for lane in ("directory-address", "profile-publication", "profile-storage")
