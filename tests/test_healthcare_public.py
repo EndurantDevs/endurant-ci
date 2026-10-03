@@ -1443,7 +1443,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                 self.assertEqual(executed, [f"{dsn}\t-m pytest -q {test_path}"])
 
     def test_custom_import_postgres_tests_use_bounded_scoped_databases(self):
-        """Split capture and build suites without changing membership or unit coverage."""
+        """Split capture, build and family suites without changing membership or coverage."""
 
         required_test_paths = REQUIRED_IMPORT_NATIVE_TESTS
         mixed_test_paths = (
@@ -1475,11 +1475,12 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_registration_authority_migration_postgres.py",
             "tests/test_custom_import_provider_query_postgres.py",
             "tests/test_custom_import_provider_hydration_postgres.py",
-        ) + mixed_test_paths + required_test_paths[1:]
-        test_groups = (capture_test_paths, build_test_paths)
-        test_paths = capture_test_paths + build_test_paths
+        ) + mixed_test_paths
+        family_test_paths = required_test_paths[1:]
+        test_groups = (capture_test_paths, build_test_paths, family_test_paths)
+        test_paths = capture_test_paths + build_test_paths + family_test_paths
         optional_capture_paths = capture_test_paths[:-1]
-        optional_build_paths = build_test_paths[:-2]
+        optional_build_paths = build_test_paths
         optional_test_paths = optional_capture_paths + optional_build_paths
         dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
         archive_url = "postgresql://postgres:postgres@127.0.0.1:5440"

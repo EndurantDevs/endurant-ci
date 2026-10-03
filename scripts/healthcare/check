@@ -933,10 +933,6 @@ run_core_postgres() {
       custom_import_postgres_tests+=("$custom_import_test_path")
     fi
   done
-  custom_import_postgres_tests+=(
-    tests/test_custom_import_identical_children_postgres.py
-    tests/test_custom_import_grouped_child_read_postgres.py
-  )
   if [ "${#custom_import_postgres_tests[@]}" -gt 0 ]; then
     local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
     run_scoped_archive_postgres \
@@ -944,6 +940,13 @@ run_core_postgres() {
       HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN "$archive_url" \
       "${custom_import_postgres_tests[@]}"
   fi
+
+  local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
+  run_scoped_archive_postgres \
+    "hc_custom_import_test_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')" \
+    HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN "$archive_url" \
+    tests/test_custom_import_identical_children_postgres.py \
+    tests/test_custom_import_grouped_child_read_postgres.py
 
   fi
 
