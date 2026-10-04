@@ -752,6 +752,7 @@ create_test_database() {
 
 run_scoped_archive_postgres() (
   scoped_archive_database=$1
+  scoped_archive_drain_file=
   local variable=$2 url_prefix=$3
   shift 3
   HLTHPRT_DB_HOST=127.0.0.1 HLTHPRT_DB_PORT=5440
@@ -760,7 +761,15 @@ run_scoped_archive_postgres() (
   cleanup_scoped_archive() {
     local status=$?
     trap - EXIT
-    if ! PGDATABASE=postgres drop_test_database "$scoped_archive_database"; then
+    if [[ -n "$scoped_archive_drain_file" &&
+          (! -f "$scoped_archive_drain_file" || "$(< "$scoped_archive_drain_file")" != drained) ]]; then
+      printf 'Installed test processes did not drain; retained disposable database: %s\n' \
+        "$scoped_archive_database" >&2
+      [ "$status" -ne 0 ] || status=1
+    elif ! PGDATABASE=postgres drop_test_database "$scoped_archive_database"; then
+      [ "$status" -ne 0 ] || status=1
+    fi
+    if [[ -n "$scoped_archive_drain_file" ]] && ! rm -f -- "$scoped_archive_drain_file"; then
       [ "$status" -ne 0 ] || status=1
     fi
     exit "$status"
@@ -774,7 +783,12 @@ run_scoped_archive_postgres() (
     --command 'CREATE EXTENSION IF NOT EXISTS intarray WITH SCHEMA public' \
     --command 'CREATE EXTENSION IF NOT EXISTS btree_gin WITH SCHEMA public' \
     --command 'CREATE EXTENSION IF NOT EXISTS postgis WITH SCHEMA public'
-  timeout --foreground 295s python -m pytest -q "$@"
+  if [ "$1" = tests/test_custom_import_installed_operator_postgres.py ]; then
+    scoped_archive_drain_file=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-installed-drain.XXXXXX")
+    python "$CI_ROOT/scripts/healthcare/supervise_installed.py" "$scoped_archive_drain_file" "$@"
+  else
+    timeout --foreground 295s python -m pytest -q "$@"
+  fi
 )
 
 run_core_postgres() {
@@ -947,7 +961,8 @@ run_core_postgres() {
     run_scoped_archive_postgres \
       "hc_custom_import_test_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')" \
       HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN "$archive_url" \
-      tests/test_custom_import_installed_operator_postgres.py
+      tests/test_custom_import_installed_operator_postgres.py \
+      -n 2 --dist worksteal --durations=9 -vv
   fi
 
   local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
