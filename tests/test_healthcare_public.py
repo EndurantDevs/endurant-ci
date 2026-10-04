@@ -1448,6 +1448,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
         """Split capture, build and family suites without changing membership or coverage."""
 
         required_test_paths = REQUIRED_IMPORT_NATIVE_TESTS
+        installed_test_path = "tests/test_custom_import_installed_operator_postgres.py"
         mixed_test_paths = (
             "tests/test_custom_import_provider_list.py",
             "tests/test_custom_import_provider_geo_sql.py",
@@ -1472,6 +1473,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_build_output_postgres.py",
             "tests/test_custom_import_segmented_runner_postgres.py",
             "tests/test_custom_import_operator_postgres.py",
+            installed_test_path,
             "tests/test_custom_import_registration_authority_postgres.py",
             "tests/test_custom_import_registration_authority_route_postgres.py",
             "tests/test_custom_import_registration_authority_migration_postgres.py",
@@ -1484,16 +1486,19 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
         optional_capture_paths = capture_test_paths[:-1]
         optional_build_paths = build_test_paths
         optional_test_paths = optional_capture_paths + optional_build_paths
+        legacy_optional_paths = tuple(path for path in optional_test_paths if path != installed_test_path)
         dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
         archive_url = "postgresql://postgres:postgres@127.0.0.1:5440"
         present_path_sets = ((), *((path,) for path in optional_test_paths),
-                             optional_capture_paths, optional_build_paths, optional_test_paths)
-        cases = [((*required_test_paths, *paths), "", "") for paths in present_path_sets]
-        cases += [(test_paths, group[0], "") for group in test_groups]
-        cases += [(tuple(path for path in required_test_paths if path != missing), "", missing)
+                             optional_capture_paths, optional_build_paths, legacy_optional_paths, optional_test_paths)
+        cases = [("core-imports", (*required_test_paths, *paths), "", "") for paths in present_path_sets]
+        cases += [("core-imports", test_paths, group[0], "") for group in test_groups]
+        cases += [("core-imports", test_paths, installed_test_path, "")]
+        cases += [("core-imports", tuple(path for path in required_test_paths if path != missing), "", missing)
                   for missing in required_test_paths]
-        for present_paths, failure_path, missing_path in cases:
-            with self.subTest(present_paths=present_paths, failure=failure_path), tempfile.TemporaryDirectory() as temporary:
+        cases += [(lane, test_paths, "", "") for lane in ("core-services", "core-ptg", "all")]
+        for lane, present_paths, failure_path, missing_path in cases:
+            with self.subTest(lane=lane, present_paths=present_paths, failure=failure_path), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 source = root / "source"
                 (source / "tests").mkdir(parents=True)
@@ -1511,6 +1516,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                     "HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN": "",
                     "CALL_LOG": str(call_log),
                     "FAILURE_PATH": failure_path,
+                    "ROUTE_LANE": lane,
                 }
                 script = CHECK_FUNCTIONS + r'''
 mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
@@ -1531,7 +1537,7 @@ timeout() {
   "$@"
 }
 run_python_main 0
-run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" core-imports
+run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" "$ROUTE_LANE"
 '''
                 result = subprocess.run(["bash", "-euc", script], cwd=source, env=env,
                                         capture_output=True, text=True, check=False)
@@ -1555,7 +1561,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                 routes = [call for call in calls if call.startswith("hc_custom_import_test_")]
                 expected_groups = [
                     [path for path in group if path in present_paths]
-                    for group in test_groups if any(path in present_paths for path in group)
+                    for group in test_groups if lane in ("core-imports", "all") and any(path in present_paths for path in group)
                 ]
                 if failure_path:
                     failed_group = next(i for i, group in enumerate(expected_groups) if failure_path in group)
