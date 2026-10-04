@@ -428,6 +428,45 @@ test "$HLTHPRT_DB_DATABASE:$HLTHPRT_DB_DATABASE_OVERRIDE" = sentinel:sentinel
                 ])
                 log.unlink()
 
+    def test_installed_archive_cleanup_requires_process_drain_receipt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "calls"
+            script = CHECK_FUNCTIONS + r'''
+dropdb() { printf 'drop %s\n' "$*" >> "$CALL_LOG"; }
+createdb() { :; }
+psql() { :; }
+timeout() { echo 'installed tests must not use foreground timeout' >&2; return 99; }
+python() {
+  test "$1" = "$CI_ROOT/scripts/healthcare/supervise_installed.py"
+  test "$3" = tests/test_custom_import_installed_operator_postgres.py
+  test "${*:4}" = '-n 2 --dist worksteal --durations=9 -vv'
+  printf 'supervised\n' >> "$CALL_LOG"
+  if [ "$DRAINED" = 1 ]; then printf 'drained\n' > "$2"; fi
+  return "$TEST_STATUS"
+}
+run_scoped_archive_postgres hc_custom_import_test_0123456789abcdef0123456789abcdef \
+  HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN postgresql://postgres@127.0.0.1:5440 \
+  tests/test_custom_import_installed_operator_postgres.py -n 2 --dist worksteal --durations=9 -vv
+'''
+            for status, drained in ((0, 1), (17, 1), (124, 1), (0, 0), (17, 0), (124, 0)):
+                with self.subTest(status=status, drained=drained):
+                    result = subprocess.run(
+                        ["bash", "-euc", script], capture_output=True, text=True,
+                        env={**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT),
+                             "RUNNER_TEMP": temporary, "CALL_LOG": str(log),
+                             "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "postgres",
+                             "TEST_STATUS": str(status), "DRAINED": str(drained)},
+                    )
+                    self.assertEqual(result.returncode, status or (0 if drained else 1), result.stderr)
+                    calls = log.read_text().splitlines()
+                    self.assertEqual(calls[1], "supervised")
+                    self.assertEqual(sum(call.startswith("drop ") for call in calls), 2 if drained else 1)
+                    if not drained:
+                        self.assertIn("retained disposable database: hc_custom_import_test_0123456789abcdef0123456789abcdef",
+                                      result.stderr)
+                    self.assertFalse(list(Path(temporary).glob("healthcare-installed-drain.*")))
+                    log.unlink()
+
     def test_address_archive_routes_only_available_native_suites(self):
         names = (
             "test_entity_address_snapshot_stage_postgres.py",
@@ -1575,7 +1614,10 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                         rf"^hc_custom_import_test_[0-9a-f]{{32}} "
                         rf"HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN {re.escape(archive_url)}(?: |$)",
                     )
-                    self.assertEqual(route.split()[3:], expected_paths)
+                    expected_arguments = list(expected_paths)
+                    if expected_paths == [installed_test_path]:
+                        expected_arguments += ["-n", "2", "--dist", "worksteal", "--durations=9", "-vv"]
+                    self.assertEqual(route.split()[3:], expected_arguments)
 
     def test_optional_import_database_routes_cleanup_after_success_and_failure(self):
         routes = (
