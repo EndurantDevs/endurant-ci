@@ -1473,7 +1473,6 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_build_output_postgres.py",
             "tests/test_custom_import_segmented_runner_postgres.py",
             "tests/test_custom_import_operator_postgres.py",
-            installed_test_path,
             "tests/test_custom_import_registration_authority_postgres.py",
             "tests/test_custom_import_registration_authority_route_postgres.py",
             "tests/test_custom_import_registration_authority_migration_postgres.py",
@@ -1481,11 +1480,11 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_provider_hydration_postgres.py",
         ) + mixed_test_paths
         family_test_paths = required_test_paths[1:]
-        test_groups = (capture_test_paths, build_test_paths, family_test_paths)
-        test_paths = capture_test_paths + build_test_paths + family_test_paths
+        test_groups = (capture_test_paths, build_test_paths, (installed_test_path,), family_test_paths)
+        test_paths = capture_test_paths + build_test_paths + (installed_test_path,) + family_test_paths
         optional_capture_paths = capture_test_paths[:-1]
         optional_build_paths = build_test_paths
-        optional_test_paths = optional_capture_paths + optional_build_paths
+        optional_test_paths = optional_capture_paths + optional_build_paths + (installed_test_path,)
         legacy_optional_paths = tuple(path for path in optional_test_paths if path != installed_test_path)
         dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
         archive_url = "postgresql://postgres:postgres@127.0.0.1:5440"
