@@ -1169,6 +1169,20 @@ run_core_postgres() {
       tests/test_ptg2_legacy_v3_v4_compat_postgres.py \
       tests/test_ptg_source_attempt_action_postgres.py
 
+  local snapshot_candidate_tests=()
+  for test_path in \
+    tests/test_ptg_snapshot_candidates_postgres.py \
+    tests/test_ptg_snapshot_copy_bounds_postgres.py \
+    tests/test_ptg_snapshot_migration_postgres.py; do
+    if [ -f "$repository_root/$test_path" ]; then
+      snapshot_candidate_tests+=("$test_path")
+    fi
+  done
+  if [ "${#snapshot_candidate_tests[@]}" -gt 0 ]; then
+    HLTHPRT_PTG2_TAX_IDENTITY_POSTGRES_DSN=$dsn \
+      timeout --foreground 295s python -m pytest -q "${snapshot_candidate_tests[@]}"
+  fi
+
   local result_archive_tests=()
   for test_path in \
     tests/test_result_archive_adoption_postgres.py \
@@ -1336,6 +1350,26 @@ run_provider_directory_postgres() {
       tests/test_provider_directory_rooted_graph_single_root_postgres.py \
       tests/test_provider_directory_rooted_graph_publication_guards_postgres.py \
       tests/test_provider_directory_rooted_graph_publication_postgres.py
+
+  local provider_candidate_tests=()
+  for test_path in \
+    tests/test_practitioner_migration_boundaries_postgres.py \
+    tests/test_practitioner_online_migration_postgres.py \
+    tests/test_practitioner_publication_candidates_postgres.py \
+    tests/test_practitioner_set_validation_postgres.py \
+    tests/test_provider_dataset_candidates_postgres.py \
+    tests/test_provider_dataset_online_postgres.py \
+    tests/test_provider_directory_rooted_graph_bulk_postgres.py \
+    tests/test_provider_materialization_set_validation_postgres.py \
+    tests/test_rooted_graph_online_migration_postgres.py; do
+    if [ -f "$repository_root/$test_path" ]; then
+      provider_candidate_tests+=("$test_path")
+    fi
+  done
+  if [ "${#provider_candidate_tests[@]}" -gt 0 ]; then
+    HLTHPRT_FHIR_FORMULARY_MIGRATION_POSTGRES_DSN=$dsn \
+      timeout --foreground 295s python -m pytest -q "${provider_candidate_tests[@]}"
+  fi
   fi
 
   local common_env=(
