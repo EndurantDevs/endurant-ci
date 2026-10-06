@@ -903,7 +903,7 @@ run_core_postgres() {
   fi
   fi
 
-  if [[ "$lane" = core-imports || "$lane" = all ]]; then
+  if [[ "$lane" = core-services || "$lane" = all ]]; then
   local required_import_test_path
   for required_import_test_path in \
     tests/test_custom_import_snowflake_statement_snapshot_postgres.py; do
@@ -912,8 +912,10 @@ run_core_postgres() {
       return 1
     }
   done
+  fi
   local custom_import_postgres_tests=()
   local custom_import_test_path
+  if [[ "$lane" = core-imports || "$lane" = all ]]; then
   for custom_import_test_path in \
     tests/test_custom_import_execution_postgres.py \
     tests/test_custom_import_publication_postgres.py; do
@@ -947,6 +949,9 @@ run_core_postgres() {
       "${custom_import_postgres_tests[@]}"
   fi
 
+  fi
+
+  if [[ "$lane" = core-services || "$lane" = all ]]; then
   custom_import_postgres_tests=()
   for custom_import_test_path in \
     tests/test_custom_import_capture_store_postgres.py \
@@ -966,6 +971,9 @@ run_core_postgres() {
       "${custom_import_postgres_tests[@]}"
   fi
 
+  fi
+
+  if [[ "$lane" = core-imports || "$lane" = all ]]; then
   custom_import_postgres_tests=()
   for custom_import_test_path in \
     tests/test_custom_import_bounded_build_postgres.py \

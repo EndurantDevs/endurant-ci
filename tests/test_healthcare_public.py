@@ -348,6 +348,7 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-servic
                     path.unlink()
                 for name in present:
                     (tests / name).touch()
+                (source / REQUIRED_IMPORT_NATIVE_TESTS[0]).touch()
                 result = subprocess.run(
                     ["bash", "-euc", script], cwd=source,
                     env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
@@ -357,7 +358,8 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-servic
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 calls = log.read_text().splitlines()
-                self.assertEqual(len(calls), 2 if len(present) == 3 else 1)
+                self.assertEqual(len(calls), 3 if len(present) == 3 else 2)
+                self.assertTrue(calls[-1].endswith(REQUIRED_IMPORT_NATIVE_TESTS[0]))
                 for name in present:
                     self.assertTrue(any(name in call for call in calls), name)
                 for name in names:
@@ -1546,9 +1548,10 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
         )
         test_groups = (lifecycle_test_paths, materialization_test_paths, capture_test_paths, build_test_paths,
                        operator_test_paths, (installed_test_path,), family_test_paths, snapshot_test_paths, bulk_test_paths)
-        groups_by_lane = {"core-imports": test_groups[:5], "core-ptg": test_groups[5:], "all": test_groups}
-        required_by_lane = {"core-imports": required_test_paths[:1], "core-ptg": family_test_paths,
-                            "all": required_test_paths}
+        groups_by_lane = {"core-imports": test_groups[:2] + test_groups[3:5],
+                          "core-services": (capture_test_paths,), "core-ptg": test_groups[5:], "all": test_groups}
+        required_by_lane = {"core-imports": (), "core-services": required_test_paths[:1],
+                            "core-ptg": family_test_paths, "all": required_test_paths}
         historical_tail_paths = (
             "tests/test_cms_doctors_archive_postgres.py",
             "tests/test_tiger_result_archive_postgres.py",
@@ -1568,7 +1571,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
         present_path_sets = ((), *((path,) for path in optional_test_paths),
                              optional_capture_paths, optional_build_paths, legacy_optional_paths, optional_test_paths)
         cases = [(lane, (*required_by_lane[lane], *paths), "", "")
-                 for lane in ("core-imports", "core-ptg") for paths in present_path_sets]
+                 for lane in ("core-imports", "core-services", "core-ptg") for paths in present_path_sets]
         cases += [(lane, test_paths, group[0], "")
                   for lane, groups in groups_by_lane.items() for group in groups]
         cases += [(lane, tuple(path for path in required if path != missing), "", missing)
