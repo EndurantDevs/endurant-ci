@@ -1484,7 +1484,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                 self.assertEqual(executed, [f"{dsn}\t-m pytest -q {test_path}"])
 
     def test_custom_import_postgres_tests_use_bounded_scoped_databases(self):
-        """Split capture, build and family suites without changing membership or coverage."""
+        """Split lifecycle, capture and build suites without changing membership or coverage."""
 
         required_test_paths = REQUIRED_IMPORT_NATIVE_TESTS
         installed_test_path = "tests/test_custom_import_installed_operator_postgres.py"
@@ -1492,13 +1492,15 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_provider_list.py",
             "tests/test_custom_import_provider_geo_sql.py",
         )
-        capture_test_paths = (
+        lifecycle_test_paths = (
             "tests/test_custom_import_execution_postgres.py",
             "tests/test_custom_import_publication_postgres.py",
             "tests/test_custom_import_materialization_postgres.py",
             "tests/test_custom_import_read_core_postgres.py",
             "tests/test_custom_import_runner_postgres.py",
             "tests/test_custom_import_definition_store_postgres.py",
+        )
+        capture_test_paths = (
             "tests/test_custom_import_capture_store_postgres.py",
             "tests/test_custom_import_segmented_capture_postgres.py",
             "tests/test_custom_import_capture_pending_postgres.py",
@@ -1519,9 +1521,9 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_provider_hydration_postgres.py",
         ) + mixed_test_paths
         family_test_paths = required_test_paths[1:]
-        test_groups = (capture_test_paths, build_test_paths, (installed_test_path,), family_test_paths)
-        test_paths = capture_test_paths + build_test_paths + (installed_test_path,) + family_test_paths
-        optional_capture_paths = capture_test_paths[:-1]
+        test_groups = (lifecycle_test_paths, capture_test_paths, build_test_paths, (installed_test_path,), family_test_paths)
+        test_paths = lifecycle_test_paths + capture_test_paths + build_test_paths + (installed_test_path,) + family_test_paths
+        optional_capture_paths = lifecycle_test_paths + capture_test_paths[:-1]
         optional_build_paths = build_test_paths
         optional_test_paths = optional_capture_paths + optional_build_paths + (installed_test_path,)
         legacy_optional_paths = tuple(path for path in optional_test_paths if path != installed_test_path)
