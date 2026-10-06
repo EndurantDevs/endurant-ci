@@ -1438,7 +1438,10 @@ run_container_package
 
 
     def test_optional_npi_archive_postgres_test_uses_only_the_core_postgres_lane(self):
-        test_path = "tests/test_npi_result_archive_postgres.py"
+        test_paths = (
+            "tests/test_npi_result_archive_postgres.py",
+            "tests/test_npi_optional_read_savepoints_postgres.py",
+        )
         dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
         for present in (False, True):
             with self.subTest(present=present), tempfile.TemporaryDirectory() as temporary:
@@ -1448,7 +1451,8 @@ run_container_package
                 for required in REQUIRED_IMPORT_NATIVE_TESTS:
                     (source / required).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
                 if present:
-                    (source / test_path).write_text("# optional PostgreSQL test\n")
+                    for test_path in test_paths:
+                        (source / test_path).write_text("# optional PostgreSQL test\n")
                 call_log = root / "calls"
                 env = {
                     **os.environ,
@@ -1459,6 +1463,7 @@ run_container_package
                     "HLTHPRT_DB_USER": "postgres",
                     "HLTHPRT_DB_PASSWORD": "postgres",
                     "HLTHPRT_NPI_RESULT_ARCHIVE_TEST_DSN": "",
+                    "HLTHPRT_PUBLIC_EVIDENCE_STORAGE_POSTGRES_DSN": "",
                     "CALL_LOG": str(call_log),
                 }
                 script = CHECK_FUNCTIONS + r'''
@@ -1468,7 +1473,8 @@ create_test_database() { :; }
 drop_test_database() { :; }
 run_scoped_archive_postgres() { :; }
 python() {
-  printf '%s\t%s\n' "${HLTHPRT_NPI_RESULT_ARCHIVE_TEST_DSN:-}" "$*" >> "$CALL_LOG"
+  printf '%s\t%s\t%s\n' "${HLTHPRT_NPI_RESULT_ARCHIVE_TEST_DSN:-}" \
+    "${HLTHPRT_PUBLIC_EVIDENCE_STORAGE_POSTGRES_DSN:-}" "$*" >> "$CALL_LOG"
 }
 timeout() {
   shift 2
@@ -1479,15 +1485,17 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
 '''
                 subprocess.run(["bash", "-euc", script], cwd=source, env=env, check=True)
                 calls = call_log.read_text().splitlines()
-                matching = [call for call in calls if test_path in call]
-                if not present:
-                    self.assertEqual(matching, [])
-                    continue
-                ignored = [call for call in matching if f"--ignore {test_path}" in call]
-                executed = [call for call in matching if f"--ignore {test_path}" not in call]
-                self.assertEqual(len(ignored), 1)
-                self.assertTrue(ignored[0].startswith("\t"))
-                self.assertEqual(executed, [f"{dsn}\t-m pytest -q {test_path}"])
+                for index, test_path in enumerate(test_paths):
+                    matching = [call for call in calls if test_path in call]
+                    if not present:
+                        self.assertEqual(matching, [])
+                        continue
+                    ignored = [call for call in matching if f"--ignore {test_path}" in call]
+                    executed = [call for call in matching if f"--ignore {test_path}" not in call]
+                    self.assertEqual(len(ignored), 1)
+                    self.assertTrue(ignored[0].startswith("\t\t"))
+                    prefix = f"{dsn}\t\t" if index == 0 else f"\t{dsn}\t"
+                    self.assertEqual(executed, [f"{prefix}-m pytest -q {test_path}"])
 
     def test_custom_import_postgres_tests_use_bounded_scoped_databases(self):
         """Route all import suites through bounded native groups, not skipped shards."""
@@ -1741,6 +1749,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_mrf_result_archive_postgres.py",
             "tests/test_reference_family_archive_postgres.py",
             "tests/test_reference_family_result_generation_postgres.py",
+            "tests/test_nucc_reference_result_generation_postgres.py",
             "tests/test_geo_census_reference_family_postgres.py",
             "tests/test_geo_reference_family_postgres.py",
             "tests/test_mrf_address_publication_postgres.py",
