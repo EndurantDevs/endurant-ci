@@ -526,8 +526,11 @@ run_provider_directory_postgres postgresql://postgres:postgres@127.0.0.1:5432/te
             tests.mkdir(parents=True)
             for name in names:
                 (tests / name).touch()
+            for path in REQUIRED_IMPORT_NATIVE_TESTS[1:]:
+                (source / path).touch()
             log = Path(temporary) / "routes"
             script = CHECK_FUNCTIONS + r'''
+run_scoped_archive_postgres() { :; }
 timeout() {
   if [[ "$*" = *test_result_archive_* ]]; then
     printf '%s\t%s\t%s\t%s\n' "$HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST" \
@@ -540,6 +543,7 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-ptg
             result = subprocess.run(
                 ["bash", "-euc", script], cwd=source,
                 env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                     "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "postgres",
                      "ROUTE_LOG": str(log), "HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST": "",
                      "HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN": "",
                      "HLTHPRT_PTG2_ARCHIVE_CANDIDATE_POSTGRES_TEST": ""},
@@ -1540,6 +1544,17 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
         )
         test_groups = (lifecycle_test_paths, capture_test_paths, build_test_paths, operator_test_paths,
                        (installed_test_path,), family_test_paths, snapshot_test_paths, bulk_test_paths)
+        groups_by_lane = {"core-imports": test_groups[:4], "core-ptg": test_groups[4:], "all": test_groups}
+        required_by_lane = {"core-imports": required_test_paths[:1], "core-ptg": family_test_paths,
+                            "all": required_test_paths}
+        historical_tail_paths = (
+            "tests/test_cms_doctors_archive_postgres.py",
+            "tests/test_tiger_result_archive_postgres.py",
+            "tests/test_pharmacy_economics_snapshot_postgres.py",
+            "tests/test_ptg_wave_recovery_storage_postgres.py",
+            "tests/test_uhc_semantic_build_postgres.py",
+            "tests/test_ptg2_candidate_audit_batch_postgres.py",
+        )
         test_paths = tuple(path for group in test_groups for path in group)
         optional_capture_paths = lifecycle_test_paths + capture_test_paths[:-1]
         optional_build_paths = build_test_paths + operator_test_paths
@@ -1550,18 +1565,22 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
         archive_url = "postgresql://postgres:postgres@127.0.0.1:5440"
         present_path_sets = ((), *((path,) for path in optional_test_paths),
                              optional_capture_paths, optional_build_paths, legacy_optional_paths, optional_test_paths)
-        cases = [("core-imports", (*required_test_paths, *paths), "", "") for paths in present_path_sets]
-        cases += [("core-imports", test_paths, group[0], "") for group in test_groups]
-        cases += [("core-imports", test_paths, installed_test_path, "")]
-        cases += [("core-imports", tuple(path for path in required_test_paths if path != missing), "", missing)
-                  for missing in required_test_paths]
-        cases += [(lane, test_paths, "", "") for lane in ("core-services", "core-ptg", "all")]
+        cases = [(lane, (*required_by_lane[lane], *paths), "", "")
+                 for lane in ("core-imports", "core-ptg") for paths in present_path_sets]
+        cases += [(lane, test_paths, group[0], "")
+                  for lane, groups in groups_by_lane.items() for group in groups]
+        cases += [(lane, tuple(path for path in required if path != missing), "", missing)
+                  for lane, required in required_by_lane.items() for missing in required]
+        cases += [(lane, test_paths, "", "") for lane in ("core-services", "all")]
+        cases += [("all", required_test_paths, "", "")]
         for lane, present_paths, failure_path, missing_path in cases:
             with self.subTest(lane=lane, present_paths=present_paths, failure=failure_path), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 source = root / "source"
                 (source / "tests").mkdir(parents=True)
                 for test_path in present_paths:
+                    (source / test_path).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
+                for test_path in historical_tail_paths[:3]:
                     (source / test_path).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
                 call_log = root / "calls"
                 env = {
@@ -1607,7 +1626,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                 calls = call_log.read_text().splitlines()
                 main_call = next(call for call in calls if "--ci-shard-count 4" in call)
                 for test_path in test_paths:
-                    if test_path in present_paths and test_path not in mixed_test_paths:
+                    if test_path in required_test_paths or (test_path in present_paths and test_path not in mixed_test_paths):
                         self.assertIn(f"--ignore {test_path}", main_call)
                     else:
                         self.assertNotIn(test_path, main_call)
@@ -1620,7 +1639,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                 routes = [call for call in calls if call.startswith("hc_custom_import_test_")]
                 expected_groups = [
                     [path for path in group if path in present_paths]
-                    for group in test_groups if lane in ("core-imports", "all") and any(path in present_paths for path in group)
+                    for group in groups_by_lane.get(lane, ()) if any(path in present_paths for path in group)
                 ]
                 if failure_path:
                     failed_group = next(i for i, group in enumerate(expected_groups) if failure_path in group)
@@ -1639,6 +1658,10 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                     if expected_paths == [installed_test_path]:
                         expected_arguments += ["-n", "2", "--dist", "worksteal", "--durations=9", "-vv"]
                     self.assertEqual(route.split()[3:], expected_arguments)
+                tails = [path for call in calls if "--ignore" not in call
+                         for path in historical_tail_paths if path in call.split()]
+                expected_tails = list(historical_tail_paths) if lane in ("core-imports", "all") and not failure_path else []
+                self.assertEqual(tails, expected_tails)
 
     def test_optional_import_database_routes_cleanup_after_success_and_failure(self):
         routes = (
@@ -1647,7 +1670,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             ("pharmacy_economics_snapshot", "HLTHPRT_PHARMACY_ECON_POSTGRES_DSN", None),
         )
         dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
-        cases = [(lane, fail) for lane in ("core-imports", "core-services", "all") for fail in (False, True)]
+        cases = [(lane, fail) for lane in ("core-imports", "core-services", "core-ptg", "all") for fail in (False, True)]
         for module, variable, prefix in routes:
             for lane, fail in cases:
                 with self.subTest(module=module, lane=lane, fail=fail), tempfile.TemporaryDirectory() as temporary:
@@ -1684,12 +1707,13 @@ run_python_main 0
 run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" "$ROUTE_LANE"
 '''
                     result = subprocess.run(["bash", "-euc", script], cwd=source, env=env, capture_output=True, text=True)
-                    self.assertEqual(result.returncode == 0, not (fail and lane != "core-services"), result.stderr)
+                    selected = lane in ("core-imports", "all")
+                    self.assertEqual(result.returncode == 0, not (fail and selected), result.stderr)
                     calls = call_log.read_text().splitlines()
                     main_call = next(call for call in calls if "--ci-shard-count 4" in call)
                     self.assertIn(f"--ignore {test_path}", main_call)
                     executions = [call for call in calls if call.endswith(f"\t-m pytest -q {test_path}")]
-                    if lane == "core-services":
+                    if not selected:
                         self.assertEqual(executions, [])
                         if prefix is not None:
                             self.assertFalse(any(prefix in call for call in calls))
