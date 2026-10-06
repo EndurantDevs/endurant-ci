@@ -1499,6 +1499,8 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
         lifecycle_test_paths = (
             "tests/test_custom_import_execution_postgres.py",
             "tests/test_custom_import_publication_postgres.py",
+        )
+        materialization_test_paths = (
             "tests/test_custom_import_materialization_postgres.py",
             "tests/test_custom_import_read_core_postgres.py",
             "tests/test_custom_import_runner_postgres.py",
@@ -1542,9 +1544,9 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_build_counts_postgres.py",
             "tests/test_custom_import_bulk_cutover_reads_postgres.py",
         )
-        test_groups = (lifecycle_test_paths, capture_test_paths, build_test_paths, operator_test_paths,
-                       (installed_test_path,), family_test_paths, snapshot_test_paths, bulk_test_paths)
-        groups_by_lane = {"core-imports": test_groups[:4], "core-ptg": test_groups[4:], "all": test_groups}
+        test_groups = (lifecycle_test_paths, materialization_test_paths, capture_test_paths, build_test_paths,
+                       operator_test_paths, (installed_test_path,), family_test_paths, snapshot_test_paths, bulk_test_paths)
+        groups_by_lane = {"core-imports": test_groups[:5], "core-ptg": test_groups[5:], "all": test_groups}
         required_by_lane = {"core-imports": required_test_paths[:1], "core-ptg": family_test_paths,
                             "all": required_test_paths}
         historical_tail_paths = (
@@ -1556,7 +1558,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_ptg2_candidate_audit_batch_postgres.py",
         )
         test_paths = tuple(path for group in test_groups for path in group)
-        optional_capture_paths = lifecycle_test_paths + capture_test_paths[:-1]
+        optional_capture_paths = lifecycle_test_paths + materialization_test_paths + capture_test_paths[:-1]
         optional_build_paths = build_test_paths + operator_test_paths
         optional_test_paths = (optional_capture_paths + optional_build_paths + (installed_test_path,)
                                + snapshot_test_paths + bulk_test_paths)
