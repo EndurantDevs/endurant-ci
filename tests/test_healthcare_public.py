@@ -1484,7 +1484,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                 self.assertEqual(executed, [f"{dsn}\t-m pytest -q {test_path}"])
 
     def test_custom_import_postgres_tests_use_bounded_scoped_databases(self):
-        """Split lifecycle, capture and build suites without changing membership or coverage."""
+        """Route all import suites through bounded native groups, not skipped shards."""
 
         required_test_paths = REQUIRED_IMPORT_NATIVE_TESTS
         installed_test_path = "tests/test_custom_import_installed_operator_postgres.py"
@@ -1513,6 +1513,8 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_build_source_batch_postgres.py",
             "tests/test_custom_import_build_output_postgres.py",
             "tests/test_custom_import_segmented_runner_postgres.py",
+        )
+        operator_test_paths = (
             "tests/test_custom_import_operator_postgres.py",
             "tests/test_custom_import_registration_authority_postgres.py",
             "tests/test_custom_import_registration_authority_route_postgres.py",
@@ -1521,11 +1523,28 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_provider_hydration_postgres.py",
         ) + mixed_test_paths
         family_test_paths = required_test_paths[1:]
-        test_groups = (lifecycle_test_paths, capture_test_paths, build_test_paths, (installed_test_path,), family_test_paths)
-        test_paths = lifecycle_test_paths + capture_test_paths + build_test_paths + (installed_test_path,) + family_test_paths
+        snapshot_test_paths = (
+            "tests/test_custom_import_snapshot_storage_postgres.py",
+            "tests/test_custom_import_snapshot_reads_postgres.py",
+            "tests/test_custom_import_source_homes_postgres.py",
+            "tests/test_custom_import_retained_homes_postgres.py",
+            "tests/test_custom_import_revision_home_postgres.py",
+        )
+        bulk_test_paths = (
+            "tests/test_custom_import_bulk_snapshot_writers_postgres.py",
+            "tests/test_custom_import_legacy_snapshot_writers_postgres.py",
+            "tests/test_custom_import_materialization_set_postgres.py",
+            "tests/test_custom_import_writer_cutover_postgres.py",
+            "tests/test_custom_import_build_counts_postgres.py",
+            "tests/test_custom_import_bulk_cutover_reads_postgres.py",
+        )
+        test_groups = (lifecycle_test_paths, capture_test_paths, build_test_paths, operator_test_paths,
+                       (installed_test_path,), family_test_paths, snapshot_test_paths, bulk_test_paths)
+        test_paths = tuple(path for group in test_groups for path in group)
         optional_capture_paths = lifecycle_test_paths + capture_test_paths[:-1]
-        optional_build_paths = build_test_paths
-        optional_test_paths = optional_capture_paths + optional_build_paths + (installed_test_path,)
+        optional_build_paths = build_test_paths + operator_test_paths
+        optional_test_paths = (optional_capture_paths + optional_build_paths + (installed_test_path,)
+                               + snapshot_test_paths + bulk_test_paths)
         legacy_optional_paths = tuple(path for path in optional_test_paths if path != installed_test_path)
         dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
         archive_url = "postgresql://postgres:postgres@127.0.0.1:5440"

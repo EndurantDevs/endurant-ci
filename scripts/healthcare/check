@@ -213,6 +213,17 @@ run_python_main() {
     tests/test_custom_import_registration_authority_migration_postgres.py \
     tests/test_custom_import_provider_query_postgres.py \
     tests/test_custom_import_provider_hydration_postgres.py \
+    tests/test_custom_import_snapshot_storage_postgres.py \
+    tests/test_custom_import_snapshot_reads_postgres.py \
+    tests/test_custom_import_source_homes_postgres.py \
+    tests/test_custom_import_retained_homes_postgres.py \
+    tests/test_custom_import_revision_home_postgres.py \
+    tests/test_custom_import_bulk_snapshot_writers_postgres.py \
+    tests/test_custom_import_legacy_snapshot_writers_postgres.py \
+    tests/test_custom_import_materialization_set_postgres.py \
+    tests/test_custom_import_writer_cutover_postgres.py \
+    tests/test_custom_import_build_counts_postgres.py \
+    tests/test_custom_import_bulk_cutover_reads_postgres.py \
     tests/test_entity_address_result_generation_postgres.py \
     tests/test_mrf_result_archive_postgres.py \
     tests/test_cms_doctors_archive_postgres.py \
@@ -949,7 +960,21 @@ run_core_postgres() {
     tests/test_custom_import_build_source_postgres.py \
     tests/test_custom_import_build_source_batch_postgres.py \
     tests/test_custom_import_build_output_postgres.py \
-    tests/test_custom_import_segmented_runner_postgres.py \
+    tests/test_custom_import_segmented_runner_postgres.py; do
+    if [ -f "$repository_root/$custom_import_test_path" ]; then
+      custom_import_postgres_tests+=("$custom_import_test_path")
+    fi
+  done
+  if [ "${#custom_import_postgres_tests[@]}" -gt 0 ]; then
+    local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
+    run_scoped_archive_postgres \
+      "hc_custom_import_test_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')" \
+      HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN "$archive_url" \
+      "${custom_import_postgres_tests[@]}"
+  fi
+
+  custom_import_postgres_tests=()
+  for custom_import_test_path in \
     tests/test_custom_import_operator_postgres.py \
     tests/test_custom_import_registration_authority_postgres.py \
     tests/test_custom_import_registration_authority_route_postgres.py \
@@ -985,6 +1010,43 @@ run_core_postgres() {
     HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN "$archive_url" \
     tests/test_custom_import_identical_children_postgres.py \
     tests/test_custom_import_grouped_child_read_postgres.py
+
+  custom_import_postgres_tests=()
+  for custom_import_test_path in \
+    tests/test_custom_import_snapshot_storage_postgres.py \
+    tests/test_custom_import_snapshot_reads_postgres.py \
+    tests/test_custom_import_source_homes_postgres.py \
+    tests/test_custom_import_retained_homes_postgres.py \
+    tests/test_custom_import_revision_home_postgres.py; do
+    if [ -f "$repository_root/$custom_import_test_path" ]; then
+      custom_import_postgres_tests+=("$custom_import_test_path")
+    fi
+  done
+  if [ "${#custom_import_postgres_tests[@]}" -gt 0 ]; then
+    run_scoped_archive_postgres \
+      "hc_custom_import_test_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')" \
+      HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN "$archive_url" \
+      "${custom_import_postgres_tests[@]}"
+  fi
+
+  custom_import_postgres_tests=()
+  for custom_import_test_path in \
+    tests/test_custom_import_bulk_snapshot_writers_postgres.py \
+    tests/test_custom_import_legacy_snapshot_writers_postgres.py \
+    tests/test_custom_import_materialization_set_postgres.py \
+    tests/test_custom_import_writer_cutover_postgres.py \
+    tests/test_custom_import_build_counts_postgres.py \
+    tests/test_custom_import_bulk_cutover_reads_postgres.py; do
+    if [ -f "$repository_root/$custom_import_test_path" ]; then
+      custom_import_postgres_tests+=("$custom_import_test_path")
+    fi
+  done
+  if [ "${#custom_import_postgres_tests[@]}" -gt 0 ]; then
+    run_scoped_archive_postgres \
+      "hc_custom_import_test_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')" \
+      HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN "$archive_url" \
+      "${custom_import_postgres_tests[@]}"
+  fi
 
   fi
 
