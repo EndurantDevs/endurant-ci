@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -498,7 +499,29 @@ def proof_name(identity, intent=False):
     return f"{artifacts.KINDS[identity['repository']]}-public-image-{'intent-' if intent else ''}{identity['run_id']}-{identity['run_attempt']}"
 
 
+class UploadPending(ValueError):
+    """A completed upload has not reached the job and artifact readback APIs."""
+
+
 def uploaded_payload(expected, run, job, *, intent=False):
+    """Wait briefly for readback without accepting partial or changed authority."""
+    repository = expected["identity"]["repository"]
+    for attempt in range(10):
+        fresh = github.api(repository, f"actions/jobs/{job['id']}")
+        if (any(type(fresh.get(key)) is not int for key in ("id", "run_id", "run_attempt"))
+                or fresh.get("id") != job["id"] or fresh.get("run_id") != run["id"]
+                or fresh.get("run_attempt") != run["run_attempt"] or fresh.get("head_sha") != run["head_sha"]
+                or fresh.get("status") != "in_progress" or fresh.get("conclusion") is not None):
+            raise ValueError("publication upload requires its exact still-active publisher job")
+        try:
+            return upload_snapshot(expected, run, fresh, intent=intent)
+        except UploadPending:
+            if attempt == 9:
+                raise
+            time.sleep(2)
+
+
+def upload_snapshot(expected, run, job, *, intent=False):
     """Authenticate the immutable uploaded ZIP and its single bounded JSON payload."""
     identity = expected["identity"]
     repository = identity["repository"]
@@ -513,6 +536,13 @@ def uploaded_payload(expected, run, job, *, intent=False):
             return None
         if not items and steps[0].get("conclusion") == "skipped":
             return None
+    if len(items) > 1 or len(steps) > 1:
+        raise ValueError("current publication upload is ambiguous")
+    if len(steps) == 1 and steps[0].get("status") == "completed" and steps[0].get("conclusion") != "success":
+        raise ValueError("current publication upload did not succeed")
+    if (not items or not steps or (steps[0].get("status") in {"queued", "in_progress"}
+                                  and steps[0].get("conclusion") is None)):
+        raise UploadPending("current publication upload is missing or incomplete")
     if (len(items) != 1 or len(steps) != 1 or steps[0].get("status") != "completed"
             or steps[0].get("conclusion") != "success" or not artifacts.current_evidence(items[0], run)
             or not 0 < items[0].get("size_in_bytes", 0) <= 131072 or not DIGEST.fullmatch(items[0].get("digest", ""))
@@ -637,6 +667,8 @@ def publish(expected, directory):
             command("docker", "login", "ghcr.io", "--username", os.environ["GITHUB_ACTOR"], "--password-stdin",
                     input=os.environ["GH_TOKEN"].encode(), env=environment)
             require_absent_registry_tag(target)
+            if admit() != expected:
+                raise ValueError("publication authority changed after upload readback")
             command("docker", "image", "push", target, env=environment)
             digest = command("docker", "buildx", "imagetools", "inspect", target,
                              "--format", '{{printf "%s" .Manifest.Digest}}', env=environment).decode().strip()

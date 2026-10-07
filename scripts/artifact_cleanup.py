@@ -24,6 +24,10 @@ TERMINAL_CONCLUSIONS = {
 }
 
 
+class InventoryPending(ValueError):
+    """The current attempt's job inventory has not finished updating."""
+
+
 def current_run(run, expected, repository):
     return bool(
         run.get("status") == "in_progress" and run.get("conclusion") is None
@@ -39,10 +43,15 @@ def current_run(run, expected, repository):
 
 def completed_consumers(repository, run):
     jobs = effective_jobs(repository, run)
-    if len(jobs) < 2 or sum(job.get("name") == CLEANUP_JOB for job in jobs) != 1:
+    if len(jobs) < 2 or not any(job.get("name") == CLEANUP_JOB for job in jobs):
+        raise InventoryPending("cleanup requires a complete job inventory including itself")
+    if sum(job.get("name") == CLEANUP_JOB for job in jobs) != 1:
         raise ValueError("cleanup requires a complete, unique job inventory including itself")
     for job in jobs:
         own_job = job.get("name") == CLEANUP_JOB
+        if job.get("status") in {"queued", "in_progress"} and job.get("conclusion") is None and (
+                not own_job or job.get("status") == "queued"):
+            raise InventoryPending("retained intermediates: cleanup must be the sole active job after validation")
         if not (type(job.get("id")) is int and job["id"] > 0
                 and (not own_job or job.get("run_attempt") == run["run_attempt"])
                 and job.get("status") == ("in_progress" if own_job else "completed")
@@ -50,6 +59,26 @@ def completed_consumers(repository, run):
                      else job.get("conclusion") in TERMINAL_CONCLUSIONS)):
             raise ValueError("retained intermediates: cleanup must be the sole active job after validation")
     return sorted((job["id"], job["name"], job["run_attempt"], job.get("conclusion")) for job in jobs)
+
+
+def stable_consumers(repository, expected):
+    """Freeze three matching complete snapshots before considering any deletion."""
+    previous, matching = None, 0
+    for attempt in range(10):
+        if not current_run(github.api(repository, f"actions/runs/{expected['id']}"), expected, repository):
+            raise ValueError("retained artifacts: current workflow run or attempt changed")
+        try:
+            current = completed_consumers(repository, expected)
+        except InventoryPending:
+            previous, matching = None, 0
+        else:
+            matching = matching + 1 if current == previous else 1
+            previous = current
+            if matching == 3:
+                return current
+        if attempt < 9:
+            time.sleep(2)
+    raise ValueError("retained intermediates: validation job inventory did not stabilize")
 
 
 def effective_jobs(repository, run):
@@ -334,7 +363,7 @@ def cleanup(repository, expected):
     if not current_run(run, expected, repository):
         raise ValueError("retained artifacts: current workflow run or attempt changed")
     expected = {**expected, "workflow_id": run["workflow_id"]}
-    consumers = completed_consumers(repository, expected)
+    consumers = stable_consumers(repository, expected)
     # Complete pagination before deletion can shift numbered pages.
     artifacts = list(github.pages(repository, f"{run_path}/artifacts", "artifacts"))
     kind = KINDS[repository]
