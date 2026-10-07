@@ -17,13 +17,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
-        with:
-          python-version: '3.14.7'
       - name: Install pinned uv
         run: bash scripts/install_uv
+      - name: Install uv-managed Python
+        run: bash scripts/setup_python
       - name: Install validation dependencies
-        run: 'uv --no-config pip install --system --require-hashes --only-binary=:all: -r scripts/requirements-python-quality.lock'
+        run: 'uv --no-config pip install --require-hashes --only-binary=:all: -r scripts/requirements-python-quality.lock'
       - name: Verify pinned Rust tool downloads on native Linux
         run: |
           tools_directory=$(mktemp -d "$RUNNER_TEMP/rust-ci-tools.XXXXXX")
@@ -39,7 +38,7 @@ jobs:
           python scripts/healthcare/test_measurement.py
       - name: Check shell syntax
         run: |
-          for script in scripts/install_uv scripts/phase_timing.sh scripts/drug/check scripts/healthcare/check scripts/healthcare/{compile,install}_python_lock; do
+          for script in scripts/install_uv scripts/setup_python scripts/phase_timing.sh scripts/drug/check scripts/healthcare/check scripts/healthcare/{compile,install}_python_lock; do
             bash -n "$script"
           done
       - name: Check workflow syntax

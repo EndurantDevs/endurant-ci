@@ -601,6 +601,12 @@ jobs:
         ref: ${{ inputs.ci_revision }}
         path: ci
         persist-credentials: false
+    - name: Install pinned uv
+      run: bash "$CI_ROOT/scripts/install_uv"
+      working-directory: ${{ github.workspace }}
+    - name: Install uv-managed Python
+      run: bash "$CI_ROOT/scripts/setup_python"
+      working-directory: ${{ github.workspace }}
     - name: Resolve exact source event
       id: identity
       env:

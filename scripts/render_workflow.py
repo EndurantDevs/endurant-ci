@@ -42,13 +42,21 @@ def render_workflow(kind, revision, caller):
         "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
     }
     workflow["jobs"] = {"smoke": workflow["jobs"]["smoke"], **canonical["jobs"]}
-    for step in workflow["jobs"]["smoke"]["steps"]:
+    smoke_steps = workflow["jobs"]["smoke"]["steps"]
+    smoke_steps[:] = [step for step in smoke_steps if not step.get("uses", "").startswith("actions/setup-python@")
+                      and step.get("name") != "Install uv-managed Python"]
+    for index, step in enumerate(smoke_steps):
         if step.get("name") == "Install pinned uv":
             step.clear()
             step.update({
                 "name": "Install pinned uv",
                 "run": (ROOT / "scripts/install_uv").read_text(),
             })
+            smoke_steps.insert(index + 1, {
+                "name": "Install uv-managed Python",
+                "run": (ROOT / "scripts/setup_python").read_text(),
+            })
+            break
     producer_job = "container-package" if kind == "healthcare" else "validate"
     measurement_job = "measurement" if kind == "healthcare" else "publish"
     validation_job = "source-validation" if kind == "healthcare" else "publish"
@@ -116,6 +124,11 @@ def render_workflow(kind, revision, caller):
              "run": "python3 ci/scripts/artifact_cleanup.py"},
         ],
     }
+    for job_id in ("dev-image-publication", "artifact-cleanup"):
+        workflow["jobs"][job_id]["steps"][1:1] = [
+            {"name": "Install pinned uv", "run": 'bash ci/scripts/install_uv'},
+            {"name": "Install uv-managed Python", "run": 'bash ci/scripts/setup_python'},
+        ]
     for job_id, job in workflow["jobs"].items():
         label = job["name"]
         if label == "${{ matrix.label }}":
