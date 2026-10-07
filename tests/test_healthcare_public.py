@@ -1249,6 +1249,42 @@ run_rust
                 self.assertEqual(ends, expected, result.stdout)
                 self.assertEqual(list(runner.iterdir()), [])
 
+    def test_rust_wheel_tests_require_compiled_scalar_capability_when_enrolled(self):
+        start = CHECK_FUNCTIONS.index("  ci_phase_begin rust-wheel-tests\n")
+        stage = CHECK_FUNCTIONS[start:CHECK_FUNCTIONS.index("  ci_phase_end\n", start)]
+        scalar_test = "tests/test_custom_import_scalar_digest.py"
+        cases = (
+            (False, "raise AssertionError('unexpected extension import')\n", True),
+            (True, "custom_import_scalar_frames_v1 = len\n", True),
+            (True, "", False),
+            (True, "custom_import_scalar_frames_v1 = 0\n", False),
+            (True, "custom_import_scalar_frames_v1 = lambda *args: b''\n", False),
+            (True, "raise ImportError('synthetic extension import failure')\n", False),
+        )
+        for present, module_source, success in cases:
+            with self.subTest(present=present, module=module_source), tempfile.TemporaryDirectory() as temporary:
+                source = Path(temporary)
+                (source / "tests").mkdir()
+                if present:
+                    (source / scalar_test).touch()
+                (source / "ptg2_address_canon.py").write_text(module_source)
+                environment = {**os.environ, "SOURCE_ROOT": str(source), "PYTHON_BIN": sys.executable,
+                               "PYTHONPATH": str(source), "PYTHONDONTWRITEBYTECODE": "1"}
+                script = r'''
+repository_root=$SOURCE_ROOT
+ci_phase_begin() { :; }
+python() { "$PYTHON_BIN" "$@"; }
+timeout() { printf '%s\n' "$*"; }
+run_wheel_tests() {
+''' + stage + "\n}\nrun_wheel_tests\n"
+                result = subprocess.run(["bash", "-euc", script], cwd=source, env=environment,
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode == 0, success, result.stderr)
+                expected = "--foreground 295s python -m pytest -q tests/test_address_canon_pyo3.py"
+                if present:
+                    expected += " " + scalar_test
+                self.assertEqual(result.stdout.strip(), expected if success else "")
+
     def test_postgres_parallel_preparation_reports_each_failure_without_starting_tests(self):
         for failure in ("python-dependencies", "rust-debug-build", "postgres-prepare", "postgres-tests"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
