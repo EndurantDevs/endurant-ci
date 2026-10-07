@@ -310,7 +310,8 @@ run_python_inference() (
   }
   trap cleanup_python_inference EXIT
   ci_phase_begin python-inference-dependencies
-  uv --no-config venv --python "$(command -v python)" --no-python-downloads "$inference_root/venv"
+  runtime_python=$(command -v python)
+  uv --no-config venv --python "$runtime_python" --no-python-downloads "$inference_root/venv"
   uv --no-config pip sync --python "$inference_root/venv/bin/python" --require-hashes --only-binary=:all: \
     "$CI_ROOT/scripts/requirements-python-quality.lock"
   ci_phase_end
@@ -330,22 +331,28 @@ run_python_inference() (
   local inference_target
   for inference_target in "${inference_targets[@]}"; do
     [[ -f "$inference_target" ]] || {
-      printf 'Pylint inference target is missing: %s\n' "$inference_target" >&2
+      printf 'Python inference target is missing: %s\n' "$inference_target" >&2
       return 2
     }
   done
   ci_phase_begin python-inference
-  # Infer against the verified application dependencies, after the pinned lint packages.
-  runtime_hook=$(python -c 'import site; print("import sys; sys.path.extend(" + repr(site.getsitepackages()) + ")")')
+  # Resolve real application dependencies without adding tools to the runtime.
+  printf 'from aiohttp import client\nimport orjson\nclient.quality_probe_missing_member()\norjson.quality_probe_missing_member()\n' \
+    > "$inference_root/quality_inference_probe.py"
   probe_status=0
-  probe_output=$(printf 'from aiohttp import client\nimport orjson\nclient.quality_probe_missing_member()\norjson.quality_probe_missing_member()\n' | \
-    "$inference_root/venv/bin/pylint" --enable=no-member --init-hook "$runtime_hook" --from-stdin quality_inference_probe.py) || probe_status=$?
-  [[ "$probe_status" == 2 && "$probe_output" == *"'aiohttp.client' has no 'quality_probe_missing_member'"* \
-    && "$probe_output" == *"'orjson' has no 'quality_probe_missing_member'"* ]] || {
-    printf 'Pylint runtime dependency inference canary failed (status %s):\n%s\n' "$probe_status" "$probe_output" >&2
+  probe_output=$("$inference_root/venv/bin/ty" check --config-file /dev/null --python "$runtime_python" \
+    --output-format concise --no-progress "$inference_root/quality_inference_probe.py") || probe_status=$?
+  [[ "$probe_status" == 1 && "$probe_output" == *'unresolved-attribute'* \
+    && "$probe_output" == *'Module `aiohttp.client` has no member `quality_probe_missing_member`'* \
+    && "$probe_output" == *'Module `orjson` has no member `quality_probe_missing_member`'* ]] || {
+    printf 'Python runtime dependency inference canary failed (status %s):\n%s\n' "$probe_status" "$probe_output" >&2
     return 2
   }
-  "$inference_root/venv/bin/pylint" --errors-only --init-hook "$runtime_hook" "${inference_targets[@]}"
+  "$inference_root/venv/bin/ruff" check --isolated --no-cache --ignore-noqa \
+    --select ANN201,ANN202,ANN204,ANN205,ANN206 \
+    --config lint.flake8-annotations.suppress-none-returning=false "${inference_targets[@]}"
+  "$inference_root/venv/bin/ty" check --config-file /dev/null --python "$runtime_python" \
+    --output-format concise --no-progress "${inference_targets[@]}"
   ci_phase_end
 )
 
