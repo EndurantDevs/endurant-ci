@@ -55,11 +55,14 @@ class HealthcarePublicChecks(unittest.TestCase):
             "test_registry_retained_site_adoption", "test_registry_site_binding_store",
             "test_registry_site_membership_composition", "test_registry_source_site_catalog",
             "test_registry_source_site_http",
+            "test_registry_planfinder_admission",
+            "test_company_network_link_store",
         ))
         paths += ("tests/test_registry_source_fetch.py",)
         self.assertEqual(len(paths), len(set(paths)))
         exports = (
-            "encode_network_membership_batch", "encode_cms_mlr_observations", "validate_network_catalog_batch",
+            "encode_network_membership_batch", "encode_cms_mlr_observations", "encode_cms_planfinder_observations",
+            "validate_network_catalog_batch", "validate_company_network_assertions",
             "canonicalize_batch", "canon_version",
         )
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
@@ -75,6 +78,8 @@ class HealthcarePublicChecks(unittest.TestCase):
         cases += [("core-services", absent, "") for absent in ("all", "all-with-model")]
         cases += [("core-services", "", stage) for stage in (
             "build", "install", "pytest", "drop", "rust-version", "asyncpg", *exports,
+            "skipped", "error", "failure", "summary-skipped", "no-tests", "bad-count", "empty-report",
+            "invalid-report", "large-report", "report-cleanup",
         )]
         for lane, missing, failure in cases:
             with self.subTest(lane=lane, missing=missing, failure=failure), tempfile.TemporaryDirectory() as temporary:
@@ -111,6 +116,10 @@ drop_test_database() {
 }
 psql() { printf 'extensions\t%s\n' "$*" >> "$CALL_LOG"; }
 rustc() { echo "rustc $([ "$FAIL_STAGE" = rust-version ] && echo 1.98.0 || echo 1.98.1)"; }
+rm() {
+  if [[ "$FAIL_STAGE" = report-cleanup && "${!#}" = *"/healthcare-network-registry."* ]]; then return 23; fi
+  command rm "$@"
+}
 python() {
   case "$*" in
     '-m maturin build '*)
@@ -124,7 +133,28 @@ python() {
       test "$HLTHPRT_DB_DATABASE:$HLTHPRT_DB_DATABASE_OVERRIDE:$PGDATABASE" = "$PGDATABASE:$PGDATABASE:$PGDATABASE"
       printf 'pytest\t%s\t%s\t%s\n' "$NETWORK_REGISTRY_TEST_DSN" \
         "$HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN" "$*" >> "$CALL_LOG"
-      [ "$FAIL_STAGE" != pytest ] || return 17 ;;
+      [ "$FAIL_STAGE" != pytest ] || return 17
+      command python3 - "${!#}" <<'PY'
+import os
+import pathlib
+import sys
+import xml.etree.ElementTree as ET
+path = pathlib.Path(sys.argv[1])
+stage = os.environ["FAIL_STAGE"]
+if stage in ("empty-report", "invalid-report", "large-report"):
+    path.write_text({"empty-report": "", "invalid-report": "<invalid", "large-report": "x" * (16 * 1024 * 1024 + 1)}[stage])
+else:
+    report = ET.Element("testsuites")
+    suite = ET.SubElement(report, "testsuite", tests="0" if stage == "no-tests" else "2" if stage == "bad-count" else "1",
+                          skipped="1" if stage == "summary-skipped" else "0", errors="0", failures="0")
+    if stage != "no-tests":
+        case = ET.SubElement(suite, "testcase", name="synthetic_native_test")
+        if stage in ("skipped", "error", "failure"):
+            ET.SubElement(case, stage)
+    ET.ElementTree(report).write(path, encoding="utf-8")
+PY
+      ;;
+    '- '*) command python3 "$@" ;;
   esac
 }
 uv() {
@@ -141,11 +171,16 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     "ROUTE_LANE": lane, "FAIL_STAGE": failure,
                     "NETWORK_REGISTRY_TEST_DSN": "", "HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN": "",
                 }
-                result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+                result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True, check=False)
                 selected = lane in ("core-services", "core") and missing != "all"
                 expected = 17 if failure in ("build", "install", "pytest") else 1 if failure or (selected and missing) else 0
                 self.assertEqual(result.returncode, expected, result.stderr)
                 calls = log.read_text().splitlines() if log.exists() else []
+                if failure == "report-cleanup":
+                    report_paths = list(runner.iterdir())
+                    self.assertEqual(len(report_paths), 1)
+                    self.assertTrue(report_paths[0].name.startswith("healthcare-network-registry."))
+                    report_paths[0].unlink()
                 self.assertEqual(list(runner.iterdir()), [])
                 if not selected or missing or failure == "rust-version":
                     self.assertEqual(calls, [])
@@ -157,15 +192,22 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                 self.assertTrue(calls[0].startswith("build\t-m maturin build --locked --features python-extension --out "))
                 self.assertNotIn("--release", calls[0])
                 runs = [call for call in calls if call.startswith("pytest\t")]
-                self.assertEqual(len(runs), int(failure in ("", "pytest", "drop")))
+                report_failures = {"skipped", "error", "failure", "summary-skipped", "no-tests", "bad-count",
+                                   "empty-report", "invalid-report", "large-report", "report-cleanup"}
+                self.assertEqual(len(runs), int(failure in ("", "pytest", "drop") or failure in report_failures))
                 if runs:
+                    self.assertRegex(result.stdout, rf"CI_PHASE end name=network-registry-postgres-tests elapsed_seconds=\d+ exit_code={expected}")
                     self.assertTrue(calls[1].startswith("uv\t--no-config pip install --python "))
                     self.assertIn(" --no-build --no-deps ", calls[1])
                     self.assertTrue(calls[2].startswith("uv\t--no-config pip check --python "))
                     _, registry_dsn, membership_dsn, arguments = runs[0].split("\t", 3)
                     self.assertEqual(registry_dsn, membership_dsn)
                     self.assertRegex(registry_dsn, r"@127\.0\.0\.1:5440/hc_network_registry_[0-9a-f]{32}$")
-                    self.assertEqual(shlex.split(arguments), ["-m", "pytest", "-q", *paths])
+                    selected_arguments = shlex.split(arguments)
+                    self.assertEqual(selected_arguments[:-2], ["-m", "pytest", "-q", *paths])
+                    self.assertEqual(selected_arguments[-2], "--junitxml")
+                    self.assertEqual(Path(selected_arguments[-1]).parent, runner)
+                    self.assertFalse(Path(selected_arguments[-1]).exists())
                     database = registry_dsn.rsplit("/", 1)[1]
                     self.assertEqual(calls[-1], f"drop\t{database}")
                     self.assertEqual(calls.count(f"create\t{database}"), 1)
@@ -173,6 +215,45 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     extensions = next(call for call in calls if call.startswith("extensions\t"))
                     for name in ("intarray", "btree_gin", "postgis"):
                         self.assertIn(f"CREATE EXTENSION IF NOT EXISTS {name} WITH SCHEMA public", extensions)
+
+    def test_planfinder_decoder_uses_python_discovery(self):
+        decoder = "tests/test_cms_planfinder_workbook_input.py"
+        for present in (False, True):
+            with self.subTest(present=present), tempfile.TemporaryDirectory() as temporary:
+                source_root = Path(temporary)
+                (source_root / "tests").mkdir()
+                if present:
+                    (source_root / decoder).write_text("def test_decoder(): assert True\n")
+                call_log = source_root / "calls"
+                script = CHECK_FUNCTIONS + r'''
+mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
+prepare_debug_rust_binaries() { :; }
+python() { printf '%s\n' "$*" >> "$CALL_LOG"; }
+timeout() { shift 2; "$@"; }
+for shard in 0 1 2 3; do run_python_main "$shard"; done
+'''
+                environment_map = {
+                    **os.environ, "SOURCE_ROOT": str(source_root), "CI_ROOT": str(ROOT),
+                    "CI_DEPS_READY": "1", "COVERAGE_BASE_SHA": "a" * 40, "CALL_LOG": str(call_log),
+                }
+                run_result = subprocess.run(["bash", "-euc", script], cwd=source_root, env=environment_map,
+                                            capture_output=True, text=True, check=False)
+                self.assertEqual(run_result.returncode, 0, run_result.stderr)
+                calls = [shlex.split(call) for call in call_log.read_text().splitlines()]
+                selections = [call for call in calls if call[:2] == ["-m", "pytest"]]
+                self.assertEqual(len(selections), 4)
+                for shard, arguments in enumerate(selections):
+                    self.assertEqual(arguments[arguments.index("--ci-shard-index") + 1], str(shard))
+                    self.assertIn("scripts.ci.shard_pytest_nodeids", arguments)
+                    self.assertNotIn(decoder, arguments)
+                    self.assertNotIn("--ignore-glob", arguments)
+                    self.assertNotIn("-k", arguments)
+                    self.assertNotIn("-m", arguments[2:])
+                    python_paths = [index for index, argument in enumerate(arguments) if argument.endswith(".py")]
+                    self.assertTrue(all(arguments[index - 1] == "--ignore" for index in python_paths))
+                    self.assertIn("--cov=process", arguments)
+                provenance_calls = [call for call in calls if "write-shard-provenance" in call]
+                self.assertEqual(len(provenance_calls), 4)
 
     def test_cms_native_coverage_routes_and_owns_required_fixture_environments(self):
         routes = {

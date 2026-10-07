@@ -865,7 +865,7 @@ run_scoped_archive_postgres() (
   fi
 )
 
-run_network_registry_postgres() {
+run_network_registry_postgres() (
   local registry_tests=(
     tests/test_network_registry_postgres.py
     tests/test_network_serving_schema_postgres.py
@@ -912,6 +912,8 @@ run_network_registry_postgres() {
     tests/test_registry_site_membership_composition_postgres.py
     tests/test_registry_source_site_catalog_postgres.py
     tests/test_registry_source_site_http_postgres.py
+    tests/test_registry_planfinder_admission_postgres.py
+    tests/test_company_network_link_store_postgres.py
     tests/test_registry_source_fetch.py
   )
   local feature_present=0
@@ -929,15 +931,43 @@ run_network_registry_postgres() {
   done
   test "$(rustc --version | awk '{print $2}')" = 1.98.1
   install_address_canon_wheel
-  python -c 'import asyncpg; import ptg2_address_canon as native; assert all(callable(getattr(native, name, None)) for name in ("encode_network_membership_batch", "encode_cms_mlr_observations", "validate_network_catalog_batch", "canonicalize_batch", "canon_version")), "Native registry extension is incomplete"'
+  python -c 'import asyncpg; import ptg2_address_canon as native; assert all(callable(getattr(native, name, None)) for name in ("encode_network_membership_batch", "encode_cms_mlr_observations", "encode_cms_planfinder_observations", "validate_network_catalog_batch", "validate_company_network_assertions", "canonicalize_batch", "canon_version")), "Native registry extension is incomplete"'
+  registry_report=""
+  cleanup_registry_report() {
+    local status=$?
+    trap - EXIT
+    if [[ -n "$registry_report" ]] && ! rm -f -- "$registry_report"; then
+      [ "$status" -ne 0 ] || status=1
+    fi
+    ci_phase_end "$status"
+    exit "$status"
+  }
+  trap cleanup_registry_report EXIT
+  registry_report=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-network-registry.XXXXXX")
   local database="hc_network_registry_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
   local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
   ci_phase_begin network-registry-postgres-tests
   HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN="$archive_url/$database" \
     run_scoped_archive_postgres "$database" NETWORK_REGISTRY_TEST_DSN "$archive_url" \
-      "${registry_tests[@]}"
-  ci_phase_end
-}
+      "${registry_tests[@]}" --junitxml "$registry_report"
+  python - "$registry_report" <<'PY'
+import pathlib
+import sys
+import xml.etree.ElementTree as ET
+
+path = pathlib.Path(sys.argv[1])
+assert 0 < path.stat().st_size <= 16 * 1024 * 1024, "Native registry report is missing or oversized"
+root = ET.parse(path).getroot()
+assert root.tag in ("testsuite", "testsuites"), "Native registry report has an invalid root"
+suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
+assert suites, "Native registry report has no suites"
+for suite in suites:
+    cases = list(suite.findall("testcase"))
+    assert cases and int(suite.attrib["tests"]) == len(cases), "Native registry report has no tests or inconsistent counts"
+    assert all(int(suite.attrib.get(name, "0")) == 0 for name in ("skipped", "errors", "failures")), "Native registry tests must all pass without skips"
+assert not any(item.tag in ("skipped", "error", "failure") for item in root.iter()), "Native registry tests must all pass without skips"
+PY
+)
 
 run_core_postgres() {
   local dsn=$1
