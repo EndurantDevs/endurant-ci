@@ -794,6 +794,7 @@ run_quality
             environment = {**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT)}
             script = CHECK_FUNCTIONS + r'''
 install_python_dependencies() { printf 'runtime dependencies\n'; }
+run_python_inference() { printf 'runtime-aware Pylint inference\n'; }
 run_runtime_contracts() { printf 'runtime import contracts\n'; }
 python() { printf 'python %s\n' "$*"; }
 timeout() { printf 'timeout %s\n' "$*"; }
@@ -801,10 +802,13 @@ run_api_contract
 '''
             result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        for retained in ("runtime dependencies", "runtime import contracts", "provider_directory_runtime_contract.py",
+        for retained in ("runtime dependencies", "runtime-aware Pylint inference", "runtime import contracts",
+                         "provider_directory_runtime_contract.py",
                          "generate_provider_directory_support_docs.py --check", "tests/test_openapi_spec.py",
                          "tests/test_formulary_fhir_openapi.py", "tests/test_api_init_and_utils.py", "tests/test_healthcheck.py"):
             self.assertIn(retained, result.stdout)
+        self.assertLess(result.stdout.index("runtime dependencies"), result.stdout.index("runtime-aware Pylint inference"))
+        self.assertLess(result.stdout.index("runtime-aware Pylint inference"), result.stdout.index("runtime import contracts"))
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         self.assertIn("measurement", workflow["jobs"]["source-validation"]["needs"])
         self.assertIn("readability-preflight", workflow["jobs"]["measurement"]["needs"])
@@ -826,7 +830,56 @@ run_api_contract
             self.assertEqual(list(source.iterdir()), [])
         self.assertIn("--member aiohttp.client:ClientSession --member orjson:loads --member orjson:dumps", CHECK_FUNCTIONS)
         self.assertIn("runtime_imports.py", CHECK_FUNCTIONS)
-        self.assertNotIn("pylint", CHECK_FUNCTIONS)
+
+    def test_inference_environment_creation_failure_keeps_runtime_and_cleans_its_child(self):
+        for filename in ("requirements-python-quality.in", "requirements-python-quality.lock"):
+            self.assertIn("pylint==4.0.8", (ROOT / "scripts" / filename).read_text())
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            runtime = root / "runtime"
+            runtime.mkdir()
+            environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                           "RUNNER_TEMP": str(root), "VIRTUAL_ENV": str(runtime)}
+            script = CHECK_FUNCTIONS + '\nuv() { return 19; }\nrun_python_inference\n'
+            result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 19, result.stderr)
+            self.assertEqual(set(root.iterdir()), {source, runtime})
+        self.assertIn("sys.path.extend", CHECK_FUNCTIONS)
+        self.assertIn("orjson.quality_probe_missing_member", CHECK_FUNCTIONS)
+        self.assertIn("client.quality_probe_missing_member", CHECK_FUNCTIONS)
+        probe_segment = CHECK_FUNCTIONS.split("probe_output=", 1)[1].split('[[ "$probe_status"', 1)[0]
+        self.assertIn("--enable=no-member", probe_segment)
+        self.assertNotIn("--enable=no-member", CHECK_FUNCTIONS.split('[[ "$probe_status"', 1)[1])
+        self.assertIn("Pylint runtime dependency inference canary failed (status %s)", CHECK_FUNCTIONS)
+        self.assertIn(
+            '"$inference_root/venv/bin/pylint" --errors-only --init-hook "$runtime_hook" "${inference_targets[@]}"',
+            CHECK_FUNCTIONS,
+        )
+
+    def test_inference_targets_fail_closed_before_running_pylint(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT), "RUNNER_TEMP": str(root)}
+            script = CHECK_FUNCTIONS + r'''
+uv() { :; }
+run_python_inference
+'''
+            result = subprocess.run(
+                ["bash", "-euc", script],
+                check=False,
+                cwd=source,
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("Pylint inference target is missing: api/billing_search_selector_contract.py", result.stderr)
+            self.assertEqual(set(root.iterdir()), {source})
+        self.assertNotIn("process/fhir_request_failure_policy.py", CHECK_FUNCTIONS)
 
     def test_state_profile_native_selection_is_source_aware_and_has_database_dsn(self):
         profile_paths = (
