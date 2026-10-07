@@ -47,10 +47,7 @@ def render_workflow(kind, revision, caller):
             step.clear()
             step.update({
                 "name": "Install pinned uv",
-                "uses": "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d",
-                "with": {"version": "0.12.17",
-                         "checksum": "fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63",
-                         "enable-cache": False},
+                "run": (ROOT / "scripts/install_uv").read_text(),
             })
     producer_job = "container-package" if kind == "healthcare" else "validate"
     measurement_job = "measurement" if kind == "healthcare" else "publish"

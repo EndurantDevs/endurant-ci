@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+uv_directory=$(mktemp -d "$RUNNER_TEMP/uv-0.12.17.XXXXXX")
+cleanup() {
+  local status=$?
+  rm -f -- "$uv_directory/archive.tar.gz"
+  if [ "$status" -ne 0 ]; then rm -rf -- "$uv_directory"; fi
+  exit "$status"
+}
+trap cleanup EXIT
+curl --fail --location --retry 3 \
+  --output "$uv_directory/archive.tar.gz" \
+  https://github.com/astral-sh/uv/releases/download/0.12.17/uv-x86_64-unknown-linux-gnu.tar.gz
+printf '%s  %s\n' \
+  fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63 \
+  "$uv_directory/archive.tar.gz" | sha256sum --check --strict
+tar -xzf "$uv_directory/archive.tar.gz" -C "$uv_directory" --strip-components=1 \
+  uv-x86_64-unknown-linux-gnu/uv uv-x86_64-unknown-linux-gnu/uvx
+test "$("$uv_directory/uv" --version | awk '{print $2}')" = 0.12.17
+printf '%s\n' "$uv_directory" >> "$GITHUB_PATH"
