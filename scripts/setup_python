@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+test "$(uv --no-config --version | awk '{print $2}')" = 0.12.17
+python_directory=$(mktemp -d "$RUNNER_TEMP/uv-python.XXXXXX")
+cleanup() {
+  local status=$?
+  if [ "$status" -ne 0 ]; then rm -rf -- "$python_directory"; fi
+  exit "$status"
+}
+trap cleanup EXIT
+uv --no-config venv --managed-python --python 3.14.7 "$python_directory/venv"
+printf '%s\n' "$python_directory/venv/bin" >> "$GITHUB_PATH"
+printf 'VIRTUAL_ENV=%s\nUV_PYTHON_PREFERENCE=only-managed\n' "$python_directory/venv" >> "$GITHUB_ENV"

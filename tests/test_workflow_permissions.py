@@ -21,6 +21,7 @@ class PublicWorkflowPermissions(unittest.TestCase):
             if not action.startswith("./"):
                 self.assertRegex(action, r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$")
                 self.assertFalse(action.startswith("astral-sh/setup-uv@"))
+                self.assertFalse(action.startswith("actions/setup-python@"))
                 if action.startswith("actions/checkout@"):
                     self.assertEqual(step.get("with", {}).get("persist-credentials"), "false")
                 continue

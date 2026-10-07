@@ -141,8 +141,9 @@ require_python() {
 
 install() {
     test "$(uv --no-config --version | awk '{print $2}')" = "$UV_VERSION"
+    export UV_PROJECT_ENVIRONMENT="${VIRTUAL_ENV:?The uv-managed CI environment is required}"
     uv --no-config sync --locked --all-groups --python "$python_bin" --no-build --no-python-downloads
-    python_bin="$SOURCE_ROOT/.venv/bin/python"
+    python_bin="$UV_PROJECT_ENVIRONMENT/bin/python"
 }
 
 public_hygiene() {

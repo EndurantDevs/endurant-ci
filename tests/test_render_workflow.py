@@ -25,13 +25,15 @@ class RenderWorkflowChecks(unittest.TestCase):
             caller.write_text(yaml.safe_dump({
                 "on": {"push": {"branches": ["dev"]}},
                 "jobs": {"smoke": {"name": "portable import checks", "runs-on": "ubuntu-latest",
-                                    "steps": [{"name": "Install pinned uv", "run": "old bootstrap"}]}},
+                                    "steps": [{"name": "Install Python", "uses": "actions/setup-python@" + "a" * 40},
+                                              {"name": "Install pinned uv", "run": "old bootstrap"}]}},
             }))
             for kind in ("healthcare", "drug"):
                 workflow = yaml.safe_load(RENDERER.render_workflow(kind, "1" * 40, caller))
-                self.assertEqual(workflow["jobs"]["smoke"]["steps"], [{
-                    "name": "Install pinned uv", "run": (ROOT / "scripts/install_uv").read_text(),
-                }])
+                self.assertEqual(workflow["jobs"]["smoke"]["steps"], [
+                    {"name": "Install pinned uv", "run": (ROOT / "scripts/install_uv").read_text()},
+                    {"name": "Install uv-managed Python", "run": (ROOT / "scripts/setup_python").read_text()},
+                ])
 
     def test_flat_graph_keeps_every_gate_and_metadata_edits_have_separate_contexts(self):
         original = {"name": "CI", "on": {"pull_request": {"types": ["opened", "synchronize", "reopened", "edited"]},
@@ -103,6 +105,8 @@ class RenderWorkflowChecks(unittest.TestCase):
                                "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
                                "with": {"repository": "EndurantDevs/endurant-ci", "ref": "1" * 40,
                                         "path": "ci", "persist-credentials": False}},
+                              {"name": "Install pinned uv", "run": "bash ci/scripts/install_uv"},
+                              {"name": "Install uv-managed Python", "run": "bash ci/scripts/setup_python"},
                               {"name": "Remove validated CI intermediates",
                                "env": {"GH_TOKEN": "${{ github.token }}", "PYTHONDONTWRITEBYTECODE": "1",
                                        "IMAGE_ARTIFACT_ID": "${{ needs." + producer + ".outputs.image_artifact_id }}",
@@ -136,16 +140,16 @@ class RenderWorkflowChecks(unittest.TestCase):
                 self.assertEqual(publisher["outputs"], {"receipt_artifact_id": "${{ steps.receipt-artifact.outputs.artifact-id }}"})
                 self.assertEqual(publisher["steps"][0]["with"], {"repository": "EndurantDevs/endurant-ci", "ref": "1" * 40,
                                  "path": "ci", "persist-credentials": False})
-                self.assertNotIn("if", publisher["steps"][1])
-                self.assertEqual(publisher["steps"][1]["run"], "python3 ci/scripts/source_image.py prepare")
-                self.assertEqual(publisher["steps"][1]["env"], {"GH_TOKEN": "${{ github.token }}"})
+                self.assertNotIn("if", publisher["steps"][3])
+                self.assertEqual(publisher["steps"][3]["run"], "python3 ci/scripts/source_image.py prepare")
+                self.assertEqual(publisher["steps"][3]["env"], {"GH_TOKEN": "${{ github.token }}"})
                 steps = {step["name"]: step for step in publisher["steps"]}
                 self.assertEqual(len(steps), len(publisher["steps"]))
                 self.assertEqual(steps["Stage DEV image publication intent"]["run"], "python3 ci/scripts/source_image.py stage")
                 self.assertEqual(steps["Publish validated DEV image"]["run"], "python3 ci/scripts/source_image.py publish")
-                for step in publisher["steps"][2:-1]:
+                for step in publisher["steps"][4:-1]:
                     self.assertEqual(step["if"], "steps.image.outputs.publish == 'true'")
-                self.assertEqual(publisher["steps"][2]["with"], {"artifact-ids": "${{ steps.image.outputs.artifact_id }}",
+                self.assertEqual(publisher["steps"][4]["with"], {"artifact-ids": "${{ steps.image.outputs.artifact_id }}",
                     "digest-mismatch": "error", "path": "${{ runner.temp }}/public-image-download", "merge-multiple": True})
                 self.assertEqual(steps["Upload DEV image receipt"]["with"], {
                     "name": kind + "-public-image-${{ github.run_id }}-${{ github.run_attempt }}",

@@ -817,7 +817,8 @@ run_provider_profile_postgres postgresql://synthetic/original
         setup = (ROOT / "scripts/healthcare/setup/action.yml").read_text()
         check = (ROOT / "scripts/healthcare/check").read_text()
         installer = (ROOT / "scripts/healthcare/install_python_lock").read_text()
-        self.assertIn("actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97", setup)
+        self.assertNotIn("actions/setup-python@", setup)
+        self.assertIn("scripts/setup_python", setup)
         self.assertIn("scripts/install_uv", setup)
         self.assertIn("fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63",
                       (ROOT / "scripts/install_uv").read_text())

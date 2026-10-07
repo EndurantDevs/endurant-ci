@@ -11,6 +11,40 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class UvBootstrapTests(unittest.TestCase):
+    def test_managed_interpreter_environment_is_published_only_after_success(self):
+        for status in (0, 41):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                binaries = root / "bin"
+                binaries.mkdir()
+                runner = root / "runner"
+                runner.mkdir()
+                path_file, env_file, calls = (root / name for name in ("path", "env", "calls"))
+                path_file.touch()
+                env_file.touch()
+                uv = binaries / "uv"
+                uv.write_text('#!/bin/bash\n'
+                              'if [ "$2" = --version ]; then printf "uv 0.12.17\\n"; exit; fi\n'
+                              'printf "%s\\n" "$*" >> "$UV_CALLS"\n'
+                              'exit "$UV_STATUS"\n')
+                uv.chmod(0o755)
+                result = subprocess.run(
+                    ["bash", str(ROOT / "scripts/setup_python")],
+                    env={**os.environ, "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
+                         "RUNNER_TEMP": str(runner), "GITHUB_PATH": str(path_file),
+                         "GITHUB_ENV": str(env_file), "UV_CALLS": str(calls), "UV_STATUS": str(status)},
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertIn("--no-config venv --managed-python --python 3.14.7 ", calls.read_text())
+                if status:
+                    self.assertEqual(path_file.read_text() + env_file.read_text(), "")
+                    self.assertEqual(list(runner.iterdir()), [])
+                else:
+                    environment = next(runner.iterdir()) / "venv"
+                    self.assertEqual(path_file.read_text(), f"{environment}/bin\n")
+                    self.assertEqual(env_file.read_text(), f"VIRTUAL_ENV={environment}\nUV_PYTHON_PREFERENCE=only-managed\n")
+
     def test_corrupt_archive_fails_closed_and_cleans_its_directory(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -157,7 +157,9 @@ class PublicDrugTests(unittest.TestCase):
         self.assertIn("uv --no-config export --quiet --locked --all-groups", gate)
         self.assertIn("uv_lock_sha256=", gate)
         self.assertNotIn("-m pip install", gate)
-        self.assertIn("actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97", workflow)
+        self.assertNotIn("actions/setup-python@", workflow)
+        self.assertIn("scripts/setup_python", workflow)
+        self.assertIn('export UV_PROJECT_ENVIRONMENT="${VIRTUAL_ENV:', gate)
         self.assertIn("scripts/install_uv", workflow)
         self.assertIn("fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63",
                       (ROOT / "scripts/install_uv").read_text())
