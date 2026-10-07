@@ -818,9 +818,11 @@ run_provider_profile_postgres postgresql://synthetic/original
         check = (ROOT / "scripts/healthcare/check").read_text()
         installer = (ROOT / "scripts/healthcare/install_python_lock").read_text()
         self.assertIn("actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97", setup)
-        self.assertIn("astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d", setup)
-        self.assertIn("fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63", setup)
+        self.assertIn("scripts/install_uv", setup)
+        self.assertIn("fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63",
+                      (ROOT / "scripts/install_uv").read_text())
         self.assertNotIn("python -m pip", setup)
+        self.assertNotIn("astral-sh/setup-uv@", setup)
         generator = (ROOT / "scripts/healthcare/compile_python_lock").read_text()
         self.assertIn("uv --no-config venv --python 3.14.7", check)
         self.assertIn("uv --no-config pip sync", installer)

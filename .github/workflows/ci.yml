@@ -21,11 +21,7 @@ jobs:
         with:
           python-version: '3.14.7'
       - name: Install pinned uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
-        with:
-          version: '0.12.17'
-          checksum: fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63
-          enable-cache: false
+        run: bash scripts/install_uv
       - name: Install validation dependencies
         run: 'uv --no-config pip install --system --require-hashes --only-binary=:all: -r scripts/requirements-python-quality.lock'
       - name: Verify pinned Rust tool downloads on native Linux
@@ -43,7 +39,7 @@ jobs:
           python scripts/healthcare/test_measurement.py
       - name: Check shell syntax
         run: |
-          for script in scripts/phase_timing.sh scripts/drug/check scripts/healthcare/check scripts/healthcare/{compile,install}_python_lock; do
+          for script in scripts/install_uv scripts/phase_timing.sh scripts/drug/check scripts/healthcare/check scripts/healthcare/{compile,install}_python_lock; do
             bash -n "$script"
           done
       - name: Check workflow syntax

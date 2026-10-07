@@ -19,6 +19,20 @@ SPEC.loader.exec_module(RENDERER)
 
 
 class RenderWorkflowChecks(unittest.TestCase):
+    def test_uv_bootstrap_is_the_checksum_pinned_script_without_an_external_action(self):
+        with tempfile.TemporaryDirectory() as directory:
+            caller = Path(directory) / "ci.yml"
+            caller.write_text(yaml.safe_dump({
+                "on": {"push": {"branches": ["dev"]}},
+                "jobs": {"smoke": {"name": "portable import checks", "runs-on": "ubuntu-latest",
+                                    "steps": [{"name": "Install pinned uv", "run": "old bootstrap"}]}},
+            }))
+            for kind in ("healthcare", "drug"):
+                workflow = yaml.safe_load(RENDERER.render_workflow(kind, "1" * 40, caller))
+                self.assertEqual(workflow["jobs"]["smoke"]["steps"], [{
+                    "name": "Install pinned uv", "run": (ROOT / "scripts/install_uv").read_text(),
+                }])
+
     def test_flat_graph_keeps_every_gate_and_metadata_edits_have_separate_contexts(self):
         original = {"name": "CI", "on": {"pull_request": {"types": ["opened", "synchronize", "reopened", "edited"]},
                                           "push": {"branches": ["main"]}},

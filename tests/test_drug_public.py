@@ -158,9 +158,11 @@ class PublicDrugTests(unittest.TestCase):
         self.assertIn("uv_lock_sha256=", gate)
         self.assertNotIn("-m pip install", gate)
         self.assertIn("actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97", workflow)
-        self.assertIn("astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d", workflow)
-        self.assertIn("fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63", workflow)
+        self.assertIn("scripts/install_uv", workflow)
+        self.assertIn("fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63",
+                      (ROOT / "scripts/install_uv").read_text())
         self.assertNotIn("python -m pip", workflow)
+        self.assertNotIn("astral-sh/setup-uv@", workflow)
 
     def test_cleanup_verifies_absence_and_preserves_original_failure(self):
         source = (ROOT / "scripts/drug/check").read_text()
