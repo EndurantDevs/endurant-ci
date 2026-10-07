@@ -885,6 +885,19 @@ run_network_registry_postgres() {
     tests/test_network_membership_pipeline_postgres.py
     tests/test_network_serving_routes_postgres.py
     tests/test_registry_company_links_postgres.py
+    tests/test_manual_provider_identity_store_postgres.py
+    tests/test_manual_location_identity_store_postgres.py
+    tests/test_network_fhir_membership_source_postgres.py
+    tests/test_network_legacy_membership_source_postgres.py
+    tests/test_registry_management_permissions_postgres.py
+    tests/test_network_membership_draft_store_postgres.py
+    tests/test_registry_membership_approval_postgres.py
+    tests/test_network_approved_membership_source_postgres.py
+    tests/test_network_custom_address_source_postgres.py
+    tests/test_registry_publication_queue_postgres.py
+    tests/test_registry_publication_execution_postgres.py
+    tests/test_registry_publication_http_postgres.py
+    tests/test_registry_source_fetch.py
   )
   local feature_present=0
   local test_path
@@ -901,7 +914,7 @@ run_network_registry_postgres() {
   done
   test "$(rustc --version | awk '{print $2}')" = 1.98.1
   install_address_canon_wheel
-  python -c 'import asyncpg; import ptg2_address_canon as native; assert all(callable(getattr(native, name, None)) for name in ("encode_network_membership_batch", "encode_cms_mlr_observations", "validate_network_catalog_batch")), "Native registry extension is incomplete"'
+  python -c 'import asyncpg; import ptg2_address_canon as native; assert all(callable(getattr(native, name, None)) for name in ("encode_network_membership_batch", "encode_cms_mlr_observations", "validate_network_catalog_batch", "canonicalize_batch", "canon_version")), "Native registry extension is incomplete"'
   local database="hc_network_registry_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
   local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
   ci_phase_begin network-registry-postgres-tests
