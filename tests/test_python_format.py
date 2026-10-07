@@ -318,8 +318,10 @@ class PythonFormattingTests(unittest.TestCase):
                     _ruff_result([_diagnostic(row=1)]),
                 ],
             ) as run,
+            patch.object(FORMAT, "_check_source_style") as style,
         ):
             FORMAT._check_modified_file("ruff", "a" * 40, "b" * 40, "has space.py")
+        style.assert_called_once_with("ruff", "has space.py", b"\nimport unused\n")
         self.assertEqual(run.call_count, 2)
         self.assertEqual(
             run.call_args_list[0].args[0][-3:],
@@ -414,7 +416,7 @@ class PythonFormattingTests(unittest.TestCase):
         ):
             FORMAT._check_added_file("ruff", "b" * 40, "added.py")
         blob.assert_called_once_with("b" * 40, "added.py")
-        self.assertEqual(lint.call_args_list[0].kwargs["select"], None)
+        self.assertEqual(lint.call_args_list[0].kwargs.get("select"), None)
         self.assertEqual(lint.call_args_list[1].kwargs["select"], "I")
         format_check.assert_called_once_with("ruff", "added.py", source)
 

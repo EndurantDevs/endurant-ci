@@ -630,7 +630,6 @@ commit_message_policy() { printf 'commit policy\n'; }
 prepare_python_environment() { printf 'quality environment\n'; }
 install_python_dependencies() { printf 'runtime dependencies\n'; return 17; }
 uv() { printf 'uv %s\n' "$*"; }
-pylint() { printf 'pylint %s\n' "$*"; }
 python() { printf 'python %s\n' "$*"; }
 run_quality
 '''
@@ -671,14 +670,14 @@ run_quality
             environment = {**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT)}
             script = CHECK_FUNCTIONS + r'''
 install_python_dependencies() { printf 'runtime dependencies\n'; }
-run_python_inference() { printf 'runtime-aware Pylint inference\n'; }
+run_runtime_contracts() { printf 'runtime import contracts\n'; }
 python() { printf 'python %s\n' "$*"; }
 timeout() { printf 'timeout %s\n' "$*"; }
 run_api_contract
 '''
             result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        for retained in ("runtime dependencies", "runtime-aware Pylint inference", "provider_directory_runtime_contract.py",
+        for retained in ("runtime dependencies", "runtime import contracts", "provider_directory_runtime_contract.py",
                          "generate_provider_directory_support_docs.py --check", "tests/test_openapi_spec.py",
                          "tests/test_formulary_fhir_openapi.py", "tests/test_api_init_and_utils.py", "tests/test_healthcheck.py"):
             self.assertIn(retained, result.stdout)
@@ -690,53 +689,20 @@ run_api_contract
         self.assertNotIn("test_coverage_forecast.py", main)
         self.assertIn("--ci-shard-count 4", main)
 
-    def test_inference_environment_creation_failure_keeps_runtime_and_cleans_its_child(self):
+    def test_runtime_contract_modules_fail_closed_without_creating_a_tool_environment(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source = root / "source"
-            source.mkdir()
-            runtime = root / "runtime"
-            runtime.mkdir()
-            environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
-                           "RUNNER_TEMP": str(root), "VIRTUAL_ENV": str(runtime)}
-            script = CHECK_FUNCTIONS + '\nuv() { return 19; }\nrun_python_inference\n'
-            result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 19, result.stderr)
-            self.assertEqual(set(root.iterdir()), {source, runtime})
-        self.assertIn("sys.path.extend", CHECK_FUNCTIONS)
-        self.assertIn("orjson.quality_probe_missing_member", CHECK_FUNCTIONS)
-        self.assertIn("client.quality_probe_missing_member", CHECK_FUNCTIONS)
-        probe_segment = CHECK_FUNCTIONS.split("probe_output=", 1)[1].split('[[ "$probe_status"', 1)[0]
-        self.assertIn("--enable=no-member", probe_segment)
-        self.assertNotIn("--enable=no-member", CHECK_FUNCTIONS.split('[[ "$probe_status"', 1)[1])
-        self.assertIn("Pylint runtime dependency inference canary failed (status %s)", CHECK_FUNCTIONS)
-        self.assertIn(
-            '"$inference_root/venv/bin/pylint" --errors-only --init-hook "$runtime_hook" "${inference_targets[@]}"',
-            CHECK_FUNCTIONS,
-        )
-
-    def test_inference_targets_fail_closed_before_running_pylint(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source = root / "source"
-            source.mkdir()
-            environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT), "RUNNER_TEMP": str(root)}
-            script = CHECK_FUNCTIONS + r'''
-uv() { :; }
-run_python_inference
-'''
+            source = Path(temporary)
+            environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT)}
             result = subprocess.run(
-                ["bash", "-euc", script],
-                check=False,
-                cwd=source,
-                env=environment,
-                capture_output=True,
-                text=True,
+                ["bash", "-euc", CHECK_FUNCTIONS + "\nrun_runtime_contracts\n"],
+                cwd=source, env=environment, capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 2, result.stderr)
-            self.assertIn("Pylint inference target is missing: api/billing_search_selector_contract.py", result.stderr)
-            self.assertEqual(set(root.iterdir()), {source})
-        self.assertNotIn("process/fhir_request_failure_policy.py", CHECK_FUNCTIONS)
+            self.assertIn("Runtime contract module is missing: api.billing_search_selector_contract", result.stderr)
+            self.assertEqual(list(source.iterdir()), [])
+        self.assertIn("--member aiohttp.client:ClientSession --member orjson:loads --member orjson:dumps", CHECK_FUNCTIONS)
+        self.assertIn("runtime_imports.py", CHECK_FUNCTIONS)
+        self.assertNotIn("pylint", CHECK_FUNCTIONS)
 
     def test_state_profile_native_selection_is_source_aware_and_has_database_dsn(self):
         profile_paths = (
@@ -852,13 +818,9 @@ run_provider_profile_postgres postgresql://synthetic/original
         check = (ROOT / "scripts/healthcare/check").read_text()
         installer = (ROOT / "scripts/healthcare/install_python_lock").read_text()
         self.assertIn("actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97", setup)
-        self.assertIn("--only-binary=:all: --require-hashes -r /dev/stdin", setup)
-        self.assertIn(
-            "uv==0.12.17 --hash=sha256:9e25bb39e1674799c408345a6397ebc2"
-            "c7c719d498be0ce9d935466d36ceacf5",
-            setup,
-        )
-        self.assertNotIn("astral-sh/setup-uv@", setup)
+        self.assertIn("astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d", setup)
+        self.assertIn("fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63", setup)
+        self.assertNotIn("python -m pip", setup)
         generator = (ROOT / "scripts/healthcare/compile_python_lock").read_text()
         self.assertIn("uv --no-config venv --python 3.14.7", check)
         self.assertIn("uv --no-config pip sync", installer)
@@ -1015,9 +977,9 @@ run_provider_profile_postgres postgresql://synthetic/original
             helper.mkdir()
             verifier = helper / "verify_python_requirements.py"
             verifier.write_text(verifier_source.read_text(encoding="utf-8"), encoding="utf-8")
-            version = metadata.version("pip")
+            version = metadata.version("packaging")
             (source / "requirements.txt").write_text(
-                f"pip=={version}\n", encoding="utf-8"
+                f"packaging=={version}\n", encoding="utf-8"
             )
             (source / "requirements-dev.txt").write_text(
                 "-r requirements.txt\n", encoding="utf-8"
@@ -1026,7 +988,7 @@ run_provider_profile_postgres postgresql://synthetic/original
                 "-r requirements-dev.txt\n", encoding="utf-8"
             )
             (source / "requirements-ci.lock").write_text(
-                f"pip=={version}\n", encoding="utf-8"
+                f"packaging=={version}\n", encoding="utf-8"
             )
             marker = root / "source-imported"
             (source / "sitecustomize.py").write_text(
@@ -1043,10 +1005,10 @@ run_provider_profile_postgres postgresql://synthetic/original
                 "Path(os.environ['IMPORT_MARKER']).write_text('unexpected', encoding='utf-8')\n",
                 encoding="utf-8",
             )
-            fake_metadata = source / "pip-999.0.dist-info"
+            fake_metadata = source / "packaging-999.0.dist-info"
             fake_metadata.mkdir()
             (fake_metadata / "METADATA").write_text(
-                "Metadata-Version: 2.1\nName: pip\nVersion: 999.0\n",
+                "Metadata-Version: 2.1\nName: packaging\nVersion: 999.0\n",
                 encoding="utf-8",
             )
 

@@ -167,8 +167,10 @@ quality() {
     "$python_bin" -m ruff check --no-cache --select E9,F api db process scripts tests main.py
     "$python_bin" -m ruff check --no-cache --select I api db process tests main.py
     "$python_bin" "$CI_ROOT/scripts/python_format.py" "$(base_sha)"
-    "$python_bin" -m pylint --errors-only api db process main.py
-    "$python_bin" -m pylint --source-roots=. --errors-only --disable=no-member tests
+    "$python_bin" "$CI_ROOT/scripts/runtime_imports.py" --source "$SOURCE_ROOT" \
+        --member httpx:AsyncClient --member msgpack:packb \
+        api.endpoint.healthcheck api.endpoint.drug db.connection db.models \
+        process.ndc_product process.label process.drug_indications
     "$python_bin" -m compileall api process db scripts main.py
     "$python_bin" scripts/readability_budget.py "${readability_arguments[@]}"
     "$python_bin" scripts/ci/request_time_external_call_guard.py
