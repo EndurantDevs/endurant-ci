@@ -410,7 +410,19 @@ run_rust() {
     ci_phase_end
   )
   ci_phase_begin rust-wheel-tests
-  timeout --foreground 295s python -m pytest -q tests/test_address_canon_pyo3.py
+  local wheel_tests=(tests/test_address_canon_pyo3.py)
+  if [ -f "$repository_root/tests/test_custom_import_scalar_digest.py" ]; then
+    python - <<'PY'
+import inspect
+import ptg2_address_canon
+
+encoder = getattr(ptg2_address_canon, "custom_import_scalar_frames_v1", None)
+if not callable(encoder) or not inspect.isbuiltin(encoder):
+    raise SystemExit("installed wheel does not provide compiled scalar framing")
+PY
+    wheel_tests+=(tests/test_custom_import_scalar_digest.py)
+  fi
+  timeout --foreground 295s python -m pytest -q "${wheel_tests[@]}"
   ci_phase_end
   (
     local tmp
