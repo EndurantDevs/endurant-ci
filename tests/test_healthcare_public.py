@@ -814,7 +814,7 @@ run_quality
             environment = {**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT)}
             script = CHECK_FUNCTIONS + r'''
 install_python_dependencies() { printf 'runtime dependencies\n'; }
-run_python_inference() { printf 'runtime-aware Pylint inference\n'; }
+run_python_inference() { printf 'runtime-aware native inference\n'; }
 run_runtime_contracts() { printf 'runtime import contracts\n'; }
 python() { printf 'python %s\n' "$*"; }
 timeout() { printf 'timeout %s\n' "$*"; }
@@ -822,13 +822,13 @@ run_api_contract
 '''
             result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        for retained in ("runtime dependencies", "runtime-aware Pylint inference", "runtime import contracts",
+        for retained in ("runtime dependencies", "runtime-aware native inference", "runtime import contracts",
                          "provider_directory_runtime_contract.py",
                          "generate_provider_directory_support_docs.py --check", "tests/test_openapi_spec.py",
                          "tests/test_formulary_fhir_openapi.py", "tests/test_api_init_and_utils.py", "tests/test_healthcheck.py"):
             self.assertIn(retained, result.stdout)
-        self.assertLess(result.stdout.index("runtime dependencies"), result.stdout.index("runtime-aware Pylint inference"))
-        self.assertLess(result.stdout.index("runtime-aware Pylint inference"), result.stdout.index("runtime import contracts"))
+        self.assertLess(result.stdout.index("runtime dependencies"), result.stdout.index("runtime-aware native inference"))
+        self.assertLess(result.stdout.index("runtime-aware native inference"), result.stdout.index("runtime import contracts"))
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         self.assertIn("measurement", workflow["jobs"]["source-validation"]["needs"])
         self.assertIn("readability-preflight", workflow["jobs"]["measurement"]["needs"])
@@ -853,7 +853,10 @@ run_api_contract
 
     def test_inference_environment_creation_failure_keeps_runtime_and_cleans_its_child(self):
         for filename in ("requirements-python-quality.in", "requirements-python-quality.lock"):
-            self.assertIn("pylint==4.0.8", (ROOT / "scripts" / filename).read_text())
+            content = (ROOT / "scripts" / filename).read_text()
+            self.assertIn("ty==0.0.85", content)
+            for removed in ("pylint==", "astroid==", "isort=="):
+                self.assertNotIn(removed, content)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "source"
@@ -866,40 +869,144 @@ run_api_contract
             result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
             self.assertEqual(result.returncode, 19, result.stderr)
             self.assertEqual(set(root.iterdir()), {source, runtime})
-        self.assertIn("sys.path.extend", CHECK_FUNCTIONS)
+        self.assertNotIn("sys.path.extend", CHECK_FUNCTIONS)
         self.assertIn("orjson.quality_probe_missing_member", CHECK_FUNCTIONS)
         self.assertIn("client.quality_probe_missing_member", CHECK_FUNCTIONS)
-        probe_segment = CHECK_FUNCTIONS.split("probe_output=", 1)[1].split('[[ "$probe_status"', 1)[0]
-        self.assertIn("--enable=no-member", probe_segment)
-        self.assertNotIn("--enable=no-member", CHECK_FUNCTIONS.split('[[ "$probe_status"', 1)[1])
-        self.assertIn("Pylint runtime dependency inference canary failed (status %s)", CHECK_FUNCTIONS)
-        self.assertIn(
-            '"$inference_root/venv/bin/pylint" --errors-only --init-hook "$runtime_hook" "${inference_targets[@]}"',
-            CHECK_FUNCTIONS,
-        )
+        self.assertIn('runtime_python=$(command -v python)', CHECK_FUNCTIONS)
+        self.assertIn('--python "$runtime_python"', CHECK_FUNCTIONS)
+        self.assertIn("--config-file /dev/null", CHECK_FUNCTIONS)
+        self.assertIn("--require-hashes --only-binary=:all:", CHECK_FUNCTIONS)
+        self.assertIn("Python runtime dependency inference canary failed (status %s)", CHECK_FUNCTIONS)
+        self.assertNotIn("pylint", CHECK_FUNCTIONS)
+        self.assertIn("ANN201,ANN202,ANN204,ANN205,ANN206", CHECK_FUNCTIONS)
+        self.assertIn("lint.flake8-annotations.suppress-none-returning=false", CHECK_FUNCTIONS)
 
-    def test_inference_targets_fail_closed_before_running_pylint(self):
+    def test_inference_hashed_install_failure_cleans_only_its_child(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, runtime = root / "source", root / "runtime"
+            source.mkdir()
+            runtime.mkdir()
+            marker = runtime / "preserved"
+            marker.write_text("runtime state")
+            environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                           "RUNNER_TEMP": str(root), "VIRTUAL_ENV": str(runtime)}
+            script = CHECK_FUNCTIONS + r'''
+uv() {
+  if [[ "$*" = *" venv "* ]]; then
+    local last
+    for last; do :; done
+    mkdir -p "$last"
+  else
+    return 23
+  fi
+}
+run_python_inference
+'''
+            result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 23, result.stderr)
+            self.assertEqual(set(root.iterdir()), {source, runtime})
+            self.assertEqual(marker.read_text(), "runtime state")
+
+    def test_inference_targets_fail_closed_before_running_native_tools(self):
+        targets = CHECK_FUNCTIONS.split("local -a inference_targets=(", 1)[1].split("  )", 1)[0].split()
+        modules = CHECK_FUNCTIONS.split("local -a modules=(", 1)[1].split("  )", 1)[0].split()
+        self.assertEqual(len(targets), 11)
+        self.assertEqual(set(targets), {module.replace(".", "/") + ".py" for module in modules})
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "source"
             source.mkdir()
+            for target in targets:
+                path = source / target
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
             environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT), "RUNNER_TEMP": str(root)}
             script = CHECK_FUNCTIONS + r'''
 uv() { :; }
 run_python_inference
 '''
-            result = subprocess.run(
-                ["bash", "-euc", script],
-                check=False,
-                cwd=source,
-                env=environment,
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(result.returncode, 2, result.stderr)
-            self.assertIn("Pylint inference target is missing: api/billing_search_selector_contract.py", result.stderr)
-            self.assertEqual(set(root.iterdir()), {source})
+            for target in targets:
+                with self.subTest(target=target):
+                    (source / target).unlink()
+                    result = subprocess.run(
+                        ["bash", "-euc", script],
+                        check=False,
+                        cwd=source,
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn(f"Python inference target is missing: {target}", result.stderr)
+                    self.assertEqual(set(root.iterdir()), {source})
+                    (source / target).touch()
         self.assertNotIn("process/fhir_request_failure_policy.py", CHECK_FUNCTIONS)
+
+    def test_native_inference_rejects_invalid_operations(self):
+        cases = (
+            ("result = -'value'\n", "unsupported-operator"),
+            ("class Box: pass\nBox().missing_member\n", "unresolved-attribute"),
+            ("from pathlib import definitely_missing_name\n", "unresolved-import"),
+            ("def target(value): return value\ntarget()\n", "missing-argument"),
+            ("def target(**values): return values\ntarget(**42)\n", "invalid-argument-type"),
+            ("for value in 42: pass\n", "not-iterable"),
+            ("value = 42\nvalue()\n", "call-non-callable"),
+            ("def target(value): return value\ntarget(value=1, **{'value': 2})\n", "parameter-already-assigned"),
+            ("def target(value): return value\ntarget(1, 2)\n", "too-many-positional-arguments"),
+            ("def target(value): return value\ntarget(value=1, missing=2)\n", "unknown-argument"),
+            ("value = 42\nresult = value[0]\n", "not-subscriptable"),
+            ("value = (1, 2)\nvalue[0] = 3\n", "invalid-assignment"),
+            ("result = 1 + 'value'\n", "unsupported-operator"),
+            ("value = (1, 2)\ndel value[0]\n", "not-subscriptable"),
+            ("result = 1 in 42\n", "unsupported-operator"),
+        )
+        ty = Path(sys.executable).with_name("ty")
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "synthetic_contract.py"
+            for content, rule in cases:
+                with self.subTest(rule=rule, content=content):
+                    source.write_text(content)
+                    result = subprocess.run(
+                        [str(ty), "check", "--config-file", os.devnull, "--python", sys.executable,
+                         "--output-format", "concise", "--no-progress", str(source)],
+                        capture_output=True, text=True,
+                    )
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn(f"[{rule}]", result.stdout)
+
+    def test_native_none_assignment_policy_and_return_guard(self):
+        ty, ruff = (Path(sys.executable).with_name(name) for name in ("ty", "ruff"))
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "synthetic_contract.py"
+            content = "def bare(): pass\ndef annotated() -> None: pass\na = bare()\nb = annotated()\n"
+            source.write_text(content)
+            ty_command = [str(ty), "check", "--config-file", os.devnull, "--python", sys.executable,
+                          "--output-format", "concise", "--no-progress", str(source)]
+            result = subprocess.run(ty_command, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            source.write_text(content + "value = b[0]\n")
+            result = subprocess.run(ty_command, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("[not-subscriptable]", result.stdout)
+            source.write_text("""def public(): pass  # noqa: ANN201
+def _private(): pass
+class Box:
+    def __init__(self): pass
+    @staticmethod
+    def static(): pass
+    @classmethod
+    def class_method(cls): pass
+""")
+            result = subprocess.run(
+                [str(ruff), "check", "--isolated", "--no-cache", "--ignore-noqa", "--select",
+                 "ANN201,ANN202,ANN204,ANN205,ANN206", "--config",
+                 "lint.flake8-annotations.suppress-none-returning=false", str(source)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            for rule in ("ANN201", "ANN202", "ANN204", "ANN205", "ANN206"):
+                self.assertIn(rule, result.stdout)
 
     def test_state_profile_native_selection_is_source_aware_and_has_database_dsn(self):
         profile_paths = (
