@@ -57,12 +57,15 @@ class HealthcarePublicChecks(unittest.TestCase):
             "test_registry_source_site_http",
             "test_registry_planfinder_admission",
             "test_company_network_link_store",
+            "test_network_source_binding_schema", "test_network_source_binding_store",
+            "test_registry_network_binding_approval", "test_registry_source_binding_http",
         ))
         paths += ("tests/test_registry_source_fetch.py",)
         self.assertEqual(len(paths), len(set(paths)))
         exports = (
             "encode_network_membership_batch", "encode_cms_mlr_observations", "encode_cms_planfinder_observations",
             "validate_network_catalog_batch", "validate_company_network_assertions",
+            "encode_network_source_binding_batch", "build_registry_network_coverage", "parse_registry_target_ledger",
             "canonicalize_batch", "canon_version",
         )
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
