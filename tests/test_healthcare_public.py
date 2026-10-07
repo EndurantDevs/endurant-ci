@@ -43,8 +43,21 @@ class HealthcarePublicChecks(unittest.TestCase):
             "test_network_address_read_scope", "test_registry_source_import",
             "test_network_membership_pipeline", "test_network_serving_routes",
             "test_registry_company_links",
+            "test_manual_provider_identity_store", "test_manual_location_identity_store",
+            "test_network_fhir_membership_source",
+            "test_network_legacy_membership_source",
+            "test_registry_management_permissions", "test_network_membership_draft_store",
+            "test_registry_membership_approval",
+            "test_network_approved_membership_source", "test_network_custom_address_source",
+            "test_registry_publication_queue", "test_registry_publication_execution",
+            "test_registry_publication_http",
         ))
-        exports = ("encode_network_membership_batch", "encode_cms_mlr_observations", "validate_network_catalog_batch")
+        paths += ("tests/test_registry_source_fetch.py",)
+        self.assertEqual(len(paths), len(set(paths)))
+        exports = (
+            "encode_network_membership_batch", "encode_cms_mlr_observations", "validate_network_catalog_batch",
+            "canonicalize_batch", "canon_version",
+        )
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         setup = next(step for step in workflow["jobs"]["address-canonical-db-tests"]["steps"]
                      if step["name"] == "Prepare source and toolchain")
