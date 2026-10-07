@@ -918,6 +918,9 @@ run_network_registry_postgres() (
     tests/test_network_source_binding_store_postgres.py
     tests/test_registry_network_binding_approval_postgres.py
     tests/test_registry_source_binding_http_postgres.py
+    tests/test_network_approved_source_bindings_postgres.py
+    tests/test_provider_directory_insurance_network_batch_postgres.py
+    tests/test_provider_directory_cms_network_batch_postgres.py
     tests/test_registry_source_fetch.py
   )
   local feature_present=0
@@ -935,7 +938,7 @@ run_network_registry_postgres() (
   done
   test "$(rustc --version | awk '{print $2}')" = 1.98.1
   install_address_canon_wheel
-  python -c 'import asyncpg; import ptg2_address_canon as native; assert all(callable(getattr(native, name, None)) for name in ("encode_network_membership_batch", "encode_cms_mlr_observations", "encode_cms_planfinder_observations", "validate_network_catalog_batch", "validate_company_network_assertions", "encode_network_source_binding_batch", "build_registry_network_coverage", "parse_registry_target_ledger", "canonicalize_batch", "canon_version")), "Native registry extension is incomplete"'
+  python -c 'import asyncpg; import ptg2_address_canon as native; assert all(callable(getattr(native, name, None)) for name in ("encode_network_membership_batch", "encode_cms_mlr_observations", "encode_cms_planfinder_observations", "validate_network_catalog_batch", "validate_company_network_assertions", "encode_network_source_binding_batch", "build_registry_network_coverage", "parse_registry_target_ledger", "extract_fhir_network_identity_batch", "encode_fhir_network_identity_batch", "canonicalize_batch", "canon_version")), "Native registry extension is incomplete"'
   registry_report=""
   cleanup_registry_report() {
     local status=$?
@@ -959,9 +962,10 @@ import pathlib
 import sys
 import xml.etree.ElementTree as ET
 
-path = pathlib.Path(sys.argv[1])
-assert 0 < path.stat().st_size <= 16 * 1024 * 1024, "Native registry report is missing or oversized"
-root = ET.parse(path).getroot()
+with pathlib.Path(sys.argv[1]).open("rb") as report:
+    document = report.read(16 * 1024 * 1024 + 1)
+assert 0 < len(document) <= 16 * 1024 * 1024, "Native registry report is missing or oversized"
+root = ET.fromstring(document)
 assert root.tag in ("testsuite", "testsuites"), "Native registry report has an invalid root"
 suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
 assert suites, "Native registry report has no suites"
