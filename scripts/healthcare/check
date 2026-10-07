@@ -914,6 +914,10 @@ run_network_registry_postgres() (
     tests/test_registry_source_site_http_postgres.py
     tests/test_registry_planfinder_admission_postgres.py
     tests/test_company_network_link_store_postgres.py
+    tests/test_network_source_binding_schema_postgres.py
+    tests/test_network_source_binding_store_postgres.py
+    tests/test_registry_network_binding_approval_postgres.py
+    tests/test_registry_source_binding_http_postgres.py
     tests/test_registry_source_fetch.py
   )
   local feature_present=0
@@ -931,7 +935,7 @@ run_network_registry_postgres() (
   done
   test "$(rustc --version | awk '{print $2}')" = 1.98.1
   install_address_canon_wheel
-  python -c 'import asyncpg; import ptg2_address_canon as native; assert all(callable(getattr(native, name, None)) for name in ("encode_network_membership_batch", "encode_cms_mlr_observations", "encode_cms_planfinder_observations", "validate_network_catalog_batch", "validate_company_network_assertions", "canonicalize_batch", "canon_version")), "Native registry extension is incomplete"'
+  python -c 'import asyncpg; import ptg2_address_canon as native; assert all(callable(getattr(native, name, None)) for name in ("encode_network_membership_batch", "encode_cms_mlr_observations", "encode_cms_planfinder_observations", "validate_network_catalog_batch", "validate_company_network_assertions", "encode_network_source_binding_batch", "build_registry_network_coverage", "parse_registry_target_ledger", "canonicalize_batch", "canon_version")), "Native registry extension is incomplete"'
   registry_report=""
   cleanup_registry_report() {
     local status=$?
