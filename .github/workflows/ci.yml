@@ -21,6 +21,8 @@ jobs:
         run: bash scripts/install_uv
       - name: Install uv-managed Python
         run: bash scripts/setup_python
+      - name: Verify managed Python shared library
+        run: python -c 'import ctypes, sysconfig; ctypes.CDLL(sysconfig.get_config_var("LDLIBRARY"))'
       - name: Install validation dependencies
         run: 'uv --no-config pip install --require-hashes --only-binary=:all: -r scripts/requirements-python-quality.lock'
       - name: Verify pinned Rust tool downloads on native Linux

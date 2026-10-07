@@ -10,5 +10,8 @@ cleanup() {
 }
 trap cleanup EXIT
 uv --no-config venv --managed-python --python 3.14.7 "$python_directory/venv"
+python_library=$("$python_directory/venv/bin/python" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')
+test -d "$python_library"
 printf '%s\n' "$python_directory/venv/bin" >> "$GITHUB_PATH"
 printf 'VIRTUAL_ENV=%s\nUV_PYTHON_PREFERENCE=only-managed\n' "$python_directory/venv" >> "$GITHUB_ENV"
+printf 'LD_LIBRARY_PATH=%s%s\n' "$python_library" "${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
