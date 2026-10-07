@@ -153,7 +153,9 @@ def render_workflow(kind, revision, caller):
         if condition.startswith(GUARD) and condition.endswith(")"):
             condition = condition[len(GUARD):-1]
         # Required checks must exist in the latest PR suite, including metadata edits.
-        metadata_required = job_id == "smoke" or (kind == "healthcare" and job_id == "source-validation")
+        metadata_required = job_id == "smoke" or (kind, job_id) in {
+            ("healthcare", "source-validation"), ("drug", "publish"),
+        }
         if metadata_required:
             job["name"] = label
             job["if"] = "${{ " + condition + " }}"

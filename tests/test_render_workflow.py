@@ -58,7 +58,9 @@ class RenderWorkflowChecks(unittest.TestCase):
                             continue  # Its complete privilege and execution contract is checked below.
                         template = original["jobs"][job_id] if job_id == "smoke" else canonical["jobs"][job_id]
                         expected = json.loads(json.dumps(template).replace("${{ inputs.ci_revision }}", "1" * 40))
-                        metadata_required = job_id == "smoke" or (kind == "healthcare" and job_id == "source-validation")
+                        metadata_required = job_id == "smoke" or (kind, job_id) in {
+                            ("healthcare", "source-validation"), ("drug", "publish"),
+                        }
                         if not metadata_required:
                             expected["name"] = RENDERER.job_name(expected["name"], job_id)
                         condition = expected.get("if", "success()").removeprefix("${{").removesuffix("}}").strip()
@@ -186,12 +188,33 @@ class RenderWorkflowChecks(unittest.TestCase):
                     self.assertEqual(workflow["permissions"], {"contents": "read", "pull-requests": "read", "actions": "read"})
                     self.assertIn("CI metadata update", workflow["run-name"])
                     for job_id, job in workflow["jobs"].items():
-                        metadata_required = job_id == "smoke" or (kind == "healthcare" and job_id == "source-validation")
+                        metadata_required = job_id == "smoke" or (kind, job_id) in {
+                            ("healthcare", "source-validation"), ("drug", "publish"),
+                        }
                         if not metadata_required:
                             self.assertIn(RENDERER.GUARD, job["if"])
                             self.assertIn("(metadata only)", job["name"])
                     caller.write_text(rendered)
                     self.assertEqual(RENDERER.render_workflow(kind, "1" * 40, caller), rendered)
+
+    def test_drug_metadata_edits_keep_required_coverage_context_without_bypassing_validation(self):
+        original = {"name": "CI", "on": {"pull_request": {}},
+                    "jobs": {"smoke": {"name": "portable import checks", "runs-on": "ubuntu-latest",
+                                       "steps": [{"run": "echo synthetic"}]}}}
+        with tempfile.TemporaryDirectory() as temporary:
+            caller = Path(temporary) / "ci.yml"
+            caller.write_text(yaml.safe_dump(original))
+            workflow = yaml.safe_load(RENDERER.render_workflow("drug", "1" * 40, caller))
+        jobs = workflow["jobs"]
+        required_contexts = {"portable import checks", "Coverage results"}
+        self.assertTrue(required_contexts <= {job["name"] for job in jobs.values()})
+        self.assertEqual(jobs["publish"]["name"], "Coverage results")
+        self.assertEqual(jobs["publish"]["needs"], "validate")
+        self.assertEqual(jobs["publish"]["if"], "${{ success() }}")
+        self.assertNotIn("continue-on-error", jobs["publish"])
+        self.assertEqual(jobs["validate"]["if"], "${{ " + RENDERER.GUARD + "success()) }}")
+        self.assertEqual(jobs["dev-image-publication"]["needs"], ["smoke", "publish", "validate"])
+        self.assertEqual(jobs["dev-image-publication"]["if"], "${{ " + RENDERER.GUARD + "success()) }}")
 
     def test_healthcare_metadata_edits_keep_required_validation_context(self):
         original = {"name": "CI", "on": {"pull_request": {}},
