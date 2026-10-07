@@ -1,4 +1,4 @@
-"""Enforce new Ruff diagnostics plus full formatting for added Python files."""
+"""Enforce new Ruff diagnostics and formatting/import order on changed Python files."""
 
 import hashlib
 import json
@@ -190,7 +190,10 @@ def _reviewed_ruff_version_update(before: dict | None, after: dict | None) -> bo
     if not isinstance(before, dict) or not isinstance(after, dict):
         return False
     previous, current = dict(before), dict(after)
-    versions = (previous.pop("required-version", None), current.pop("required-version", None))
+    versions = (
+        previous.pop("required-version", None),
+        current.pop("required-version", None),
+    )
     return versions == ("==0.16.6", "==0.16.8") and previous == current
 
 
@@ -223,9 +226,7 @@ def _approved_ruff_configuration_baseline(base: str, head: str) -> bool:
             continue
         before = _source_if_present(base, path)
         after = _source_if_present(head, path)
-        if any(
-            _has_ruff_pyproject_settings(content) for content in (before, after)
-        ):
+        if any(_has_ruff_pyproject_settings(content) for content in (before, after)):
             changes.append((path, before, after))
     if len(changes) != 1:
         return False
@@ -388,6 +389,7 @@ def _check_modified_file(ruff: str, base: str, head: str, path: str) -> None:
     diagnostics = _new_diagnostics(current, current_source, baseline, baseline_source)
     if diagnostics:
         _fail_for_new_diagnostics(ruff, path, diagnostics)
+    _check_source_style(ruff, path, current_source)
 
 
 def _format_added_source(ruff: str, path: str, source: bytes) -> None:
@@ -421,15 +423,22 @@ def _format_added_source(ruff: str, path: str, source: bytes) -> None:
         )
 
 
+def _check_source_style(ruff: str, path: str, source: bytes) -> None:
+    """Require changed source to have sorted imports and match the pinned formatter."""
+    diagnostics = _ruff_json_diagnostics(ruff, path, source, select="I")
+    if diagnostics:
+        _fail_for_new_diagnostics(ruff, path, diagnostics)
+    _format_added_source(ruff, path, source)
+
+
 def _check_added_file(ruff: str, head: str, path: str) -> None:
     """Apply default lint, import-order lint, and format checks to one new source blob."""
 
     source = _source_at_revision(head, path)
-    for select in (None, "I"):
-        diagnostics = _ruff_json_diagnostics(ruff, path, source, select=select)
-        if diagnostics:
-            _fail_for_new_diagnostics(ruff, path, diagnostics)
-    _format_added_source(ruff, path, source)
+    diagnostics = _ruff_json_diagnostics(ruff, path, source)
+    if diagnostics:
+        _fail_for_new_diagnostics(ruff, path, diagnostics)
+    _check_source_style(ruff, path, source)
 
 
 def check_changed_files(base: str) -> None:

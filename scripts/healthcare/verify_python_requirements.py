@@ -8,16 +8,9 @@ from collections.abc import Callable
 from importlib import metadata
 from pathlib import Path
 
-try:
-    from packaging.markers import default_environment
-    from packaging.requirements import InvalidRequirement, Requirement
-    from packaging.utils import canonicalize_name
-except ModuleNotFoundError as error:
-    if error.name != "packaging":
-        raise
-    from pip._vendor.packaging.markers import default_environment
-    from pip._vendor.packaging.requirements import InvalidRequirement, Requirement
-    from pip._vendor.packaging.utils import canonicalize_name
+from packaging.markers import default_environment
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
 
 INPUT_NAMES = ("requirements.txt", "requirements-dev.txt", "requirements-ci.in")
 

@@ -158,13 +158,9 @@ class PublicDrugTests(unittest.TestCase):
         self.assertIn("uv_lock_sha256=", gate)
         self.assertNotIn("-m pip install", gate)
         self.assertIn("actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97", workflow)
-        self.assertIn("--only-binary=:all: --require-hashes -r /dev/stdin", workflow)
-        self.assertIn(
-            "uv==0.12.17 --hash=sha256:9e25bb39e1674799c408345a6397ebc2"
-            "c7c719d498be0ce9d935466d36ceacf5",
-            workflow,
-        )
-        self.assertNotIn("astral-sh/setup-uv@", workflow)
+        self.assertIn("astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d", workflow)
+        self.assertIn("fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63", workflow)
+        self.assertNotIn("python -m pip", workflow)
 
     def test_cleanup_verifies_absence_and_preserves_original_failure(self):
         source = (ROOT / "scripts/drug/check").read_text()
@@ -347,8 +343,9 @@ docker() {
         gate = (ROOT / "scripts/drug/check").read_text()
         self.assertIn("-m ruff check --no-cache --select E9,F api db process scripts tests main.py", gate)
         self.assertIn("-m ruff check --no-cache --select I api db process tests main.py", gate)
-        self.assertIn("-m pylint --errors-only api db process main.py", gate)
-        self.assertIn("-m pylint --source-roots=. --errors-only --disable=no-member tests", gate)
+        self.assertIn("runtime_imports.py", gate)
+        self.assertIn("--member httpx:AsyncClient --member msgpack:packb", gate)
+        self.assertNotIn("-m pylint", gate)
         self.assertNotIn("-m flake8", gate)
         self.assertNotIn("-m isort", gate)
         self.assertIn('scripts/python_format.py" "$(base_sha)"', gate)

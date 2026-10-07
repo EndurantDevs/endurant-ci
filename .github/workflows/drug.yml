@@ -56,10 +56,11 @@ jobs:
         with:
           python-version: "3.14.7"
       - name: Install pinned uv
-        run: |
-          printf '%s\n' 'uv==0.12.17 --hash=sha256:9e25bb39e1674799c408345a6397ebc2c7c719d498be0ce9d935466d36ceacf5' |
-            python -m pip install --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes -r /dev/stdin
-          test "$(uv --version | awk '{print $2}')" = 0.12.17
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+        with:
+          version: '0.12.17'
+          checksum: fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63
+          enable-cache: false
       - name: Run complete public source validation
         env:
           PUBLIC_CI_ARTIFACT_ROOT: ${{ runner.temp }}/drug-public-measurement

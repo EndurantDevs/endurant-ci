@@ -21,12 +21,13 @@ jobs:
         with:
           python-version: '3.14.7'
       - name: Install pinned uv
-        run: |
-          printf '%s\n' 'uv==0.12.17 --hash=sha256:9e25bb39e1674799c408345a6397ebc2c7c719d498be0ce9d935466d36ceacf5' |
-            python -m pip install --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes -r /dev/stdin
-          test "$(uv --version | awk '{print $2}')" = 0.12.17
-      - name: Install workflow parser
-        run: 'uv --no-config pip install --system --only-binary=:all: PyYAML==6.0.3'
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+        with:
+          version: '0.12.17'
+          checksum: fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63
+          enable-cache: false
+      - name: Install validation dependencies
+        run: 'uv --no-config pip install --system --require-hashes --only-binary=:all: -r scripts/requirements-python-quality.lock'
       - name: Verify pinned Rust tool downloads on native Linux
         run: |
           tools_directory=$(mktemp -d "$RUNNER_TEMP/rust-ci-tools.XXXXXX")

@@ -14,18 +14,17 @@ class PublicWorkflowPermissions(unittest.TestCase):
     def check_steps(self, steps, *, composite=False):
         for index, step in enumerate(steps):
             run = step.get("run", "")
-            if "uv==" in run:
-                self.assertIn("--only-binary=:all: --require-hashes -r /dev/stdin", run)
-                self.assertIn(
-                    "uv==0.12.17 --hash=sha256:9e25bb39e1674799c408345a6397ebc2"
-                    "c7c719d498be0ce9d935466d36ceacf5",
-                    run,
-                )
+            self.assertNotRegex(run, r"\bpython3?\s+(?:-\S+\s+)*-m\s+pip\b")
             if "uses" not in step:
                 continue
             action = step["uses"]
             if not action.startswith("./"):
                 self.assertRegex(action, r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$")
+                if action.startswith("astral-sh/setup-uv@"):
+                    self.assertEqual(action, "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d")
+                    self.assertEqual(step["with"], {"version": "0.12.17",
+                        "checksum": "fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63",
+                        "enable-cache": "false"})
                 if action.startswith("actions/checkout@"):
                     self.assertEqual(step.get("with", {}).get("persist-credentials"), "false")
                 continue
@@ -62,7 +61,10 @@ class PublicWorkflowPermissions(unittest.TestCase):
 
     def test_unapproved_uv_requirement_is_rejected(self):
         with self.assertRaises(AssertionError):
-            self.check_steps([{"run": "uv==0.12.12 --hash=sha256:" + "a" * 64}])
+            self.check_steps([{"uses": "astral-sh/setup-uv@" + "a" * 40,
+                               "with": {"version": "0.12.12"}}])
+        with self.assertRaises(AssertionError):
+            self.check_steps([{"run": "python -m pip install example"}])
 
     def test_composite_requires_its_pinned_checkout_and_pinned_nested_actions(self):
         checkout = {"uses": "actions/checkout@" + "a" * 40, "with": {
