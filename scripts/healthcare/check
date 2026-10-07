@@ -347,6 +347,30 @@ run_api_contract() {
   ci_phase_end
 }
 
+install_address_canon_wheel() (
+  local wheel_directory cleanup_command
+  wheel_directory=$(mktemp -d "${RUNNER_TEMP:-/tmp}/healthcare-ptg2-wheel.XXXXXX")
+  printf -v cleanup_command 'ci_phase_end "$?"; rm -rf -- %q' "$wheel_directory"
+  trap "$cleanup_command" EXIT
+  cd support/ptg2_scanner
+  ci_phase_begin rust-wheel-build
+  python -m maturin build "$@" --locked --features python-extension --out "$wheel_directory"
+  shopt -s nullglob
+  local wheels=("$wheel_directory"/*.whl)
+  [ "${#wheels[@]}" -eq 1 ]
+  if [ "$artifact_root" != . ]; then
+    printf '%s  %s\n' \
+      "$(sha256sum "${wheels[0]}" | awk '{print $1}')" \
+      "$(basename "${wheels[0]}")" \
+      > "$(artifact_path ptg2-address-canon-wheel.sha256)"
+  fi
+  ci_phase_end
+  ci_phase_begin rust-wheel-install
+  uv --no-config pip install --python "$(command -v python)" --no-build --no-deps "${wheels[0]}"
+  uv --no-config pip check --python "$(command -v python)"
+  ci_phase_end
+)
+
 run_rust() {
   local rust_artifacts
   rust_artifacts=$(artifact_path coverage-artifacts/rust)
@@ -386,29 +410,7 @@ run_rust() {
       tests/test_provider_directory_projection_native_cli_parity.py \
       tests/test_provider_directory_projection_native_copy_adversarial.py
   ci_phase_end
-  (
-    local wheel_directory cleanup_command
-    wheel_directory=$(mktemp -d "${RUNNER_TEMP:-/tmp}/healthcare-ptg2-wheel.XXXXXX")
-    printf -v cleanup_command 'ci_phase_end "$?"; rm -rf -- %q' "$wheel_directory"
-    trap "$cleanup_command" EXIT
-    cd support/ptg2_scanner
-    ci_phase_begin rust-wheel-build
-    python -m maturin build --release --features python-extension --out "$wheel_directory"
-    shopt -s nullglob
-    local wheels=("$wheel_directory"/*.whl)
-    [ "${#wheels[@]}" -eq 1 ]
-    if [ "$artifact_root" != . ]; then
-      printf '%s  %s\n' \
-        "$(sha256sum "${wheels[0]}" | awk '{print $1}')" \
-        "$(basename "${wheels[0]}")" \
-        > "$(artifact_path ptg2-address-canon-wheel.sha256)"
-    fi
-    ci_phase_end
-    ci_phase_begin rust-wheel-install
-    uv --no-config pip install --python "$(command -v python)" --no-build --no-deps "${wheels[0]}"
-    uv --no-config pip check --python "$(command -v python)"
-    ci_phase_end
-  )
+  install_address_canon_wheel --release
   ci_phase_begin rust-wheel-tests
   local wheel_tests=(tests/test_address_canon_pyo3.py)
   if [ -f "$repository_root/tests/test_custom_import_scalar_digest.py" ]; then
@@ -801,6 +803,59 @@ run_scoped_archive_postgres() (
     timeout --foreground 295s python -m pytest -q "$@"
   fi
 )
+
+run_network_registry_postgres() {
+  local registry_tests=(
+    tests/test_network_registry_postgres.py
+    tests/test_network_serving_schema_postgres.py
+    tests/test_registry_record_store_postgres.py
+    tests/test_registry_targets_postgres.py
+    tests/test_registry_management_routes_postgres.py
+    tests/test_network_legacy_alias_adoption_postgres.py
+    tests/test_network_address_projection_postgres.py
+    tests/test_network_membership_copy_postgres.py
+    tests/test_network_membership_candidate_lifecycle_postgres.py
+    tests/test_network_membership_validation_postgres.py
+    tests/test_network_membership_candidate_indexes_postgres.py
+    tests/test_network_membership_serving_indexes_postgres.py
+    tests/test_network_membership_publication_postgres.py
+    tests/test_registry_source_observation_store_postgres.py
+    tests/test_registry_identity_materialization_postgres.py
+    tests/test_registry_source_admission_postgres.py
+    tests/test_registry_approval_store_postgres.py
+    tests/test_registry_approval_preview_postgres.py
+    tests/test_network_membership_writer_closure_postgres.py
+    tests/test_network_serving_read_postgres.py
+    tests/test_network_address_read_scope_postgres.py
+    tests/test_registry_source_import_postgres.py
+    tests/test_network_membership_pipeline_postgres.py
+    tests/test_network_serving_routes_postgres.py
+    tests/test_registry_company_links_postgres.py
+  )
+  local feature_present=0
+  local test_path
+  [ ! -f "$repository_root/db/models/network_registry.py" ] || feature_present=1
+  for test_path in "${registry_tests[@]}"; do
+    [ ! -f "$repository_root/$test_path" ] || feature_present=1
+  done
+  [ "$feature_present" = 1 ] || return 0
+  for test_path in "${registry_tests[@]}"; do
+    [ -f "$repository_root/$test_path" ] || {
+      printf 'Missing required native registry test: %s\n' "$test_path" >&2
+      return 1
+    }
+  done
+  test "$(rustc --version | awk '{print $2}')" = 1.98.1
+  install_address_canon_wheel
+  python -c 'import asyncpg; import ptg2_address_canon as native; assert all(callable(getattr(native, name, None)) for name in ("encode_network_membership_batch", "encode_cms_mlr_observations", "validate_network_catalog_batch")), "Native registry extension is incomplete"'
+  local database="hc_network_registry_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+  local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
+  ci_phase_begin network-registry-postgres-tests
+  HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN="$archive_url/$database" \
+    run_scoped_archive_postgres "$database" NETWORK_REGISTRY_TEST_DSN "$archive_url" \
+      "${registry_tests[@]}"
+  ci_phase_end
+}
 
 run_core_postgres() {
   local dsn=$1
@@ -1869,6 +1924,9 @@ run_postgres() {
       --timeout=1
   prepare_postgres
   ci_phase_end
+  if [[ "$shard" = core-services || "$shard" = core ]]; then
+    run_network_registry_postgres
+  fi
   ci_phase_begin postgres-tests
   local dsn="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@${HLTHPRT_DB_HOST}:${HLTHPRT_DB_PORT}/${HLTHPRT_DB_DATABASE}"
   case "$shard" in
