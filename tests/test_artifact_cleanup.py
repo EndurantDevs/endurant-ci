@@ -54,7 +54,7 @@ def completed_run(identifier, sha, branch, event="pull_request", conclusion="suc
 
 class ArtifactCleanupChecks(unittest.TestCase):
     def exercise(self, items, expected=None, refresh=None, changed_artifact=None, delete_error=False,
-                 job_inventory=None, refreshed_jobs=None):
+                 job_inventory=None, refreshed_jobs=None, job_snapshots=None, settle_waits=2):
         expected = expected or run()
         kind = cleanup.KINDS[expected["repository"]["full_name"]]
         measurement = next((item for item in items if f"{kind}-public-measurement-" in item.get("name", "")), None)
@@ -78,11 +78,13 @@ class ArtifactCleanupChecks(unittest.TestCase):
                 return None
             if path == "actions/runs/123":
                 run_reads += 1
-                return {**expected, **(refresh or {})} if run_reads > 1 else expected
+                return {**expected, **(refresh or {})} if run_reads > 4 else expected
             if path.startswith("actions/runs/123/attempts/2/jobs?"):
                 job_reads += 1
                 current = jobs() if job_inventory is None else job_inventory
-                if job_reads > 1 and refreshed_jobs is not None:
+                if job_snapshots is not None:
+                    current = job_snapshots[min(job_reads - 1, len(job_snapshots) - 1)]
+                if job_reads > 3 and refreshed_jobs is not None:
                     current = refreshed_jobs
                 return {"jobs": deepcopy(current)}
             if "per_page=100&page=" in path:
@@ -102,9 +104,9 @@ class ArtifactCleanupChecks(unittest.TestCase):
                 count = cleanup.cleanup(expected["repository"]["full_name"], expected)
             except (ValueError, OSError):
                 self.assertEqual(deleted, [], "invalid or changed evidence must prevent deletion")
-                sleep.assert_not_called()
+                self.assertTrue(all(call.args == (2,) for call in sleep.call_args_list))
                 raise
-            self.assertEqual(sleep.call_args_list, [((1,),)] * len(deleted))
+            self.assertEqual(sleep.call_args_list, [((2,),)] * settle_waits + [((1,),)] * len(deleted))
         self.assertEqual(count, len(deleted))
         return deleted, calls
 
@@ -170,6 +172,40 @@ class ArtifactCleanupChecks(unittest.TestCase):
         temporary = artifact(1, "mrf-rust-coverage-123-2")
         unknown = artifact(2, "unknown")
         self.assertEqual(self.exercise([temporary, unknown], job_inventory=failed_jobs)[0], [])
+
+    def test_inventory_stabilizes_before_artifacts_are_considered(self):
+        initial, settled = jobs(), jobs()
+        settled[0]["id"] = 999
+        pending = deepcopy(initial)
+        pending[-1].update(status="queued", conclusion=None)
+        with patch.object(cleanup.github, "api", return_value=run()), \
+                patch.object(cleanup, "effective_jobs", side_effect=[pending, initial, settled, settled, settled]) as reads, \
+                patch.object(cleanup.time, "sleep") as sleep:
+            frozen = cleanup.stable_consumers(run()["repository"]["full_name"], run())
+        self.assertEqual(frozen, sorted((j["id"], j["name"], j["run_attempt"], j["conclusion"]) for j in settled))
+        self.assertEqual(reads.call_count, 5)
+        self.assertEqual(sleep.call_args_list, [((2,),)] * 4)
+        items = [artifact(1, "mrf-rust-coverage-123-2"), artifact(2, "healthcare-public-measurement-123-2", 1)]
+        deleted, calls = self.exercise(items, job_snapshots=[pending, initial, settled, settled, settled], settle_waits=4)
+        self.assertEqual(deleted, [1])
+        enumeration = calls.index(("GET", "actions/runs/123/artifacts?per_page=100&page=1"))
+        self.assertEqual(sum("/jobs?" in path for _, path in calls[:enumeration]), 5)
+
+    def test_unsettled_inventory_has_a_bound_and_changed_run_stops_waiting(self):
+        pending = jobs()
+        pending[0].update(status="in_progress", conclusion=None)
+        with patch.object(cleanup.github, "api", return_value=run()), \
+                patch.object(cleanup, "effective_jobs", return_value=pending) as reads, \
+                patch.object(cleanup.time, "sleep") as sleep:
+            with self.assertRaisesRegex(ValueError, "did not stabilize"):
+                cleanup.stable_consumers(run()["repository"]["full_name"], run())
+        self.assertEqual(reads.call_count, 10)
+        self.assertEqual(sleep.call_args_list, [((2,),)] * 9)
+        with patch.object(cleanup.github, "api", side_effect=[run(), {**run(), "run_attempt": 3}]), \
+                patch.object(cleanup, "effective_jobs", return_value=jobs()), patch.object(cleanup.time, "sleep") as sleep:
+            with self.assertRaisesRegex(ValueError, "current workflow run or attempt changed"):
+                cleanup.stable_consumers(run()["repository"]["full_name"], run())
+        sleep.assert_called_once_with(2)
 
     def test_final_measurement_must_exist_and_remain_current(self):
         temporary = artifact(1, "mrf-rust-coverage-123-2")

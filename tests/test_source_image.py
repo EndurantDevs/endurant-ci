@@ -220,7 +220,8 @@ class TransferChecks(unittest.TestCase):
         (directory / "producer.json").write_text(json.dumps(record))
         return record
 
-    def exercise(self, directory, record, *, loaded_config=ROOT_DIGEST, failure=None, stale=False, cleanup_failure=False):
+    def exercise(self, directory, record, *, loaded_config=ROOT_DIGEST, failure=None, stale=False, cleanup_failure=False,
+                 stale_after_readback=False):
         calls, images = [], set()
         digest = ROOT_DIGEST
 
@@ -260,6 +261,8 @@ class TransferChecks(unittest.TestCase):
             raise AssertionError(args)
 
         values = [expected(), {**expected(), "workflow_id": 999}] if stale else None
+        if stale_after_readback:
+            values = [expected(), expected(), {**expected(), "workflow_id": 999}]
         environment = {"RUNNER_TEMP": str(directory.parent), "GH_TOKEN": "synthetic token", "GITHUB_ACTOR": "synthetic"}
         with patch.dict(os.environ, environment), patch.object(transfer, "command", side_effect=command), \
                 patch.object(transfer, "admit", return_value=expected(), side_effect=values), \
@@ -276,6 +279,8 @@ class TransferChecks(unittest.TestCase):
                 self.assertFalse(any(command[1] in {"run", "build", "exec"} for command in calls))
                 if loaded_config != record["image_id"] or stale:
                     self.assertFalse(any(command[:2] == ("docker", "login") for command in calls))
+                if stale_after_readback:
+                    self.assertFalse(any(command[:3] == ("docker", "image", "push") for command in calls))
         return calls, digest
 
     def test_publish_preserves_tested_config_and_receipt_has_immutable_registry_identity(self):
@@ -306,7 +311,8 @@ class TransferChecks(unittest.TestCase):
                     docker.assert_not_called()
 
     def test_wrong_loaded_config_stale_authority_and_push_failure_cleanup_and_fail(self):
-        for options in ({"loaded_config": "sha256:" + "b" * 64}, {"stale": True}, {"failure": True}, {"cleanup_failure": True}):
+        for options in ({"loaded_config": "sha256:" + "b" * 64}, {"stale": True}, {"stale_after_readback": True},
+                        {"failure": True}, {"cleanup_failure": True}):
             with self.subTest(options=options), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary) / "input"
                 directory.mkdir()
@@ -626,7 +632,8 @@ class IntentChecks(unittest.TestCase):
                 with self.subTest(change=change), patch.dict(jobs[-1], change), self.assertRaises(ValueError):
                     transfer.active_publisher(expected())
 
-    def upload(self, payload, *, conclusion="success", status="completed", corrupt=False, intent=True, missing=False):
+    def upload(self, payload, *, conclusion="success", status="completed", corrupt=False, intent=True, missing=False,
+               pending_reads=0, pending_artifact_reads=0, changed_job=None):
         run, jobs, _ = AdmissionChecks().fixtures()
         step = {"name": transfer.INTENT_UPLOAD if intent else transfer.RECEIPT_UPLOAD, "status": status,
                 "conclusion": conclusion, "started_at": (NOW - timedelta(seconds=5)).isoformat(),
@@ -638,16 +645,53 @@ class IntentChecks(unittest.TestCase):
         raw = output.getvalue()
         item = {**artifact(88, transfer.proof_name(IDENTITY, intent), 1), "size_in_bytes": len(raw),
                 "digest": "sha256:" + hashlib.sha256(raw).hexdigest()}
-        with patch.object(transfer.github, "pages", return_value=[] if missing else [item]), \
-                patch.object(transfer.github, "api", return_value=item), \
+        reads = 0
+
+        def api(repository, path):
+            nonlocal reads
+            if path.startswith("actions/jobs/"):
+                reads += 1
+                fresh = deepcopy(job)
+                if reads <= pending_reads:
+                    fresh["steps"][0].update(status="in_progress", conclusion=None)
+                return {**fresh, **(changed_job or {})}
+            return item
+
+        def pages(*args):
+            return [] if missing or reads <= pending_artifact_reads else [item]
+
+        with patch.object(transfer.github, "pages", side_effect=pages), \
+                patch.object(transfer.github, "api", side_effect=api), patch.object(transfer.time, "sleep") as sleep, \
                 patch.object(transfer, "command", return_value=raw + b"x" if corrupt else raw):
-            return transfer.uploaded_payload(expected(), run, job, intent=intent)
+            try:
+                result = transfer.uploaded_payload(expected(), run, job, intent=intent)
+            except transfer.UploadPending:
+                self.assertEqual(reads, 10)
+                self.assertEqual(sleep.call_args_list, [((2,),)] * 9)
+                raise
+        self.assertEqual(sleep.call_args_list, [((2,),)] * max(pending_reads, pending_artifact_reads))
+        return result
 
     def test_durable_intent_requires_successful_upload_and_exact_zip_bytes(self):
         self.assertEqual(self.upload({"synthetic": 1}), {"synthetic": 1})
         for options in ({"conclusion": "failure"}, {"conclusion": "skipped"}, {"corrupt": True}, {"missing": True}):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 self.upload({"synthetic": 1}, **options)
+
+    def test_upload_waits_for_exact_step_readback_without_changing_its_payload_guard(self):
+        self.assertEqual(self.upload({"synthetic": 1}, pending_reads=2), {"synthetic": 1})
+        self.assertEqual(self.upload({"synthetic": 1}, pending_artifact_reads=2), {"synthetic": 1})
+        with self.assertRaisesRegex(ValueError, "bytes changed"):
+            self.upload({"synthetic": 1}, pending_reads=2, corrupt=True)
+        for changes in ({"run_id": 999}, {"run_attempt": 3}, {"head_sha": "c" * 40},
+                        {"id": 999}, {"status": "completed", "conclusion": "success"}):
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "exact still-active publisher"):
+                self.upload({}, changed_job=changes)
+
+    def test_upload_wait_is_bounded_when_step_or_artifact_readback_never_completes(self):
+        for options in ({"status": "in_progress", "conclusion": None}, {"missing": True}):
+            with self.subTest(options=options), self.assertRaises(transfer.UploadPending):
+                self.upload({}, **options)
 
     def test_local_intent_must_match_uploaded_record_and_active_publication_window(self):
         baseline, _, _ = ReconciliationChecks().fixtures()
