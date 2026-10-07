@@ -51,6 +51,10 @@ class HealthcarePublicChecks(unittest.TestCase):
             "test_network_approved_membership_source", "test_network_custom_address_source",
             "test_registry_publication_queue", "test_registry_publication_execution",
             "test_registry_publication_http",
+            "test_registry_candidate_composition", "test_registry_issuer_resolution", "test_registry_issuer_http",
+            "test_registry_retained_site_adoption", "test_registry_site_binding_store",
+            "test_registry_site_membership_composition", "test_registry_source_site_catalog",
+            "test_registry_source_site_http",
         ))
         paths += ("tests/test_registry_source_fetch.py",)
         self.assertEqual(len(paths), len(set(paths)))
@@ -67,6 +71,7 @@ class HealthcarePublicChecks(unittest.TestCase):
             "directory-address", "profile-storage", "profile-publication",
         )]
         cases += [("core-services", path, "") for path in paths]
+        cases += [("core-services", "only:" + path, "") for path in paths]
         cases += [("core-services", absent, "") for absent in ("all", "all-with-model")]
         cases += [("core-services", "", stage) for stage in (
             "build", "install", "pytest", "drop", "rust-version", "asyncpg", *exports,
@@ -78,8 +83,9 @@ class HealthcarePublicChecks(unittest.TestCase):
                 (source / "support/ptg2_scanner").mkdir(parents=True)
                 (source / "tests").mkdir()
                 runner.mkdir()
+                only_member = missing.removeprefix("only:") if missing.startswith("only:") else ""
                 for path in paths:
-                    if path != missing and missing not in ("all", "all-with-model"):
+                    if (path == only_member if only_member else path != missing and missing not in ("all", "all-with-model")):
                         (source / path).touch()
                 if missing == "all-with-model":
                     (source / "db/models").mkdir(parents=True)
@@ -144,7 +150,8 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                 if not selected or missing or failure == "rust-version":
                     self.assertEqual(calls, [])
                     if selected and missing:
-                        required = paths[0] if missing == "all-with-model" else missing
+                        required = (next(path for path in paths if path != only_member) if only_member
+                                    else paths[0] if missing == "all-with-model" else missing)
                         self.assertIn(f"Missing required native registry test: {required}", result.stderr)
                     continue
                 self.assertTrue(calls[0].startswith("build\t-m maturin build --locked --features python-extension --out "))

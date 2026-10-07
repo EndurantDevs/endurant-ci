@@ -897,6 +897,14 @@ run_network_registry_postgres() {
     tests/test_registry_publication_queue_postgres.py
     tests/test_registry_publication_execution_postgres.py
     tests/test_registry_publication_http_postgres.py
+    tests/test_registry_candidate_composition_postgres.py
+    tests/test_registry_issuer_resolution_postgres.py
+    tests/test_registry_issuer_http_postgres.py
+    tests/test_registry_retained_site_adoption_postgres.py
+    tests/test_registry_site_binding_store_postgres.py
+    tests/test_registry_site_membership_composition_postgres.py
+    tests/test_registry_source_site_catalog_postgres.py
+    tests/test_registry_source_site_http_postgres.py
     tests/test_registry_source_fetch.py
   )
   local feature_present=0
