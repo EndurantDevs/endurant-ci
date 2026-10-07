@@ -30,6 +30,130 @@ REQUIRED_IMPORT_NATIVE_TESTS = (
 
 
 class HealthcarePublicChecks(unittest.TestCase):
+    def test_registry_native_family_requires_complete_source_and_real_bindings(self):
+        paths = tuple("tests/" + name + "_postgres.py" for name in (
+            "test_network_registry", "test_network_serving_schema", "test_registry_record_store",
+            "test_registry_targets", "test_registry_management_routes", "test_network_legacy_alias_adoption",
+            "test_network_address_projection", "test_network_membership_copy",
+            "test_network_membership_candidate_lifecycle", "test_network_membership_validation",
+            "test_network_membership_candidate_indexes", "test_network_membership_serving_indexes",
+            "test_network_membership_publication", "test_registry_source_observation_store",
+            "test_registry_identity_materialization", "test_registry_source_admission", "test_registry_approval_store",
+            "test_registry_approval_preview", "test_network_membership_writer_closure", "test_network_serving_read",
+            "test_network_address_read_scope", "test_registry_source_import",
+            "test_network_membership_pipeline", "test_network_serving_routes",
+            "test_registry_company_links",
+        ))
+        exports = ("encode_network_membership_batch", "encode_cms_mlr_observations", "validate_network_catalog_batch")
+        workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
+        setup = next(step for step in workflow["jobs"]["address-canonical-db-tests"]["steps"]
+                     if step["name"] == "Prepare source and toolchain")
+        self.assertEqual(setup["with"], {"rust": "${{ matrix.shard == 'core-services' }}"})
+        cases = [(lane, "", "") for lane in (
+            "core-services", "core", "core-imports", "core-ptg", "directory-source", "directory-storage",
+            "directory-address", "profile-storage", "profile-publication",
+        )]
+        cases += [("core-services", path, "") for path in paths]
+        cases += [("core-services", absent, "") for absent in ("all", "all-with-model")]
+        cases += [("core-services", "", stage) for stage in (
+            "build", "install", "pytest", "drop", "rust-version", "asyncpg", *exports,
+        )]
+        for lane, missing, failure in cases:
+            with self.subTest(lane=lane, missing=missing, failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source, runner = root / "source", root / "runner"
+                (source / "support/ptg2_scanner").mkdir(parents=True)
+                (source / "tests").mkdir()
+                runner.mkdir()
+                for path in paths:
+                    if path != missing and missing not in ("all", "all-with-model"):
+                        (source / path).touch()
+                if missing == "all-with-model":
+                    (source / "db/models").mkdir(parents=True)
+                    (source / "db/models/network_registry.py").touch()
+                (source / "asyncpg.py").write_text(
+                    "raise ImportError('synthetic dependency missing')\n" if failure == "asyncpg" else "", encoding="utf-8",
+                )
+                (source / "ptg2_address_canon.py").write_text(
+                    "\n".join(f"def {name}(): pass" for name in exports if name != failure), encoding="utf-8",
+                )
+                log = root / "calls"
+                script = CHECK_FUNCTIONS + r'''
+prepare_debug_rust_binaries() { :; }
+wait_for_service() { :; }
+prepare_postgres() { :; }
+run_core_postgres() { :; }
+run_provider_directory_postgres() { :; }
+run_provider_profile_postgres() { :; }
+create_test_database() { printf 'create\t%s\n' "$1" >> "$CALL_LOG"; }
+drop_test_database() {
+  printf 'drop\t%s\n' "$1" >> "$CALL_LOG"
+  [ "$FAIL_STAGE" != drop ]
+}
+psql() { printf 'extensions\t%s\n' "$*" >> "$CALL_LOG"; }
+rustc() { echo "rustc $([ "$FAIL_STAGE" = rust-version ] && echo 1.98.0 || echo 1.98.1)"; }
+python() {
+  case "$*" in
+    '-m maturin build '*)
+      printf 'build\t%s\n' "$*" >> "$CALL_LOG"
+      [ "$FAIL_STAGE" != build ] || return 17
+      touch "${!#}/synthetic.whl" ;;
+    '-c '*)
+      printf 'exports\n' >> "$CALL_LOG"
+      command python3 "$@" ;;
+    '-m pytest -q tests/test_network_registry_postgres.py '*)
+      test "$HLTHPRT_DB_DATABASE:$HLTHPRT_DB_DATABASE_OVERRIDE:$PGDATABASE" = "$PGDATABASE:$PGDATABASE:$PGDATABASE"
+      printf 'pytest\t%s\t%s\t%s\n' "$NETWORK_REGISTRY_TEST_DSN" \
+        "$HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN" "$*" >> "$CALL_LOG"
+      [ "$FAIL_STAGE" != pytest ] || return 17 ;;
+  esac
+}
+uv() {
+  printf 'uv\t%s\n' "$*" >> "$CALL_LOG"
+  [ "$FAIL_STAGE" != install ] || return 17
+}
+timeout() { shift 2; "$@"; }
+run_postgres "$ROUTE_LANE"
+test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN:-}"
+'''
+                environment = {
+                    **os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT), "RUNNER_TEMP": str(runner),
+                    "CI_DEPS_READY": "1", "COVERAGE_BASE_SHA": "a" * 40, "CALL_LOG": str(log),
+                    "ROUTE_LANE": lane, "FAIL_STAGE": failure,
+                    "NETWORK_REGISTRY_TEST_DSN": "", "HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN": "",
+                }
+                result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+                selected = lane in ("core-services", "core") and missing != "all"
+                expected = 17 if failure in ("build", "install", "pytest") else 1 if failure or (selected and missing) else 0
+                self.assertEqual(result.returncode, expected, result.stderr)
+                calls = log.read_text().splitlines() if log.exists() else []
+                self.assertEqual(list(runner.iterdir()), [])
+                if not selected or missing or failure == "rust-version":
+                    self.assertEqual(calls, [])
+                    if selected and missing:
+                        required = paths[0] if missing == "all-with-model" else missing
+                        self.assertIn(f"Missing required native registry test: {required}", result.stderr)
+                    continue
+                self.assertTrue(calls[0].startswith("build\t-m maturin build --locked --features python-extension --out "))
+                self.assertNotIn("--release", calls[0])
+                runs = [call for call in calls if call.startswith("pytest\t")]
+                self.assertEqual(len(runs), int(failure in ("", "pytest", "drop")))
+                if runs:
+                    self.assertTrue(calls[1].startswith("uv\t--no-config pip install --python "))
+                    self.assertIn(" --no-build --no-deps ", calls[1])
+                    self.assertTrue(calls[2].startswith("uv\t--no-config pip check --python "))
+                    _, registry_dsn, membership_dsn, arguments = runs[0].split("\t", 3)
+                    self.assertEqual(registry_dsn, membership_dsn)
+                    self.assertRegex(registry_dsn, r"@127\.0\.0\.1:5440/hc_network_registry_[0-9a-f]{32}$")
+                    self.assertEqual(shlex.split(arguments), ["-m", "pytest", "-q", *paths])
+                    database = registry_dsn.rsplit("/", 1)[1]
+                    self.assertEqual(calls[-1], f"drop\t{database}")
+                    self.assertEqual(calls.count(f"create\t{database}"), 1)
+                    self.assertLess(calls.index("exports"), calls.index(f"create\t{database}"))
+                    extensions = next(call for call in calls if call.startswith("extensions\t"))
+                    for name in ("intarray", "btree_gin", "postgis"):
+                        self.assertIn(f"CREATE EXTENSION IF NOT EXISTS {name} WITH SCHEMA public", extensions)
+
     def test_cms_native_coverage_routes_and_owns_required_fixture_environments(self):
         routes = {
             "directory-source": (
