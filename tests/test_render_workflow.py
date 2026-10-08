@@ -58,6 +58,10 @@ class RenderWorkflowChecks(unittest.TestCase):
                             continue  # Its complete privilege and execution contract is checked below.
                         template = original["jobs"][job_id] if job_id == "smoke" else canonical["jobs"][job_id]
                         expected = json.loads(json.dumps(template).replace("${{ inputs.ci_revision }}", "1" * 40))
+                        if (kind, job_id) == ("drug", "publish"):
+                            # The complete export contract and the reused gate are checked below.
+                            expected["if"] = "always()"
+                            expected["steps"] = job["steps"]
                         metadata_required = job_id == "smoke" or (kind, job_id) in {
                             ("healthcare", "source-validation"), ("drug", "publish"),
                         }
@@ -210,8 +214,19 @@ class RenderWorkflowChecks(unittest.TestCase):
         self.assertTrue(required_contexts <= {job["name"] for job in jobs.values()})
         self.assertEqual(jobs["publish"]["name"], "Coverage results")
         self.assertEqual(jobs["publish"]["needs"], "validate")
-        self.assertEqual(jobs["publish"]["if"], "${{ success() }}")
+        self.assertEqual(jobs["publish"]["if"], "${{ always() }}")
+        self.assertEqual(jobs["publish"]["timeout-minutes"], 10)
         self.assertNotIn("continue-on-error", jobs["publish"])
+        canonical = yaml.safe_load((ROOT / ".github/workflows/drug.yml").read_text())
+        expected_steps = json.loads(json.dumps(canonical["jobs"]["publish"]["steps"]).replace(
+            "${{ inputs.ci_revision }}", "1" * 40))
+        for step in expected_steps:
+            step["if"] = "${{ " + RENDERER.GUARD + "success()) }}"
+        self.assertEqual(jobs["publish"]["steps"][1:], expected_steps)
+        healthcare = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
+        expected_gate = healthcare["jobs"]["source-validation"]["steps"][0]
+        expected_gate["run"] = expected_gate["run"].replace("SECONDS + 2400", "SECONDS + 540")
+        self.assertEqual(jobs["publish"]["steps"][0], expected_gate)
         self.assertEqual(jobs["validate"]["if"], "${{ " + RENDERER.GUARD + "success()) }}")
         self.assertEqual(jobs["dev-image-publication"]["needs"], ["smoke", "publish", "validate"])
         self.assertEqual(jobs["dev-image-publication"]["if"], "${{ " + RENDERER.GUARD + "success()) }}")
@@ -283,16 +298,20 @@ class RenderWorkflowChecks(unittest.TestCase):
             "done\n"
         ))
 
-    def test_healthcare_metadata_validation_uses_the_latest_matching_full_run(self):
+    def test_metadata_validation_uses_the_latest_matching_full_run(self):
         original = {"name": "CI", "on": {"pull_request": {}},
                     "jobs": {"smoke": {"name": "portable import checks", "runs-on": "ubuntu-latest",
                                        "steps": [{"run": "echo synthetic"}]}}}
         with tempfile.TemporaryDirectory() as temporary:
             caller = Path(temporary) / "ci.yml"
             caller.write_text(yaml.safe_dump(original))
-            workflow = yaml.safe_load(RENDERER.render_workflow("healthcare", "1" * 40, caller))
-        run = workflow["jobs"]["source-validation"]["steps"][0]["run"]
-        query = re.search(r"jq --raw-output '(.+?)'\n\s+\)\"", run, re.DOTALL).group(1)
+            queries = []
+            for kind, job in (("healthcare", "source-validation"), ("drug", "publish")):
+                workflow = yaml.safe_load(RENDERER.render_workflow(kind, "1" * 40, caller))
+                run = workflow["jobs"][job]["steps"][0]["run"]
+                queries.append(re.search(r"jq --raw-output '(.+?)'\n\s+\)\"", run, re.DOTALL).group(1))
+        self.assertEqual(queries[0], queries[1])
+        query = queries[0]
 
         def full_run(*, started_at, identifier, attempt=1, status="completed", conclusion="success",
                      title="CI", number=17, head="source", base="base", created_at=None):
@@ -315,6 +334,7 @@ class RenderWorkflowChecks(unittest.TestCase):
 
         old_success = full_run(started_at="2026-01-01T10:00:00Z", identifier=10)
         later_failure = full_run(started_at="2026-01-01T11:00:00Z", identifier=11, conclusion="failure")
+        later_cancelled = full_run(started_at="2026-01-01T11:00:00Z", identifier=11, conclusion="cancelled")
         rerun_success = full_run(started_at="2026-01-01T12:00:00Z", identifier=10, attempt=2,
                                  created_at="2026-01-01T09:00:00Z")
         in_progress = full_run(started_at="2026-01-01T13:00:00Z", identifier=12,
@@ -327,6 +347,11 @@ class RenderWorkflowChecks(unittest.TestCase):
 
         with self.subTest("latest full failure blocks"):
             self.assertEqual(state([old_success, later_failure]), "failed")
+        with self.subTest("latest full cancellation blocks"):
+            self.assertEqual(state([old_success, later_cancelled]), "failed")
+        with self.subTest("latest attempt blocks a previous success"):
+            failed_rerun = {**old_success, "run_attempt": 2, "conclusion": "failure"}
+            self.assertEqual(state([old_success, failed_rerun]), "failed")
         with self.subTest("newer rerun succeeds"):
             self.assertEqual(state([later_failure, rerun_success]), "success")
         with self.subTest("in-progress full run waits"):
@@ -343,21 +368,17 @@ class RenderWorkflowChecks(unittest.TestCase):
         with self.subTest("no full run waits"):
             self.assertEqual(state([]), "pending")
 
-    def test_healthcare_metadata_validation_retries_an_api_failure(self):
+    def test_required_validation_fails_closed_and_retries_an_api_failure(self):
         original = {"name": "CI", "on": {"pull_request": {}},
                     "jobs": {"smoke": {"name": "portable import checks", "runs-on": "ubuntu-latest",
                                        "steps": [{"run": "echo synthetic"}]}}}
         with tempfile.TemporaryDirectory() as temporary:
             caller = Path(temporary) / "ci.yml"
             caller.write_text(yaml.safe_dump(original))
-            workflow = yaml.safe_load(RENDERER.render_workflow("healthcare", "1" * 40, caller))
-            run = workflow["jobs"]["source-validation"]["steps"][0]["run"]
-            syntax = subprocess.run(["bash", "-n"], input=run, text=True, capture_output=True, check=False)
-            self.assertEqual(syntax.returncode, 0, syntax.stderr)
-
             commands = Path(temporary) / "commands"
             commands.mkdir()
             counter = Path(temporary) / "gh-count"
+            response = Path(temporary) / "gh-response.json"
             gh = commands / "gh"
             gh.write_text(
                 "#!/bin/sh\n"
@@ -367,27 +388,65 @@ class RenderWorkflowChecks(unittest.TestCase):
                 "printf '%s' \"$count\" > \"$FAKE_GH_COUNT\"\n"
                 "case \"$*\" in *--paginate*--slurp*) ;; *) exit 2;; esac\n"
                 "case \"$*\" in *--jq*) exit 2;; esac\n"
-                "if [ \"$count\" -eq 1 ]; then\n"
+                "if [ \"$FAKE_GH_FAILURE\" = always ] || { [ \"$FAKE_GH_FAILURE\" = first ] && [ \"$count\" -eq 1 ]; }; then\n"
                 "  printf '%s\\n' 'synthetic API failure' >&2\n"
                 "  exit 1\n"
                 "fi\n"
-                "printf '%s\\n' '[{\"workflow_runs\":[{\"name\":\"CI\",\"display_title\":\"CI\",\"id\":1,\"run_attempt\":1,\"status\":\"completed\",\"conclusion\":\"success\",\"pull_requests\":[{\"number\":17,\"head\":{\"sha\":\"source\"},\"base\":{\"sha\":\"base\"}}]}]}]'\n"
+                "cat \"$FAKE_GH_RESPONSE\"\n"
             )
             sleep = commands / "sleep"
             sleep.write_text("#!/bin/sh\nexit 0\n")
             gh.chmod(0o755)
             sleep.chmod(0o755)
-            result = subprocess.run(
-                ["bash", "-e", "-o", "pipefail", "-c", run], text=True, capture_output=True, check=False,
-                timeout=10, env={
-                    **os.environ, "PATH": str(commands) + os.pathsep + os.environ["PATH"],
-                    "FAKE_GH_COUNT": str(counter), "GH_TOKEN": "synthetic", "METADATA_ONLY": "true",
-                    "PR_NUMBER": "17", "SOURCE_SHA": "source", "BASE_SHA": "base",
-                    "GITHUB_REPOSITORY": "owner/repository", "RESULTS": "[]",
-                },
+            environment = {
+                **os.environ, "PATH": str(commands) + os.pathsep + os.environ["PATH"],
+                "FAKE_GH_COUNT": str(counter), "FAKE_GH_RESPONSE": str(response),
+                "GH_TOKEN": "synthetic", "METADATA_ONLY": "true", "PR_NUMBER": "17",
+                "SOURCE_SHA": "source", "BASE_SHA": "base", "GITHUB_REPOSITORY": "owner/repository",
+                "RESULTS": "[]",
+            }
+            successful = {
+                "name": "CI", "display_title": "CI", "id": 1, "run_attempt": 1,
+                "status": "completed", "conclusion": "success",
+                "pull_requests": [{"number": 17, "head": {"sha": "source"}, "base": {"sha": "base"}}],
+            }
+            scenarios = (
+                ("transient API failure", "first", [successful], 0, "2"),
+                ("persistent API failure", "always", [successful], 1, "1"),
+                ("failed full run", "none", [{**successful, "conclusion": "failure"}], 1, "1"),
+                ("cancelled full run", "none", [{**successful, "conclusion": "cancelled"}], 1, "1"),
+                ("pending full run", "none", [{**successful, "status": "in_progress", "conclusion": None}], 1, "1"),
+                ("metadata run alone", "none", [{**successful, "display_title": "CI metadata update"}], 1, "1"),
+                ("wrong source identity", "none", [{**successful, "pull_requests": []}], 1, "1"),
+                ("no full run", "none", [], 1, "1"),
             )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(counter.read_text(), "2")
+            for kind, job in (("healthcare", "source-validation"), ("drug", "publish")):
+                workflow = yaml.safe_load(RENDERER.render_workflow(kind, "1" * 40, caller))
+                run = workflow["jobs"][job]["steps"][0]["run"]
+                syntax = subprocess.run(["bash", "-n"], input=run, text=True, capture_output=True, check=False)
+                self.assertEqual(syntax.returncode, 0, syntax.stderr)
+                for results in (["success"], ["failure"], ["cancelled"], ["skipped"], [], ["success", "failure"]):
+                    with self.subTest(kind=kind, results=results):
+                        counter.unlink(missing_ok=True)
+                        result = subprocess.run(
+                            ["bash", "-e", "-o", "pipefail", "-c", run], text=True, capture_output=True,
+                            check=False, timeout=10,
+                            env={**environment, "METADATA_ONLY": "false", "RESULTS": json.dumps(results)},
+                        )
+                        self.assertEqual(result.returncode, 0 if results == ["success"] else 1, result.stderr)
+                        self.assertFalse(counter.exists(), "full validation must use its own dependency result")
+                for label, failure, runs, expected_status, expected_calls in scenarios:
+                    with self.subTest(kind=kind, scenario=label):
+                        counter.unlink(missing_ok=True)
+                        response.write_text(json.dumps([{"workflow_runs": runs}]))
+                        bounded_run = run if failure == "first" else re.sub(r"SECONDS \+ \d+", "SECONDS + 0", run)
+                        result = subprocess.run(
+                            ["bash", "-e", "-o", "pipefail", "-c", bounded_run],
+                            text=True, capture_output=True, check=False, timeout=10,
+                            env={**environment, "FAKE_GH_FAILURE": failure},
+                        )
+                        self.assertEqual(result.returncode, expected_status, result.stderr)
+                        self.assertEqual(counter.read_text(), expected_calls)
 
     def test_revision_and_job_labels_cannot_inject_expressions(self):
         for label in ("${{ inputs.name }}", "bad' || true || '"):
