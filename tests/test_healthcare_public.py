@@ -1596,6 +1596,134 @@ run_provider_profile_postgres postgresql://synthetic/original
         self.assertIn('if [ "${1-}" != coverage ]; then', installer)
         self.assertFalse((ROOT / "scripts/healthcare/requirements-ci.lock").exists())
 
+    def test_locked_bootstrap_wheel_source_is_fixed_and_preserves_strict_flags(self):
+        source = "https://github.com/dnikolayev/pytest-boorst/releases/download/v0.1.0a4/wheels.html"
+        installer = (ROOT / "scripts/healthcare/install_python_lock").read_text()
+        compiler = (ROOT / "scripts/healthcare/compile_python_lock").read_text()
+        sync = installer.split("uv --no-config pip sync", 1)[1].split("\nuv ", 1)[0]
+        compile_command = compiler.split("uv --no-config pip compile", 1)[1].split("\n\n", 1)[0]
+        dry_run = compiler.split("uv --no-config pip install", 1)[1].split("\n\n", 1)[0]
+        for command in (sync, compile_command, dry_run):
+            self.assertEqual(command.count("--find-links " + source), 1)
+            self.assertIn("--only-binary :all:", command)
+        for command in (sync, dry_run):
+            self.assertIn("--require-hashes", command)
+        self.assertIn("--strict", sync)
+        self.assertIn("--generate-hashes", compile_command)
+        self.assertIn("--dry-run", dry_run)
+        self.assertNotIn("UV_FIND_LINKS", installer + compiler)
+        self.assertNotIn("--emit-find-links", compiler)
+
+    def test_locked_bootstrap_install_and_compile_failures_clean_owned_candidates(self):
+        cases = (("install_python_lock", "sync", False), ("compile_python_lock", "compile", False),
+                 ("compile_python_lock", "compile", True))
+        for helper, operation, reject_candidate in cases:
+            with self.subTest(helper=helper, reject_candidate=reject_candidate), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source, tools, runtime = (root / name for name in ("source", "tools", "runtime"))
+                for directory in (source, tools, runtime):
+                    directory.mkdir()
+                for name in ("requirements.txt", "requirements-dev.txt", "requirements-ci.lock"):
+                    (source / name).write_text("synthetic-pinned-input\n")
+                keep = runtime / "keep"
+                keep.write_text("unrelated")
+                python = tools / "python"
+                python.write_text(f"#!{sys.executable}\n" + '''import os, sys
+if sys.argv[1:3] == ["-I", "-c"]:
+    print("3.14.7")
+elif sys.argv[1:3] == ["-I", "-"]:
+    program = sys.stdin.read()
+    if "platform.system()" not in program:
+        sys.argv = ["-"] + sys.argv[3:]
+        exec(program)
+''')
+                uv = tools / "uv"
+                uv.write_text(f"#!{sys.executable}\n" + '''import json, os, sys
+args = sys.argv[1:]
+if "--version" in args:
+    print("uv 0.12.17")
+elif args[1:3] == ["python", "find"]:
+    print(os.environ["FAKE_PYTHON"])
+else:
+    with open(os.environ["CAPTURE"], "a") as output:
+        output.write(json.dumps(args) + "\\n")
+    if os.environ["REJECT_CANDIDATE"] == "1":
+        from pathlib import Path
+        Path(args[args.index("--output-file") + 1]).write_text(
+            "pip==26.2.1\\npip-audit==2.10.1\\npytest-boorst==0.1.0a5\\n")
+    else:
+        sys.exit(23)
+''')
+                python.chmod(0o755)
+                uv.chmod(0o755)
+                capture = root / "calls"
+                result = subprocess.run(["bash", str(ROOT / "scripts/healthcare" / helper)],
+                    env={**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+                         "SOURCE_ROOT": str(source), "RUNNER_TEMP": str(runtime), "TMPDIR": str(runtime),
+                         "FAKE_PYTHON": str(python), "CAPTURE": str(capture),
+                         "REJECT_CANDIDATE": str(int(reject_candidate))},
+                    capture_output=True, text=True, check=False, timeout=30)
+                self.assertEqual(result.returncode, 1 if reject_candidate else 23, result.stderr)
+                if reject_candidate:
+                    self.assertIn("selected lock must contain exactly pytest-boorst==0.1.0a4", result.stderr)
+                calls = [json.loads(line) for line in capture.read_text().splitlines()]
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0][:3], ["--no-config", "pip", operation])
+                index = calls[0].index("--find-links")
+                self.assertEqual(calls[0][index + 1],
+                    "https://github.com/dnikolayev/pytest-boorst/releases/download/v0.1.0a4/wheels.html")
+                self.assertEqual(list(runtime.iterdir()), [keep])
+                self.assertEqual(keep.read_text(), "unrelated")
+                self.assertEqual((source / "requirements-ci.lock").read_text(), "synthetic-pinned-input\n")
+                self.assertFalse(list(source.glob("requirements-ci.lock.candidate.*")))
+
+    def test_locked_bootstrap_candidate_hashes_preserve_other_entries_and_refuse_drift(self):
+        compiler = (ROOT / "scripts/healthcare/compile_python_lock").read_text()
+        program = compiler.split("<<'PY'\n")[2].split("\nPY", 1)[0]
+        hashes = (
+            "265dd4a0e899520975c434c267d8c2ae2d930c0e16c9e59c796f0d46ea26f5a3",
+            "8180a4071d493ed93a0138e546657e8e87dc0047ce9d738e9e1083554441d9bc",
+            "dabd6bbf2941dd1ee6ff2984e3d2fdbd9a8b14634afee91229121c24c46892ef",
+            "f118fe02876eed998c4a2d038d66bf7456cfdc83c8ab672c29e7acfa13abf890",
+        )
+        continuation = " " + chr(92) + "\n"
+        hashed = "pytest-boorst==0.1.0a4" + continuation + continuation.join(
+            "    --hash=sha256:" + digest for digest in hashes) + "\n"
+        before = "--only-binary :all:\n\npip==26.2.1" + continuation + "    --hash=sha256:" + "a" * 64 + "\n"
+        after = "pip-audit==2.10.1" + continuation + "    --hash=sha256:" + "b" * 64 + "\n"
+        entries = {
+            "unhashed": ("pytest-boorst==0.1.0a4\n", True),
+            "already-hashed": (hashed, True),
+            "missing": ("", False),
+            "changed-version": ("pytest-boorst==0.1.0a5\n", False),
+            "duplicate": ("pytest-boorst==0.1.0a4\n" * 2, False),
+            "duplicate-alias": ("pytest-boorst==0.1.0a4\npytest_boorst==0.1.0a4\n", False),
+            "conflicting-hash": (hashed.replace(hashes[0], "c" * 64), False),
+            "missing-hash": (hashed.replace("    --hash=sha256:" + hashes[0] + continuation, ""), False),
+            "duplicate-hash": (hashed.replace(hashes[0], hashes[1]), False),
+            "unexpected-option": (hashed + "    --index-url https://example.invalid\n", False),
+            "malformed-indent": (hashed.replace("    --hash", "  --hash", 1), False),
+            "unfinished-entry": (hashed.rstrip("\n") + continuation, False),
+            "direct-url": ("pytest-boorst @ https://example.invalid/wheel.whl\n", False),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("requirements.txt", "requirements-dev.txt", "requirements-ci.in"):
+                (root / name).write_text("synthetic-input\n")
+            candidate = root / "candidate.lock"
+            for name, (entry, accepted) in entries.items():
+                with self.subTest(name=name):
+                    body = before + entry + after
+                    candidate.write_text(body)
+                    result = subprocess.run([sys.executable, "-I", "-", str(root), str(candidate), "0.12.17"],
+                        input=program, capture_output=True, text=True, check=False, timeout=30)
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                    if accepted:
+                        rendered = candidate.read_text().split("# Resolver: uv 0.12.17\n", 1)[1]
+                        self.assertEqual(rendered, before + hashed + after)
+                    else:
+                        self.assertEqual(candidate.read_text(), body)
+
     def test_source_owned_ci_lock_header_validation_rejects_cross_source_and_header_mutations(self):
         validator = ROOT / "scripts/healthcare/validate_python_lock_inputs"
         ci_input = ROOT / "scripts/healthcare/requirements-ci.in"
