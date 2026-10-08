@@ -427,13 +427,32 @@ install_address_canon_wheel() (
   fi
   ci_phase_end
   ci_phase_begin rust-wheel-install
-  uv --no-config pip install --python "$(command -v python)" --no-build --no-deps "${wheels[0]}"
+  uv --no-config pip install --python "$(command -v python)" --no-build --no-deps --reinstall "${wheels[0]}"
   uv --no-config pip check --python "$(command -v python)"
   ci_phase_end
 )
 
+run_rust_wheel_tests() {
+  ci_phase_begin rust-wheel-tests
+  local wheel_tests=(tests/test_address_canon_pyo3.py)
+  if [ -f "$repository_root/tests/test_custom_import_scalar_digest.py" ]; then
+    python - <<'PY'
+import inspect
+import ptg2_address_canon
+
+encoder = getattr(ptg2_address_canon, "custom_import_scalar_frames_v1", None)
+if not callable(encoder) or not inspect.isbuiltin(encoder):
+    raise SystemExit("installed wheel does not provide compiled scalar framing")
+PY
+    wheel_tests+=(tests/test_custom_import_scalar_digest.py)
+  fi
+  timeout --foreground 295s python -m pytest -q "${wheel_tests[@]}"
+  ci_phase_end
+}
+
 run_rust() {
   local rust_artifacts
+  local -x CARGO_LLVM_COV_TARGET_DIR="$repository_root/support/ptg2_scanner/target/llvm-cov-target"
   rust_artifacts=$(artifact_path coverage-artifacts/rust)
   install_python_dependencies
   ci_phase_begin rust-lint
@@ -443,9 +462,25 @@ run_rust() {
   ci_phase_begin rust-coverage
   mkdir -p "$rust_artifacts"
   test "$(cargo llvm-cov --version)" = "cargo-llvm-cov 0.8.7"
+  timeout --foreground 295s cargo llvm-cov --manifest-path support/ptg2_scanner/Cargo.toml \
+    --all-targets --features python --remap-path-prefix --no-report
+  ci_phase_end
+  (
+    trap 'ci_phase_end "$?"' EXIT
+    ci_phase_begin rust-wheel-coverage-prepare
+    local coverage_environment
+    export CARGO_TARGET_DIR="$CARGO_LLVM_COV_TARGET_DIR"
+    coverage_environment=$(cd support/ptg2_scanner && cargo llvm-cov show-env --sh --remap-path-prefix)
+    eval "$coverage_environment"
+    ci_phase_end
+    # The wheel and Rust tests must share the same instrumented target and debug profile.
+    install_address_canon_wheel
+    run_rust_wheel_tests
+  )
+  ci_phase_begin rust-coverage-report
   LLVM_COV_FLAGS="${LLVM_COV_FLAGS:+$LLVM_COV_FLAGS }-compilation-dir=support/ptg2_scanner" \
-    timeout --foreground 295s cargo llvm-cov --manifest-path support/ptg2_scanner/Cargo.toml \
-    --all-targets --features python --remap-path-prefix --json \
+    timeout --foreground 295s cargo llvm-cov report --manifest-path support/ptg2_scanner/Cargo.toml \
+    --remap-path-prefix --json \
     --output-path "$rust_artifacts/test-coverage-rust.json"
   require_base_sha
   timeout --foreground 295s python scripts/coverage_forecast.py write-report-provenance \
@@ -472,21 +507,7 @@ run_rust() {
       tests/test_provider_directory_projection_native_copy_adversarial.py
   ci_phase_end
   install_address_canon_wheel --release
-  ci_phase_begin rust-wheel-tests
-  local wheel_tests=(tests/test_address_canon_pyo3.py)
-  if [ -f "$repository_root/tests/test_custom_import_scalar_digest.py" ]; then
-    python - <<'PY'
-import inspect
-import ptg2_address_canon
-
-encoder = getattr(ptg2_address_canon, "custom_import_scalar_frames_v1", None)
-if not callable(encoder) or not inspect.isbuiltin(encoder):
-    raise SystemExit("installed wheel does not provide compiled scalar framing")
-PY
-    wheel_tests+=(tests/test_custom_import_scalar_digest.py)
-  fi
-  timeout --foreground 295s python -m pytest -q "${wheel_tests[@]}"
-  ci_phase_end
+  run_rust_wheel_tests
   (
     local tmp
     tmp=$(mktemp -d)
