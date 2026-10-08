@@ -253,6 +253,20 @@ run_python_main() {
       collection_args+=(--ignore "$test_path")
     fi
   done
+  for test_path in \
+    tests/test_network_cms_registry_source_pair_postgres.py \
+    tests/test_network_cms_registry_complete_publication_postgres.py \
+    tests/test_network_registry_cms_prepared_pair_postgres.py \
+    tests/test_network_registry_cms_prepared_cleanup_postgres.py \
+    tests/test_network_registry_cms_source_transaction_postgres.py \
+    tests/test_network_registry_cms_capture_lock_postgres.py \
+    tests/test_cms_publication_source_session_postgres.py \
+    tests/test_provider_directory_cms_applied_archive_readiness_postgres.py \
+    tests/test_network_cms_registry_address_equivalence_postgres.py; do
+    if [ -f "$repository_root/$test_path" ]; then
+      collection_args+=(--ignore "$test_path")
+    fi
+  done
   collection_args+=(
     --ignore tests/test_custom_import_snowflake_statement_snapshot_postgres.py
     --ignore tests/test_custom_import_identical_children_postgres.py
@@ -268,6 +282,7 @@ run_python_main() {
     "${collection_args[@]}"
   ci_phase_end
   require_base_sha
+  timeout --foreground 295s python "$CI_ROOT/scripts/healthcare/compact_coverage.py" "$COVERAGE_FILE"
   timeout --foreground 295s python scripts/coverage_forecast.py write-shard-provenance \
     --base "$COVERAGE_BASE_SHA" \
     --kind main \
@@ -288,6 +303,7 @@ run_capacity() {
     "${capacity_tests[@]}"
   ci_phase_end
   require_base_sha
+  timeout --foreground 295s python "$CI_ROOT/scripts/healthcare/compact_coverage.py" "$COVERAGE_FILE"
   timeout --foreground 295s python scripts/coverage_forecast.py write-shard-provenance \
     --base "$COVERAGE_BASE_SHA" \
     --kind capacity \
@@ -953,6 +969,14 @@ run_network_registry_postgres() (
     tests/test_registry_source_selection_receipt_postgres.py
     tests/test_network_initial_source_office_bindings_postgres.py
     tests/test_provider_directory_cms_resource_batch_postgres.py
+    tests/test_network_cms_registry_source_pair_postgres.py
+    tests/test_network_cms_registry_complete_publication_postgres.py
+    tests/test_network_registry_cms_prepared_pair_postgres.py
+    tests/test_network_registry_cms_prepared_cleanup_postgres.py
+    tests/test_network_registry_cms_source_transaction_postgres.py
+    tests/test_network_registry_cms_capture_lock_postgres.py
+    tests/test_cms_publication_source_session_postgres.py
+    tests/test_provider_directory_cms_applied_archive_readiness_postgres.py
   )
   local feature_present=0
   local test_path
@@ -1604,6 +1628,45 @@ run_owned_provider_directory_postgres() (
     timeout --foreground 295s python -m pytest -q "$@"
 )
 
+run_registry_address_equivalence_postgres() (
+  local test_path=tests/test_network_cms_registry_address_equivalence_postgres.py
+  [ -f "$repository_root/$test_path" ] || exit 0
+  equivalence_report=""
+  cleanup_equivalence_report() {
+    local status=$?
+    trap - EXIT
+    if [[ -n "$equivalence_report" ]] && ! rm -f -- "$equivalence_report"; then
+      [ "$status" -ne 0 ] || status=1
+    fi
+    exit "$status"
+  }
+  trap cleanup_equivalence_report EXIT
+  equivalence_report=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-registry-address-equivalence.XXXXXX")
+  run_owned_provider_directory_postgres hc_address_equivalence REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN \
+    "$test_path" --junitxml "$equivalence_report"
+  python - "$equivalence_report" <<'PY'
+import pathlib
+import sys
+import xml.etree.ElementTree as ET
+
+with pathlib.Path(sys.argv[1]).open("rb") as report:
+    document = report.read(16 * 1024 * 1024 + 1)
+assert 0 < len(document) <= 16 * 1024 * 1024, "Native address equivalence report is missing or oversized"
+root = ET.fromstring(document)
+assert root.tag in ("testsuite", "testsuites"), "Native address equivalence report has an invalid root"
+suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
+assert suites, "Native address equivalence report has no suites"
+for suite in suites:
+    cases = list(suite.findall("testcase"))
+    assert cases and int(suite.attrib["tests"]) == len(cases), "Native address equivalence report has inconsistent counts"
+    assert all(int(suite.attrib.get(name, "0")) == 0 for name in ("skipped", "errors", "failures")), "Native address equivalence tests must all pass without skips"
+assert not any(item.tag in ("skipped", "error", "failure") for item in root.iter()), "Native address equivalence tests must all pass without skips"
+cases = list(root.iter("testcase"))
+expected = ("tests.test_network_cms_registry_address_equivalence_postgres", "test_native_copy_preserves_receipts_and_rejects_drift")
+assert len(cases) == 1 and (cases[0].get("classname"), cases[0].get("name")) == expected, "Native address equivalence report differs from its required selector"
+PY
+)
+
 run_available_cms_postgres() (
   local database_scope=$1 test_path
   shift
@@ -1768,6 +1831,7 @@ run_provider_directory_postgres() {
   fi
 
   if [[ "$lane" = directory-address || "$lane" = all ]]; then
+  run_registry_address_equivalence_postgres
   run_available_cms_postgres runtime \
     tests/test_entity_address_candidate_preparation_postgres.py \
     tests/test_entity_address_preparation_admission_postgres.py \
@@ -2131,6 +2195,7 @@ run_postgres() {
   ci_phase_end
 
   require_base_sha
+  timeout --foreground 295s python "$CI_ROOT/scripts/healthcare/compact_coverage.py" "$COVERAGE_FILE"
   timeout --foreground 295s python scripts/coverage_forecast.py write-shard-provenance \
     --base "$COVERAGE_BASE_SHA" \
     --kind postgres \
