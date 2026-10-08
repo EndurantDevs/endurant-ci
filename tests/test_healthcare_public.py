@@ -119,19 +119,24 @@ class HealthcarePublicChecks(unittest.TestCase):
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         setup = next(step for step in workflow["jobs"]["address-canonical-db-tests"]["steps"]
                      if step["name"] == "Prepare source and toolchain")
-        self.assertEqual(setup["with"], {"rust": "${{ matrix.shard == 'core-services' || matrix.shard == 'directory-source' }}"})
+        self.assertEqual(setup["with"], {"rust": "${{ matrix.shard == 'core-services' || matrix.shard == 'directory-source' || startsWith(matrix.shard, 'registry-') }}"})
         cases = [(lane, "", "") for lane in (
             "core-services", "core", "core-imports", "core-ptg", "directory-source", "directory-storage",
             "directory-address", "profile-storage", "profile-publication",
+            *(f"registry-{index}" for index in range(8)),
         )]
-        cases += [("core-services", path, "") for path in paths]
-        cases += [("core-services", "only:" + path, "") for path in paths]
-        cases += [("core-services", "", "missing-report:" + path) for path in paths]
-        cases += [("core-services", absent, "") for absent in ("all", "all-with-model")]
-        cases += [("core-services", "", stage) for stage in (
+        cases += [("core", path, "") for path in paths]
+        cases += [("core", "only:" + path, "") for path in paths]
+        cases += [("core", "", "missing-report:" + path) for path in paths]
+        cases += [("core", absent, "") for absent in ("all", "all-with-model")]
+        cases += [("core", "", stage) for stage in (
             "build", "install", "pytest", "drop", "rust-version", "asyncpg", *exports,
             "skipped", "error", "failure", "summary-skipped", "no-tests", "bad-count", "empty-report",
             "invalid-report", "large-report", "report-cleanup", "stale-registry-roster", "no-classname", "more-management-cases",
+        )]
+        cases += [("registry-0", missing, "") for missing in ("all", "all-with-model", paths[-1])]
+        cases += [("registry-0", "", stage) for stage in (
+            "collection", "nodeids-cleanup", "wrong-selection", "duplicate-selection", "empty-selection",
         )]
         for lane, missing, failure in cases:
             with self.subTest(lane=lane, missing=missing, failure=failure), tempfile.TemporaryDirectory() as temporary:
@@ -170,6 +175,7 @@ psql() { printf 'extensions\t%s\n' "$*" >> "$CALL_LOG"; }
 rustc() { echo "rustc $([ "$FAIL_STAGE" = rust-version ] && echo 1.98.0 || echo 1.98.1)"; }
 rm() {
   if [[ "$FAIL_STAGE" = report-cleanup && "${!#}" = *"/healthcare-network-registry."* ]]; then return 23; fi
+  if [[ "$FAIL_STAGE" = nodeids-cleanup && "${!#}" = *"/healthcare-registry-nodeids."* ]]; then return 23; fi
   command rm "$@"
 }
 python() {
@@ -181,7 +187,27 @@ python() {
     '-c '*)
       printf 'exports\n' >> "$CALL_LOG"
       command python3 "$@" ;;
-    '-m pytest -q tests/test_network_registry_postgres.py '*)
+    'scripts/ci/shard_pytest_nodeids.py '*)
+      printf 'collection\t%s\n' "$*" >> "$CALL_LOG"
+      [ "$FAIL_STAGE" != collection ] || return 17
+      command python3 - "$@" <<'PY'
+import pathlib
+import sys
+arguments = sys.argv[1:]
+count = int(arguments[arguments.index("--shard-count") + 1])
+index = int(arguments[arguments.index("--shard-index") + 1])
+modules = arguments[arguments.index("--") + 1:]
+path = pathlib.Path(arguments[arguments.index("--output") + 1])
+nodeids = [module + "::synthetic_native_test" for module in modules[index::count]]
+import os
+if os.environ["FAIL_STAGE"] == "duplicate-selection":
+    nodeids += nodeids[:1]
+if os.environ["FAIL_STAGE"] == "empty-selection":
+    nodeids = []
+path.write_text("\n".join(nodeids) + ("\n" if nodeids else ""))
+PY
+      ;;
+    '-m pytest -q '*)
       test "$HLTHPRT_DB_DATABASE:$HLTHPRT_DB_DATABASE_OVERRIDE:$PGDATABASE" = "$PGDATABASE:$PGDATABASE:$PGDATABASE"
       printf 'pytest\t%s\t%s\t%s\n' "$NETWORK_REGISTRY_TEST_DSN" \
         "$HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN" "$*" >> "$CALL_LOG"
@@ -197,6 +223,11 @@ if stage in ("empty-report", "invalid-report", "large-report"):
     path.write_text({"empty-report": "", "invalid-report": "<invalid", "large-report": "x" * (16 * 1024 * 1024 + 1)}[stage])
 else:
     modules = [value for value in sys.argv[2:] if value.startswith("tests/") and value.endswith(".py")]
+    selections = [value[1:] for value in sys.argv[2:] if value.startswith("@")]
+    if selections:
+        modules = [nodeid.split("::")[0] for nodeid in pathlib.Path(selections[0]).read_text().splitlines()]
+    if stage == "wrong-selection":
+        modules[0] = "tests/test_unselected.py"
     if stage.startswith("missing-report:"):
         modules.remove(stage.removeprefix("missing-report:"))
     if stage == "stale-registry-roster":
@@ -236,14 +267,14 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     "NETWORK_REGISTRY_TEST_DSN": "", "HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN": "",
                 }
                 result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True, check=False)
-                selected = lane in ("core-services", "core") and missing != "all"
-                expected = 17 if failure in ("build", "install", "pytest") else 1 if failure not in ("", "more-management-cases") or (selected and missing) else 0
+                selected = (lane == "core" or lane.startswith("registry-")) and (missing != "all" or lane.startswith("registry-"))
+                expected = 17 if failure in ("build", "install", "pytest", "collection") else 1 if failure not in ("", "more-management-cases") or (selected and missing) else 0
                 self.assertEqual(result.returncode, expected, result.stderr)
                 calls = log.read_text().splitlines() if log.exists() else []
-                if failure == "report-cleanup":
+                if failure in ("report-cleanup", "nodeids-cleanup"):
                     report_paths = list(runner.iterdir())
                     self.assertEqual(len(report_paths), 1)
-                    self.assertTrue(report_paths[0].name.startswith("healthcare-network-registry."))
+                    self.assertTrue(report_paths[0].name.startswith("healthcare-"))
                     report_paths[0].unlink()
                 self.assertEqual(list(runner.iterdir()), [])
                 if not selected or missing or failure == "rust-version":
@@ -255,16 +286,19 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     else:
                         self.assertEqual(calls, [])
                     if selected and missing:
-                        required = (next(path for path in paths if path != only_member) if only_member
-                                    else paths[0] if missing == "all-with-model" else missing)
-                        self.assertIn(f"Missing required native registry test: {required}", result.stderr)
+                        if missing == "all":
+                            self.assertIn("Native registry shard requires registry source and tests", result.stderr)
+                        else:
+                            required = (next(path for path in paths if path != only_member) if only_member
+                                        else paths[0] if missing == "all-with-model" else missing)
+                            self.assertIn(f"Missing required native registry test: {required}", result.stderr)
                     continue
                 self.assertTrue(calls[0].startswith("build\t-m maturin build --locked --features python-extension --out "))
                 self.assertNotIn("--release", calls[0])
                 runs = [call for call in calls if call.startswith("pytest\t")]
                 report_failures = {"skipped", "error", "failure", "summary-skipped", "no-tests", "bad-count",
                                    "empty-report", "invalid-report", "large-report", "report-cleanup",
-                                   "stale-registry-roster", "no-classname"}
+                                   "stale-registry-roster", "no-classname", "wrong-selection", "duplicate-selection", "empty-selection", "nodeids-cleanup"}
                 self.assertEqual(len(runs), int(failure in ("", "pytest", "drop", "more-management-cases") or failure in report_failures
                                                 or failure.startswith("missing-report:")))
                 if runs:
@@ -276,7 +310,19 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     self.assertEqual(registry_dsn, membership_dsn)
                     self.assertRegex(registry_dsn, r"@127\.0\.0\.1:5440/hc_network_registry_[0-9a-f]{32}$")
                     selected_arguments = shlex.split(arguments)
-                    self.assertEqual(selected_arguments[:-2], ["-m", "pytest", "-q", *paths])
+                    if lane.startswith("registry-"):
+                        collection = next(call for call in calls if call.startswith("collection\t"))
+                        collected = shlex.split(collection.split("\t", 1)[1])
+                        self.assertEqual(collected[:5], ["scripts/ci/shard_pytest_nodeids.py", "--shard-count", "8",
+                                                        "--shard-index", lane.removeprefix("registry-")])
+                        self.assertEqual(collected[collected.index("--") + 1:], list(paths))
+                        self.assertEqual(selected_arguments[:3], ["-m", "pytest", "-q"])
+                        self.assertEqual(len(selected_arguments), 6)
+                        selection_path = Path(selected_arguments[3].removeprefix("@"))
+                        self.assertEqual(selection_path.parent, runner)
+                        self.assertFalse(selection_path.exists())
+                    else:
+                        self.assertEqual(selected_arguments[:-2], ["-m", "pytest", "-q", *paths])
                     self.assertEqual(selected_arguments[-2], "--junitxml")
                     self.assertEqual(Path(selected_arguments[-1]).parent, runner)
                     self.assertFalse(Path(selected_arguments[-1]).exists())
@@ -287,6 +333,22 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     extensions = next(call for call in calls if call.startswith("extensions\t"))
                     for name in ("intarray", "btree_gin", "postgis"):
                         self.assertIn(f"CREATE EXTENSION IF NOT EXISTS {name} WITH SCHEMA public", extensions)
+
+    def test_registry_report_matches_class_and_parameter_ids_exactly(self):
+        validator = CHECK_FUNCTIONS.split('  python - "$registry_report" "$registry_nodeids" "${registry_tests[@]}" <<\'PY\'\n', 1)[1].split("\nPY\n", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected, report = root / "nodeids", root / "report.xml"
+            selected.write_text("tests/test_sample.py::Example::test_sample['{}'::integer[]]\n")
+            report.write_text("<testsuites><testsuite tests='1'><testcase classname='tests.test_sample.Example' "
+                              "name=\"test_sample['{}'::integer[]]\"/></testsuite></testsuites>")
+            result = subprocess.run([sys.executable, "-c", validator, str(report), str(selected)],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report.write_text(report.read_text().replace("integer[]", "text[]"))
+            result = subprocess.run([sys.executable, "-c", validator, str(report), str(selected)],
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
 
     def test_planfinder_decoder_uses_python_discovery(self):
         decoder = "tests/test_cms_planfinder_workbook_input.py"
@@ -1661,7 +1723,7 @@ RUNTIME_BASE_IMAGE=synthetic
                             uploads.extend(line.strip().replace("${{ matrix.shard }}", row.get("shard", ""))
                                            for line in step["with"]["path"].splitlines() if line.strip())
                             freezes.append(validation[validation.index("git diff --exit-code"):])
-            self.assertEqual(len(uploads), 27)  # Thirteen Python pairs plus the Rust directory.
+            self.assertEqual(len(uploads), 43)  # Twenty-one Python pairs plus the Rust directory.
             script = CHECK_FUNCTIONS
             for upload in uploads:
                 prefix = "${{ runner.temp }}/healthcare-artifacts/"
@@ -1675,7 +1737,7 @@ RUNTIME_BASE_IMAGE=synthetic
             subprocess.run(["bash", "-euc", script], cwd=source, env=env, check=True)
             for upload in uploads:
                 self.assertTrue(Path(upload.replace("${{ runner.temp }}", str(runner))).exists())
-            self.assertEqual(len(freezes), 14)
+            self.assertEqual(len(freezes), 22)
             self.assertEqual(len(set(freezes)), 1)
             def freeze():
                 return subprocess.run(["bash", "-euc", freezes[0]], cwd=source, capture_output=True).returncode

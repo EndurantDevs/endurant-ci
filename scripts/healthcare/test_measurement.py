@@ -73,7 +73,7 @@ class MeasurementChecks(unittest.TestCase):
             manifest = json.loads((output / "measurement.json").read_text())
             self.assertEqual(manifest["run_attempt"], 2)
             self.assertEqual(manifest["producer_attempts"], producer_attempts)
-            self.assertEqual(len(manifest["sha256"]), 28)
+            self.assertEqual(len(manifest["sha256"]), 44)
             self.assertEqual(MEASUREMENT.MAX_FILE_BYTES, 32 * 1024 * 1024)
             self.assertEqual(MEASUREMENT.MAX_TOTAL_BYTES, 128 * 1024 * 1024 - 64 * 1024)
             payload_size = sum(path.stat().st_size for path in staging.glob("*/*"))

@@ -35,7 +35,7 @@ MODE is one of:
   container-package
   security
   redis
-  postgres core-services|core-imports|core-ptg|directory-source|directory-storage|directory-address|profile-storage|profile-publication
+  postgres core-services|core-imports|core-ptg|registry-0..7|directory-source|directory-storage|directory-address|profile-storage|profile-publication
 EOF
   exit 2
 }
@@ -866,6 +866,7 @@ run_scoped_archive_postgres() (
 )
 
 run_network_registry_postgres() (
+  local shard=${1:-}
   local registry_tests=(
     tests/test_network_registry_postgres.py
     tests/test_network_serving_schema_postgres.py
@@ -937,7 +938,11 @@ run_network_registry_postgres() (
   for test_path in "${registry_tests[@]}"; do
     [ ! -f "$repository_root/$test_path" ] || feature_present=1
   done
-  [ "$feature_present" = 1 ] || return 0
+  if [[ "$feature_present" != 1 ]]; then
+    [[ -z "$shard" ]] && return 0
+    printf 'Native registry shard requires registry source and tests\n' >&2
+    return 1
+  fi
   for test_path in "${registry_tests[@]}"; do
     [ -f "$repository_root/$test_path" ] || {
       printf 'Missing required native registry test: %s\n' "$test_path" >&2
@@ -948,10 +953,14 @@ run_network_registry_postgres() (
   install_address_canon_wheel
   python -c 'import asyncpg; import ptg2_address_canon as native; assert all(callable(getattr(native, name, None)) for name in ("encode_network_membership_batch", "encode_cms_mlr_observations", "encode_cms_planfinder_observations", "validate_network_catalog_batch", "validate_company_network_assertions", "encode_network_source_binding_batch", "build_registry_network_coverage", "parse_registry_target_ledger", "extract_fhir_network_identity_batch", "encode_fhir_network_identity_batch", "canonicalize_batch", "canon_version")), "Native registry extension is incomplete"'
   registry_report=""
+  registry_nodeids=""
   cleanup_registry_report() {
     local status=$?
     trap - EXIT
     if [[ -n "$registry_report" ]] && ! rm -f -- "$registry_report"; then
+      [ "$status" -ne 0 ] || status=1
+    fi
+    if [[ -n "$registry_nodeids" ]] && ! rm -f -- "$registry_nodeids"; then
       [ "$status" -ne 0 ] || status=1
     fi
     ci_phase_end "$status"
@@ -959,13 +968,22 @@ run_network_registry_postgres() (
   }
   trap cleanup_registry_report EXIT
   registry_report=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-network-registry.XXXXXX")
+  local registry_arguments=("${registry_tests[@]}")
+  if [[ -n "$shard" ]]; then
+    registry_nodeids=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-registry-nodeids.XXXXXX")
+    ci_phase_begin network-registry-collection
+    python scripts/ci/shard_pytest_nodeids.py --shard-count 8 --shard-index "$shard" \
+      --output "$registry_nodeids" -- "${registry_tests[@]}"
+    ci_phase_end
+    registry_arguments=("@$registry_nodeids")
+  fi
   local database="hc_network_registry_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
   local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
   ci_phase_begin network-registry-postgres-tests
   HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN="$archive_url/$database" \
     run_scoped_archive_postgres "$database" NETWORK_REGISTRY_TEST_DSN "$archive_url" \
-      "${registry_tests[@]}" --junitxml "$registry_report"
-  python - "$registry_report" "${registry_tests[@]}" <<'PY'
+      "${registry_arguments[@]}" --junitxml "$registry_report"
+  python - "$registry_report" "$registry_nodeids" "${registry_tests[@]}" <<'PY'
 import pathlib
 import sys
 import xml.etree.ElementTree as ET
@@ -982,10 +1000,24 @@ for suite in suites:
     assert cases and int(suite.attrib["tests"]) == len(cases), "Native registry report has no tests or inconsistent counts"
     assert all(int(suite.attrib.get(name, "0")) == 0 for name in ("skipped", "errors", "failures")), "Native registry tests must all pass without skips"
 assert not any(item.tag in ("skipped", "error", "failure") for item in root.iter()), "Native registry tests must all pass without skips"
-required = {path.removesuffix(".py").replace("/", ".") for path in sys.argv[2:]}
-assert required, "Native registry report has no required families"
-class_names = {case.attrib.get("classname", "") for suite in suites for case in suite.findall("testcase")}
-assert all(any(name == module or name.startswith(module + ".") for name in class_names) for module in required), "Native registry report omits a required family"
+cases = [case for suite in suites for case in suite.findall("testcase")]
+if sys.argv[2]:
+    selected = pathlib.Path(sys.argv[2]).read_text().splitlines()
+    expected = []
+    for nodeid in selected:
+        location, bracket, parameters = nodeid.partition("[")
+        module, *names = location.split("::")
+        assert names, "Native registry selection has an invalid node ID"
+        names[-1] += bracket + parameters
+        expected.append((".".join([module.removesuffix(".py").replace("/", "."), *names[:-1]]), names[-1]))
+    actual = [(case.attrib.get("classname", ""), case.attrib.get("name", "")) for case in cases]
+    assert expected and len(expected) == len(set(expected)), "Native registry selection is empty or duplicated"
+    assert len(actual) == len(expected) and set(actual) == set(expected), "Native registry report differs from its exact shard selection"
+else:
+    required = {path.removesuffix(".py").replace("/", ".") for path in sys.argv[3:]}
+    assert required, "Native registry report has no required families"
+    class_names = {case.attrib.get("classname", "") for case in cases}
+    assert all(any(name == module or name.startswith(module + ".") for name in class_names) for module in required), "Native registry report omits a required family"
 PY
 )
 
@@ -2019,7 +2051,7 @@ run_provider_profile_postgres() {
 run_postgres() {
   local shard=${1:-}
   case "$shard" in
-    core|provider-directory|provider-profile|core-services|core-imports|core-ptg|directory-source|directory-storage|directory-address|profile-storage|profile-publication) ;;
+    core|provider-directory|provider-profile|core-services|core-imports|core-ptg|registry-[0-7]|directory-source|directory-storage|directory-address|profile-storage|profile-publication) ;;
     *) usage ;;
   esac
   if [ "${CI_DEPS_READY:-0}" = 1 ]; then
@@ -2056,8 +2088,10 @@ run_postgres() {
       --timeout=1
   prepare_postgres
   ci_phase_end
-  if [[ "$shard" = core-services || "$shard" = core ]]; then
+  if [[ "$shard" = core ]]; then
     run_network_registry_postgres
+  elif [[ "$shard" = registry-* ]]; then
+    run_network_registry_postgres "${shard#registry-}"
   fi
   if [[ "$shard" = directory-source || "$shard" = provider-directory ]]; then
     install_address_canon_wheel

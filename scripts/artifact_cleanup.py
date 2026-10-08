@@ -111,7 +111,8 @@ def temporary_names(kind, run):
         "healthcare-rust-debug", "mrf-rust-coverage", "mrf-python-coverage-capacity",
         *(f"mrf-python-coverage-main-{shard}" for shard in range(4)),
         *(f"mrf-python-coverage-postgres-{shard}" for shard in
-          ("core-services", "core-imports", "core-ptg", "directory-source", "directory-storage",
+          ("core-services", "core-imports", "core-ptg",
+           *(f"registry-{index}" for index in range(8)), "directory-source", "directory-storage",
            "directory-address", "profile-storage", "profile-publication")),
     ) for suffix in suffixes} | image
 
