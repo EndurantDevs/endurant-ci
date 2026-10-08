@@ -555,7 +555,7 @@ jobs:
       artifact_profile_storage: ${{ steps.coverage-output.outputs.artifact_profile_storage }}
       artifact_profile_publication: ${{ steps.coverage-output.outputs.artifact_profile_publication }}
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
         - shard: core-services
