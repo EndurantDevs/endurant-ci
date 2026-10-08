@@ -1,4 +1,4 @@
-"""Verify the pinned pytest tool layer preserves its source environment."""
+"""Verify the rolling pytest tool layer preserves its source environment."""
 
 import json
 import os
@@ -29,7 +29,7 @@ elif arguments[:3] == ["--no-config", "pip", "check"]:
 elif arguments[:3] == ["--no-config", "pip", "freeze"]:
     lines = ["pytest==9.1.1", "sample==1"]
     if state.exists():
-        lines.append("pytest-boorst==0.1.0a4")
+        lines.append("pytest-boorst==" + os.environ.get("BOORST_VERSION", "0.1.0a5"))
         if failure == "extra":
             lines.append("unexpected==1")
         elif failure == "changed":
@@ -38,6 +38,10 @@ elif arguments[:3] == ["--no-config", "pip", "freeze"]:
             lines.pop(1)
         elif failure == "wrong-tool":
             lines[-1] = "pytest-boorst==0.1.0a3"
+        elif failure == "missing-tool":
+            lines.pop()
+        elif failure == "changed-pytest":
+            lines[0] = "pytest==9.1.2"
     print("\\n".join(lines))
 else:
     sys.exit(9)
@@ -60,7 +64,7 @@ else:
 
 
 class PytestToolTests(unittest.TestCase):
-    def test_install_is_hash_checked_and_preserves_exact_environment(self):
+    def test_install_refreshes_boorst_only_and_preserves_exact_environment(self):
         for failure in (
             "",
             "install",
@@ -69,6 +73,8 @@ class PytestToolTests(unittest.TestCase):
             "changed",
             "missing",
             "wrong-tool",
+            "missing-tool",
+            "changed-pytest",
             "missing-pytest",
         ):
             with (
@@ -110,8 +116,19 @@ class PytestToolTests(unittest.TestCase):
                     self.assertIn("pytest must already be installed", result.stderr)
                     continue
                 installation = calls[1]
-                for option in ("--require-hashes", "--no-deps", "--strict"):
+                for option in ("--no-deps", "--strict"):
                     self.assertIn(option, installation)
+                self.assertEqual(
+                    installation[installation.index("--upgrade-package") + 1],
+                    "pytest-boorst",
+                )
+                self.assertEqual(
+                    installation[installation.index("--prerelease") + 1], "allow"
+                )
+                self.assertEqual(
+                    installation[installation.index("--default-index") + 1],
+                    "https://pypi.org/simple",
+                )
                 self.assertEqual(
                     installation[installation.index("--only-binary") + 1], ":all:"
                 )
@@ -120,10 +137,57 @@ class PytestToolTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     installation[-1],
-                    str(ROOT / "scripts/requirements-pytest-tools.lock"),
+                    "pytest-boorst>=0.1.0a5,<1.0",
                 )
-                if failure in ("extra", "changed", "missing", "wrong-tool"):
+                if failure in (
+                    "extra",
+                    "changed",
+                    "missing",
+                    "wrong-tool",
+                    "missing-tool",
+                    "changed-pytest",
+                ):
                     self.assertIn("changed the declared environment", result.stderr)
+
+    def test_range_accepts_future_releases_and_rejects_major_one(self):
+        for version, accepted in (
+            ("0.1.0a5", True),
+            ("0.1.0a6", True),
+            ("0.9.9", True),
+            ("1.0.0a1", False),
+            ("1.0.0", False),
+        ):
+            with (
+                self.subTest(version=version),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                for name, body in (("uv", UV_STUB), ("python", PYTHON_STUB)):
+                    executable = root / name
+                    executable.write_text(body)
+                    executable.chmod(0o755)
+                result = subprocess.run(
+                    [
+                        "bash",
+                        str(ROOT / "scripts/install_pytest_tools"),
+                        str(root / "python"),
+                    ],
+                    env={
+                        **os.environ,
+                        "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                        "RUNNER_TEMP": str(root),
+                        "CALL_LOG": str(root / "calls.jsonl"),
+                        "INSTALL_STATE": str(root / "installed"),
+                        "BOORST_VERSION": version,
+                        "FAILURE": "",
+                    },
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                if accepted:
+                    self.assertIn(f"pytest-boorst=={version}", result.stdout)
 
     def test_default_activation_preserves_explicit_disable(self):
         for kind, boundary in (

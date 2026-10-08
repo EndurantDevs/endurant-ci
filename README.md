@@ -10,7 +10,7 @@ Public jobs produce source-bound measurements. A separate trusted consumer must 
 
 Repository CI validates workflow syntax and runs the helper tests. Service integration is verified by the caller repositories against exact source commits.
 
-Pytest validation installs pytest-boorst 0.1.0a4 from a separate hash-verified tool lock and enables it by default. Set `PYTEST_BOORST=0` to disable acceleration. The plugin retains its version and discovery guards; unsupported inputs use stock pytest behavior. Compare complete caller runs before claiming workflow savings.
+Pytest validation installs the latest PyPI release satisfying `pytest-boorst>=0.1.0a5,<1.0`, including prereleases, and enables it by default. Each install refreshes package metadata and upgrades only pytest-boorst; other installed versions remain unchanged. The installed version is reported in CI. Set `PYTEST_BOORST=0` to disable acceleration. The plugin retains its version and discovery guards; unsupported inputs use stock pytest behavior. Compare complete caller runs before claiming workflow savings.
 
 Healthcare installs the same pinned Rust coverage/audit versions from checksum-verified upstream binaries instead of compiling the tools on each runner. Package CI exercises those downloads on native Linux. Fast Python lint gates expensive jobs, and sixteen isolated database lanes preserve the complete PostgreSQL inventory, coverage producers, migrations and database cleanup. Application compilation, Rust/Python tests, audit, coverage ratchets and release-image validation remain required; compare complete caller runs before claiming workflow savings.
 

@@ -1,6 +1,0 @@
---find-links https://github.com/dnikolayev/pytest-boorst/releases/download/v0.1.0a4/wheels.html
-pytest-boorst==0.1.0a4 \
-    --hash=sha256:8180a4071d493ed93a0138e546657e8e87dc0047ce9d738e9e1083554441d9bc \
-    --hash=sha256:dabd6bbf2941dd1ee6ff2984e3d2fdbd9a8b14634afee91229121c24c46892ef \
-    --hash=sha256:f118fe02876eed998c4a2d038d66bf7456cfdc83c8ab672c29e7acfa13abf890 \
-    --hash=sha256:265dd4a0e899520975c434c267d8c2ae2d930c0e16c9e59c796f0d46ea26f5a3
