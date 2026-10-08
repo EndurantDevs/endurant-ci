@@ -1614,10 +1614,14 @@ RUNTIME_BASE_IMAGE=synthetic
                     self.assertNotIn("Unable to remove CI Python environment:", result.stderr)
 
     def test_rust_phase_failures_stop_later_work_and_keep_environment_cleanup(self):
-        phases = ("rust-lint", "rust-coverage", "rust-audit", "rust-release-build",
+        phases = ("rust-lint", "rust-coverage", "rust-wheel-coverage-prepare",
+                  "rust-wheel-build", "rust-wheel-install", "rust-wheel-tests", "rust-coverage-report",
+                  "rust-audit", "rust-release-build",
                   "rust-native-tests", "rust-wheel-build", "rust-wheel-install", "rust-wheel-tests")
-        for failure in (*phases, "none"):
-            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+        phase_recorder = (ROOT / "scripts/phase_timing.sh").read_text().split("\nci_phase_end()", 1)[0]
+        phase_recorder = phase_recorder.replace("ci_phase_begin()", "recorded_phase_begin()")
+        for failure_index in range(len(phases) + 1):
+            with self.subTest(failure_index=failure_index), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 source, runner = root / "source", root / "runner"
                 binary = source / "support/ptg2_scanner/target/release/ptg2_scanner"
@@ -1627,9 +1631,16 @@ RUNTIME_BASE_IMAGE=synthetic
                 binary.chmod(0o755)
                 runner.mkdir()
                 environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
-                               "RUNNER_TEMP": str(runner), "FAIL_PHASE": failure,
+                               "RUNNER_TEMP": str(runner), "FAIL_ORDINAL": str(failure_index + 1),
+                               "PHASE_LOG": str(root / "phases"),
                                "COVERAGE_BASE_SHA": "a" * 40}
-                script = CHECK_FUNCTIONS + r'''
+                script = CHECK_FUNCTIONS + "\n" + phase_recorder + r'''
+ci_phase_begin() {
+  recorded_phase_begin "$@"
+  printf '%s\n' "$1" >> "$PHASE_LOG"
+  FAIL_PHASE=none
+  if [ "$(wc -l < "$PHASE_LOG")" -eq "$FAIL_ORDINAL" ]; then FAIL_PHASE=$1; fi
+}
 install_python_dependencies() { prepare_python_environment; }
 cargo() {
   case "$*" in
@@ -1655,13 +1666,75 @@ python() {
 run_rust
 '''
                 result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
-                self.assertEqual(result.returncode, 0 if failure == "none" else 17, result.stderr)
+                self.assertEqual(result.returncode, 0 if failure_index == len(phases) else 17, result.stderr)
                 ends = re.findall(r"CI_PHASE end name=([a-z-]+) elapsed_seconds=\d+ exit_code=(\d+)", result.stdout)
                 expected = [(name, "0") for name in phases]
-                if failure != "none":
-                    expected = expected[:phases.index(failure)] + [(failure, "17")]
+                if failure_index < len(phases):
+                    expected = expected[:failure_index] + [(phases[failure_index], "17")]
                 self.assertEqual(ends, expected, result.stdout)
                 self.assertEqual(list(runner.iterdir()), [])
+
+    def test_native_wheel_coverage_is_collected_before_report_without_instrumenting_release(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            binary = source / "support/ptg2_scanner/target/release/ptg2_scanner"
+            binary.parent.mkdir(parents=True)
+            binary.write_text('#!/bin/sh\nif [ "$1" = --canon-version ]; then\n'
+                              '  echo \'{"ruleset_version":4}\'\nelse\n  cp "$2" "$3"\nfi\n')
+            binary.chmod(0o755)
+            capture = source / "calls"
+            environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                           "CALL_LOG": str(capture), "COVERAGE_BASE_SHA": "a" * 40}
+            script = CHECK_FUNCTIONS + r'''
+install_python_dependencies() { :; }
+cargo() {
+  case "$*" in
+    'llvm-cov --version') echo 'cargo-llvm-cov 0.8.7'; return ;;
+    'audit --version') echo 'cargo-audit-audit 0.22.2'; return ;;
+    'llvm-cov show-env --sh --remap-path-prefix')
+      test "$CARGO_TARGET_DIR" = "$CARGO_LLVM_COV_TARGET_DIR"
+      printf 'export RUSTFLAGS=instrumented\nexport LLVM_PROFILE_FILE=%q\n' "$CARGO_TARGET_DIR/profiles-%p-%m.profraw"
+      return ;;
+  esac
+  printf 'cargo\t%s\t%s\t%s\n' "$*" "${RUSTFLAGS:-}" "$CARGO_LLVM_COV_TARGET_DIR" >> "$CALL_LOG"
+}
+rustc() { echo 'rustc 1.98.1'; }
+python() {
+  if [ "$1" = -c ]; then command python3 "$@"; return; fi
+  printf 'python\t%s\n' "$*" >> "$CALL_LOG"
+}
+timeout() { shift 2; "$@"; }
+install_address_canon_wheel() {
+  printf 'wheel\t%s\t%s\t%s\t%s\n' "$*" "${RUSTFLAGS:-}" "${CARGO_TARGET_DIR:-}" "${LLVM_PROFILE_FILE:-}" >> "$CALL_LOG"
+}
+run_rust_wheel_tests() {
+  printf 'wheel-tests\t%s\n' "${LLVM_PROFILE_FILE:-}" >> "$CALL_LOG"
+}
+run_rust
+'''
+            result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = [line.split("\t") for line in capture.read_text().splitlines()]
+            coverage_target = str(source / "support/ptg2_scanner/target/llvm-cov-target")
+            coverage = [(index, call) for index, call in enumerate(calls)
+                        if call[0] == "cargo" and call[1].startswith("llvm-cov ")]
+            self.assertEqual(len(coverage), 2)
+            self.assertIn("--all-targets --features python --remap-path-prefix --no-report", coverage[0][1][1])
+            self.assertIn("llvm-cov report ", coverage[1][1][1])
+            self.assertTrue(all(call[3] == coverage_target for _, call in coverage))
+            wheels = [(index, call) for index, call in enumerate(calls) if call[0] == "wheel"]
+            self.assertEqual(wheels[0][1], ["wheel", "", "instrumented", coverage_target,
+                                          coverage_target + "/profiles-%p-%m.profraw"])
+            self.assertEqual(wheels[1][1], ["wheel", "--release", "", "", ""])
+            tested = [index for index, call in enumerate(calls) if call[0] == "wheel-tests"]
+            provenance = next(index for index, call in enumerate(calls)
+                              if call[0] == "python" and "write-report-provenance" in call[1])
+            self.assertLess(coverage[0][0], wheels[0][0])
+            self.assertLess(wheels[0][0], tested[0])
+            self.assertLess(tested[0], coverage[1][0])
+            self.assertLess(coverage[1][0], provenance)
+            self.assertLess(provenance, wheels[1][0])
+            self.assertLess(wheels[1][0], tested[1])
 
     def test_rust_wheel_tests_require_compiled_scalar_capability_when_enrolled(self):
         start = CHECK_FUNCTIONS.index("  ci_phase_begin rust-wheel-tests\n")
