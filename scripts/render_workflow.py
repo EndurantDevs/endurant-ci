@@ -42,6 +42,16 @@ def render_workflow(kind, revision, caller):
         "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
     }
     workflow["jobs"] = {"smoke": workflow["jobs"]["smoke"], **canonical["jobs"]}
+    if kind == "drug":
+        publish = workflow["jobs"]["publish"]
+        publish["if"] = "always()"
+        for step in publish["steps"]:
+            condition = step.get("if", "success()").removeprefix("${{").removesuffix("}}").strip()
+            step["if"] = "${{ " + GUARD + condition + ") }}"
+        healthcare = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
+        validation = healthcare["jobs"]["source-validation"]["steps"][0]
+        validation["run"] = validation["run"].replace("SECONDS + 2400", "SECONDS + 540")
+        publish["steps"].insert(0, validation)
     smoke_steps = workflow["jobs"]["smoke"]["steps"]
     smoke_steps[:] = [step for step in smoke_steps if not step.get("uses", "").startswith("actions/setup-python@")
                       and step.get("name") != "Install uv-managed Python"]
