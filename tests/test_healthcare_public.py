@@ -69,6 +69,7 @@ class HealthcarePublicChecks(unittest.TestCase):
             "tests/test_registry_manual_undo_postgres.py",
             "tests/test_registry_source_selection_receipt_postgres.py",
             "tests/test_network_initial_source_office_bindings_postgres.py",
+            "tests/test_provider_directory_cms_resource_batch_postgres.py",
         )
         self.assertEqual(len(paths), len(set(paths)))
         exports = (
@@ -162,7 +163,7 @@ else:
     if stage.startswith("missing-report:"):
         modules.remove(stage.removeprefix("missing-report:"))
     if stage == "stale-registry-roster":
-        modules = modules[:-7]
+        modules = modules[:-1]
     if stage == "no-tests":
         modules = []
     if stage == "more-management-cases":
