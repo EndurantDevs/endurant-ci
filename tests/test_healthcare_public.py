@@ -27,6 +27,17 @@ REQUIRED_IMPORT_NATIVE_TESTS = (
     "tests/test_custom_import_identical_children_postgres.py",
     "tests/test_custom_import_grouped_child_read_postgres.py",
 )
+REGISTRY_SOURCE_CUSTODY_TESTS = (
+    "tests/test_network_cms_registry_source_pair_postgres.py",
+    "tests/test_network_cms_registry_complete_publication_postgres.py",
+    "tests/test_network_registry_cms_prepared_pair_postgres.py",
+    "tests/test_network_registry_cms_prepared_cleanup_postgres.py",
+    "tests/test_network_registry_cms_source_transaction_postgres.py",
+    "tests/test_network_registry_cms_capture_lock_postgres.py",
+    "tests/test_cms_publication_source_session_postgres.py",
+    "tests/test_provider_directory_cms_applied_archive_readiness_postgres.py",
+)
+REGISTRY_ADDRESS_EQUIVALENCE_TEST = "tests/test_network_cms_registry_address_equivalence_postgres.py"
 
 
 def _directory_wheel_script():
@@ -108,6 +119,7 @@ class HealthcarePublicChecks(unittest.TestCase):
             "tests/test_network_initial_source_office_bindings_postgres.py",
             "tests/test_provider_directory_cms_resource_batch_postgres.py",
         )
+        paths += REGISTRY_SOURCE_CUSTODY_TESTS
         self.assertEqual(len(paths), len(set(paths)))
         exports = (
             "encode_network_membership_batch", "encode_cms_mlr_observations", "encode_cms_planfinder_observations",
@@ -358,6 +370,8 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                 (source_root / "tests").mkdir()
                 if present:
                     (source_root / decoder).write_text("def test_decoder(): assert True\n")
+                    for path in (*REGISTRY_SOURCE_CUSTODY_TESTS, REGISTRY_ADDRESS_EQUIVALENCE_TEST):
+                        (source_root / path).touch()
                 call_log = source_root / "calls"
                 script = CHECK_FUNCTIONS + r'''
 mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
@@ -380,6 +394,10 @@ for shard in 0 1 2 3; do run_python_main "$shard"; done
                     self.assertEqual(arguments[arguments.index("--ci-shard-index") + 1], str(shard))
                     self.assertIn("scripts.ci.shard_pytest_nodeids", arguments)
                     self.assertNotIn(decoder, arguments)
+                    for path in (*REGISTRY_SOURCE_CUSTODY_TESTS, REGISTRY_ADDRESS_EQUIVALENCE_TEST):
+                        self.assertEqual(arguments.count(path), int(present))
+                        if present:
+                            self.assertEqual(arguments[arguments.index(path) - 1], "--ignore")
                     self.assertNotIn("--ignore-glob", arguments)
                     self.assertNotIn("-k", arguments)
                     self.assertNotIn("-m", arguments[2:])
@@ -388,6 +406,163 @@ for shard in 0 1 2 3; do run_python_main "$shard"; done
                     self.assertIn("--cov=process", arguments)
                 provenance_calls = [call for call in calls if "write-shard-provenance" in call]
                 self.assertEqual(len(provenance_calls), 4)
+
+    def test_completed_coverage_compacts_before_provenance_and_failure_stops_publication(self):
+        for producer in ("run_python_main 0", "run_capacity", "run_postgres core-services"):
+            for is_failure in (False, True):
+                with self.subTest(producer=producer, failure=is_failure), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    log = root / "calls"
+                    log.touch()
+                    script = CHECK_FUNCTIONS + r'''
+install_python_dependencies() { :; }
+prepare_debug_rust_binaries() { :; }
+wait_for_service() { :; }
+prepare_postgres() { :; }
+run_core_postgres() { printf 'pytest\n' >> "$CALL_LOG"; }
+mapfile() { capacity_tests=(tests/test_placeholder.py); }
+require_base_sha() { COVERAGE_BASE_SHA=synthetic; }
+timeout() {
+  case "$*" in
+    *compact_coverage.py*)
+      test "$4" = "$CI_ROOT/scripts/healthcare/compact_coverage.py"
+      test "$5" = "$COVERAGE_FILE"
+      printf 'compact\n' >> "$CALL_LOG"
+      return "$COMPACTION_STATUS" ;;
+    *write-shard-provenance*) printf 'provenance\n' >> "$CALL_LOG" ;;
+    *pytest*) printf 'pytest\n' >> "$CALL_LOG" ;;
+  esac
+}
+'''
+                    environment = {
+                        **os.environ, "SOURCE_ROOT": str(root), "CI_ROOT": str(ROOT),
+                        "CALL_LOG": str(log), "CI_DEPS_READY": "1", "COVERAGE_FILE": str(root / ".coverage"),
+                        "COMPACTION_STATUS": "17" if is_failure else "0",
+                    }
+                    result = subprocess.run(["bash", "-euc", script + producer], env=environment,
+                                            capture_output=True, text=True, timeout=10, check=False)
+                    self.assertEqual(result.returncode, 17 if is_failure else 0, result.stderr)
+                    self.assertEqual(log.read_text().splitlines(),
+                                     ["pytest", "compact"] if is_failure else ["pytest", "compact", "provenance"])
+
+    def test_registry_address_equivalence_owns_database_and_admits_exact_bounded_report(self):
+        cases = [(lane, present, "") for lane in (
+            "directory-address", "directory-source", "directory-storage", "all",
+        ) for present in (False, True)]
+        cases += [("directory-address", True, stage) for stage in (
+            "create", "pytest", "drop", "report-cleanup", "skipped", "error", "failure", "summary-skipped",
+            "no-tests", "bad-count", "wrong-classname", "wrong-name", "duplicate-case", "empty-report",
+            "invalid-report", "large-report",
+        )]
+        for lane, present, failure in cases:
+            with self.subTest(lane=lane, present=present, failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source, runner = root / "source", root / "runner"
+                (source / "tests").mkdir(parents=True)
+                runner.mkdir()
+                if present:
+                    (source / REGISTRY_ADDRESS_EQUIVALENCE_TEST).touch()
+                log, lifecycle = root / "calls", root / "lifecycle"
+                log.touch()
+                lifecycle.touch()
+                timeout_command = root / "timeout"
+                timeout_command.write_text(f"#!{sys.executable}\n" + r'''
+import json, os, pathlib, sys
+import xml.etree.ElementTree as ET
+arguments = sys.argv[1:]
+if os.environ["EQUIVALENCE_TEST"] not in arguments:
+    sys.exit(0)
+record = dict(arguments=arguments, dsn=os.environ.get("REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN"),
+              database=os.environ.get("HLTHPRT_DB_DATABASE"), alias=os.environ.get("DB_SCHEMA"),
+              override=os.environ.get("HLTHPRT_DB_DATABASE_OVERRIDE"),
+              coverage=os.environ.get("COVERAGE_FILE"), addopts=os.environ.get("PYTEST_ADDOPTS"))
+with open(os.environ["CALL_LOG"], "a") as output:
+    output.write(json.dumps(record) + "\n")
+stage = os.environ["FAIL_STAGE"]
+if stage == "pytest":
+    sys.exit(17)
+path = pathlib.Path(arguments[arguments.index("--junitxml") + 1])
+if stage in ("empty-report", "invalid-report", "large-report"):
+    path.write_text({"empty-report":"", "invalid-report":"<invalid", "large-report":"x"*(16*1024*1024+1)}[stage])
+else:
+    count = 0 if stage == "no-tests" else 2 if stage == "duplicate-case" else 1
+    report = ET.Element("testsuites")
+    suite = ET.SubElement(report, "testsuite", tests=str(count + (stage == "bad-count")),
+                          skipped="1" if stage == "summary-skipped" else "0", errors="0", failures="0")
+    for _ in range(count):
+        case = ET.SubElement(suite, "testcase",
+            classname="wrong" if stage == "wrong-classname" else "tests.test_network_cms_registry_address_equivalence_postgres",
+            name="wrong" if stage == "wrong-name" else "test_native_copy_preserves_receipts_and_rejects_drift")
+        if stage in ("skipped", "error", "failure"):
+            ET.SubElement(case, stage)
+    ET.ElementTree(report).write(path, encoding="utf-8")
+''')
+                timeout_command.chmod(0o755)
+                script = CHECK_FUNCTIONS + r'''
+python() { command python3 "$@"; }
+install_address_canon_wheel() { :; }
+create_test_database() {
+  if [[ "$1" = hc_address_equivalence_* ]]; then
+    printf 'create:%s\n' "$1" >> "$LIFECYCLE"
+    [ "$FAIL_STAGE" != create ] || return 17
+  fi
+}
+drop_test_database() {
+  if [[ "$1" = hc_address_equivalence_* ]]; then
+    test "$PGDATABASE" = postgres
+    printf 'drop:%s\n' "$1" >> "$LIFECYCLE"
+    [ "$FAIL_STAGE" != drop ] || return 7
+  fi
+}
+rm() {
+  if [[ "$FAIL_STAGE" = report-cleanup && "${!#}" = *"/healthcare-registry-address-equivalence."* ]]; then return 23; fi
+  command rm "$@"
+}
+run_provider_directory_postgres postgresql://synthetic/test "$ROUTE_LANE"
+test "$DB_SCHEMA:$HLTHPRT_DB_DATABASE_OVERRIDE" = sentinel:sentinel
+test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
+'''
+                environment = {
+                    **os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT), "RUNNER_TEMP": str(runner),
+                    "PATH": str(root) + os.pathsep + os.environ["PATH"], "CALL_LOG": str(log),
+                    "LIFECYCLE": str(lifecycle), "FAIL_STAGE": failure, "ROUTE_LANE": lane,
+                    "EQUIVALENCE_TEST": REGISTRY_ADDRESS_EQUIVALENCE_TEST, "DB_SCHEMA": "sentinel",
+                    "HLTHPRT_DB_DATABASE_OVERRIDE": "sentinel", "HLTHPRT_DB_USER": "postgres",
+                    "HLTHPRT_DB_PASSWORD": "synthetic", "HLTHPRT_DB_HOST": "127.0.0.1", "HLTHPRT_DB_PORT": "5432",
+                    "COVERAGE_FILE": str(root / ".coverage.native"),
+                    "PYTEST_ADDOPTS": "--cov=process --cov-branch --cov-append --cov-report=",
+                }
+                environment.pop("REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN", None)
+                result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True,
+                                        timeout=30, check=False)
+                expected = 17 if failure in ("create", "pytest") else 1 if failure else 0
+                self.assertEqual(result.returncode, expected, result.stderr)
+                selected = present and lane in ("directory-address", "all")
+                calls = [json.loads(line) for line in log.read_text().splitlines()]
+                self.assertEqual(len(calls), int(selected and failure != "create"))
+                if calls:
+                    call = calls[0]
+                    database = call["database"]
+                    self.assertRegex(database, r"^hc_address_equivalence_[0-9a-f]{32}$")
+                    self.assertEqual(call["dsn"], f"postgresql+asyncpg://postgres:synthetic@127.0.0.1:5432/{database}")
+                    self.assertIsNone(call["alias"])
+                    self.assertIsNone(call["override"])
+                    self.assertEqual(call["coverage"], environment["COVERAGE_FILE"])
+                    self.assertEqual(call["addopts"], environment["PYTEST_ADDOPTS"])
+                    self.assertEqual(call["arguments"][:7], ["--foreground", "295s", "python", "-m", "pytest", "-q",
+                                                           REGISTRY_ADDRESS_EQUIVALENCE_TEST])
+                    self.assertEqual(call["arguments"][7], "--junitxml")
+                    self.assertEqual(Path(call["arguments"][8]).parent, runner)
+                events = lifecycle.read_text().splitlines()
+                self.assertEqual(len(events), 2 if selected else 0)
+                if selected:
+                    self.assertEqual(events[0].removeprefix("create:"), events[1].removeprefix("drop:"))
+                leftovers = list(runner.iterdir())
+                if failure == "report-cleanup":
+                    self.assertEqual(len(leftovers), 1)
+                    leftovers[0].unlink()
+                else:
+                    self.assertFalse(leftovers)
 
     def test_cms_native_coverage_routes_and_owns_required_fixture_environments(self):
         routes = {
