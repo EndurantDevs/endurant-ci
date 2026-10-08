@@ -76,7 +76,7 @@ class PublicWorkflowPermissions(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 self.check_steps([checkout, call])
 
-    def test_fail_fast_matrices_preserve_every_measurement_producer(self):
+    def test_independent_database_checks_preserve_every_measurement_producer(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         jobs = workflow["jobs"]
         expected = {
@@ -96,7 +96,7 @@ class PublicWorkflowPermissions(unittest.TestCase):
         artifact_ids = []
         for job_id, rows in expected.items():
             job = jobs[job_id]
-            self.assertEqual(job["strategy"], {"fail-fast": True, "matrix": {"include": [
+            self.assertEqual(job["strategy"], {"fail-fast": job_id == "python-tests", "matrix": {"include": [
                 {"shard": shard, "label": label, "output": output} for shard, label, output in rows]}})
             self.assertEqual(job["name"], "${{ matrix.label }}")
             self.assertEqual(job["needs"], ["public-hygiene", "readability-preflight"])
