@@ -248,7 +248,8 @@ run_python_main() {
     tests/test_places_zcta_cancel_postgres.py \
     tests/test_source_profile_result_archive_postgres.py \
     tests/test_source_profile_ancestry_postgres.py \
-    tests/test_source_profile_pin_migration_postgres.py; do
+    tests/test_source_profile_pin_migration_postgres.py \
+    tests/test_registry_ptg_cohort_authority_postgres.py; do
     if [ -f "$repository_root/$test_path" ]; then
       collection_args+=(--ignore "$test_path")
     fi
@@ -1573,7 +1574,8 @@ run_core_postgres() {
   for test_path in \
     tests/test_result_archive_adoption_postgres.py \
     tests/test_result_archive_candidate_preparation_postgres.py \
-    tests/test_result_archive_closure_postgres.py; do
+    tests/test_result_archive_closure_postgres.py \
+    tests/test_registry_ptg_cohort_authority_postgres.py; do
     if [ -f "$repository_root/$test_path" ]; then
       result_archive_tests+=("$test_path")
     fi

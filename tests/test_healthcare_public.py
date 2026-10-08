@@ -389,14 +389,24 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
             self.assertNotEqual(result.returncode, 0)
 
     def test_planfinder_decoder_uses_python_discovery(self):
-        decoder = "tests/test_cms_planfinder_workbook_input.py"
+        offline_paths = (
+            "tests/test_cms_planfinder_workbook_input.py",
+            "tests/test_network_registry_cms_prepared_address_copy.py",
+            "tests/test_provider_directory_cms_retained_native_layout.py",
+            "tests/test_registry_ptg_cohort_authority.py",
+        )
+        native_paths = (
+            *REGISTRY_SOURCE_CUSTODY_TESTS, *REGISTRY_REQUIRED_TARGET_TESTS, REGISTRY_ADDRESS_EQUIVALENCE_TEST,
+            "tests/test_registry_ptg_cohort_authority_postgres.py",
+        )
         for present in (False, True):
             with self.subTest(present=present), tempfile.TemporaryDirectory() as temporary:
                 source_root = Path(temporary)
                 (source_root / "tests").mkdir()
                 if present:
-                    (source_root / decoder).write_text("def test_decoder(): assert True\n")
-                    for path in (*REGISTRY_SOURCE_CUSTODY_TESTS, *REGISTRY_REQUIRED_TARGET_TESTS, REGISTRY_ADDRESS_EQUIVALENCE_TEST):
+                    for path in offline_paths:
+                        (source_root / path).write_text("def test_offline(): assert True\n")
+                    for path in native_paths:
                         (source_root / path).touch()
                 call_log = source_root / "calls"
                 script = CHECK_FUNCTIONS + r'''
@@ -419,8 +429,9 @@ for shard in 0 1 2 3; do run_python_main "$shard"; done
                 for shard, arguments in enumerate(selections):
                     self.assertEqual(arguments[arguments.index("--ci-shard-index") + 1], str(shard))
                     self.assertIn("scripts.ci.shard_pytest_nodeids", arguments)
-                    self.assertNotIn(decoder, arguments)
-                    for path in (*REGISTRY_SOURCE_CUSTODY_TESTS, *REGISTRY_REQUIRED_TARGET_TESTS, REGISTRY_ADDRESS_EQUIVALENCE_TEST):
+                    for path in offline_paths:
+                        self.assertNotIn(path, arguments)
+                    for path in native_paths:
                         self.assertEqual(arguments.count(path), int(present))
                         if present:
                             self.assertEqual(arguments[arguments.index(path) - 1], "--ignore")
@@ -1134,6 +1145,7 @@ run_provider_directory_postgres postgresql://postgres:postgres@127.0.0.1:5432/te
             "test_result_archive_adoption_postgres.py",
             "test_result_archive_candidate_preparation_postgres.py",
             "test_result_archive_closure_postgres.py",
+            "test_registry_ptg_cohort_authority_postgres.py",
             "test_result_archive_candidate_initialization_postgres.py",
             "test_result_archive_candidate_validation_postgres.py",
         )
@@ -1171,9 +1183,9 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-ptg
             self.assertEqual(len(calls), 2)
             self.assertEqual(calls[0][:2], ["1", "postgresql://postgres:postgres@127.0.0.1:5432/test"])
             self.assertEqual(calls[1][2], "1")
-            for name in names[:3]:
+            for name in names[:4]:
                 self.assertIn(name, calls[0][3])
-            for name in names[3:]:
+            for name in names[4:]:
                 self.assertIn(name, calls[1][3])
 
     def test_source_profile_postgres_suites_use_one_isolated_profile_database(self):
