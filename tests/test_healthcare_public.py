@@ -29,6 +29,39 @@ REQUIRED_IMPORT_NATIVE_TESTS = (
 )
 
 
+def _directory_wheel_script():
+    """Exercise the real wheel installer while isolating database and compiler processes."""
+    return r'''
+python() {
+  case "$*" in
+    '-m maturin build '*)
+      printf 'build\t%s\n' "$*" >> "$CALL_LOG"
+      [ "$FAIL_STAGE" != build ] || return 17
+      touch "${!#}/synthetic.whl" ;;
+    *) command python3 "$@" ;;
+  esac
+}
+uv() {
+  printf 'uv\t%s\n' "$*" >> "$CALL_LOG"
+  [ "$FAIL_STAGE" != install ] || return 17
+  touch "$WHEEL_INSTALLED"
+}
+timeout() {
+  test -f "$WHEEL_INSTALLED" || return 23
+  printf 'tests\t%s\n' "$*" >> "$CALL_LOG"
+}
+env() {
+  while [[ "$1" = -u || "$1" = *=* ]]; do
+    if [ "$1" = -u ]; then shift 2; else shift; fi
+  done
+  "$@"
+}
+run_owned_provider_directory_postgres() { shift 2; timeout --foreground 295s python -m pytest -q "$@"; }
+run_scoped_archive_postgres() { :; }
+run_provider_directory_postgres postgresql://synthetic/test "$ROUTE_LANE"
+'''
+
+
 class HealthcarePublicChecks(unittest.TestCase):
     def test_registry_native_family_requires_complete_source_and_real_bindings(self):
         paths = tuple("tests/" + name + "_postgres.py" for name in (
@@ -82,7 +115,7 @@ class HealthcarePublicChecks(unittest.TestCase):
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         setup = next(step for step in workflow["jobs"]["address-canonical-db-tests"]["steps"]
                      if step["name"] == "Prepare source and toolchain")
-        self.assertEqual(setup["with"], {"rust": "${{ matrix.shard == 'core-services' }}"})
+        self.assertEqual(setup["with"], {"rust": "${{ matrix.shard == 'core-services' || matrix.shard == 'directory-source' }}"})
         cases = [(lane, "", "") for lane in (
             "core-services", "core", "core-imports", "core-ptg", "directory-source", "directory-storage",
             "directory-address", "profile-storage", "profile-publication",
@@ -434,6 +467,7 @@ if selected:
                         environment.pop(name, None)
                     function = "run_provider_profile_postgres" if lane.startswith("profile") else "run_provider_directory_postgres"
                     script = CHECK_FUNCTIONS + r'''
+install_address_canon_wheel() { :; }
 create_test_database() {
   printf 'create:%s\n' "$1" >> "$LIFECYCLE"
   if [[ ( "$1" = hc_cms_admission_test_* || "$1" = hc_directory_entities_* ) && "$CLEANUP_FAILURE" = create ]]; then return 17; fi
@@ -504,6 +538,46 @@ test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
                     else:
                         self.assertFalse(leftovers)
 
+    def test_directory_native_wheel_install_order(self):
+        for lane, failure in (("directory-source", ""), ("all", ""),
+                              ("directory-source", "build"), ("directory-source", "install")):
+            with self.subTest(lane=lane, failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source_root, runner = root / "source", root / "runner"
+                (source_root / "support/ptg2_scanner").mkdir(parents=True)
+                (source_root / "tests").mkdir()
+                (source_root / "tests/test_cms_npd_admission_postgres.py").touch()
+                runner.mkdir()
+                calls_path = root / "calls"
+                environment_by_name = {
+                    **os.environ, "SOURCE_ROOT": str(source_root), "CI_ROOT": str(ROOT),
+                    "RUNNER_TEMP": str(runner), "CALL_LOG": str(calls_path),
+                    "WHEEL_INSTALLED": str(root / "installed"), "FAIL_STAGE": failure, "ROUTE_LANE": lane,
+                    "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "synthetic",
+                    "HLTHPRT_DB_HOST": "127.0.0.1", "HLTHPRT_DB_PORT": "5432",
+                }
+                run_result = subprocess.run(
+                    ["bash", "-euc", CHECK_FUNCTIONS + _directory_wheel_script()],
+                    env=environment_by_name, capture_output=True, text=True, timeout=30,
+                )
+                self.assertEqual(run_result.returncode, 17 if failure else 0, run_result.stderr)
+                calls = calls_path.read_text().splitlines()
+                self.assertEqual(sum(call.startswith("build\t") for call in calls), 1)
+                self.assertTrue(calls[0].startswith("build\t-m maturin build --locked --features python-extension --out "))
+                self.assertNotIn("--release", calls[0])
+                native_runs = [call for call in calls if "tests/test_cms_npd_admission_postgres.py" in call]
+                if failure:
+                    self.assertFalse(native_runs)
+                    self.assertFalse(any(call.startswith("tests\t") for call in calls))
+                else:
+                    self.assertEqual(len(native_runs), 1)
+                    self.assertTrue(calls[1].startswith("uv\t--no-config pip install --python "))
+                    self.assertIn(" --no-build --no-deps ", calls[1])
+                    self.assertTrue(calls[2].startswith("uv\t--no-config pip check --python "))
+                    self.assertTrue(calls[3].startswith("tests\t"))
+                    self.assertEqual(sum(call.startswith("uv\t--no-config pip install") for call in calls), 1)
+                self.assertEqual(list(runner.iterdir()), [])
+
     def test_cms_directory_routes_present_suites_and_keeps_common_tests_required(self):
         required = (
             "tests/test_provider_directory_entities_postgres.py",
@@ -548,6 +622,7 @@ done
                     "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "synthetic",
                     "HLTHPRT_DB_HOST": "127.0.0.1", "HLTHPRT_DB_PORT": "5432"}
                 script = CHECK_FUNCTIONS + r'''
+install_address_canon_wheel() { :; }
 create_test_database() { printf 'create:%s\n' "$1" >> "$LIFECYCLE"; }
 drop_test_database() { printf 'drop:%s\n' "$1" >> "$LIFECYCLE"; }
 run_provider_directory_postgres postgresql://synthetic/test directory-source
