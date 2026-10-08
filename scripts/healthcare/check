@@ -498,6 +498,7 @@ run_rust() {
   ci_phase_begin rust-release-build
   cargo build --release --bins --manifest-path support/ptg2_scanner/Cargo.toml
   ci_phase_end
+  install_address_canon_wheel --release
   ci_phase_begin rust-native-tests
   HLTHPRT_PROVIDER_DIRECTORY_PROJECTION_NATIVE_TEST_BIN="$repository_root/support/ptg2_scanner/target/release/ptg2_scanner" \
   HLTHPRT_PROVIDER_DIRECTORY_PROJECTION_NATIVE_BIN="$repository_root/support/ptg2_scanner/target/release/ptg2_scanner" \
@@ -506,7 +507,6 @@ run_rust() {
       tests/test_provider_directory_projection_native_cli_parity.py \
       tests/test_provider_directory_projection_native_copy_adversarial.py
   ci_phase_end
-  install_address_canon_wheel --release
   run_rust_wheel_tests
   (
     local tmp
