@@ -7,6 +7,7 @@ source "$CI_ROOT/scripts/phase_timing.sh"
 trap 'ci_phase_end "$?"' EXIT
 cd "$repository_root"
 export PYTHONPATH="$repository_root${PYTHONPATH:+:$PYTHONPATH}"
+export PYTEST_BOORST=${PYTEST_BOORST-1}
 
 semgrep_image='returntocorp/semgrep-agent@sha256:50140e658095736c7f9d2c12c1e8a98b13f044b773dc79aa98e83b8117dbf096'
 

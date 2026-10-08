@@ -82,3 +82,6 @@ installed = {normalize(name): version for name, version in pattern.findall(Path(
 if installed != expected:
     raise SystemExit("uv environment does not match the selected lock")
 PY
+if [ "${1-}" != coverage ]; then
+  bash "$input_root/../install_pytest_tools" "$(command -v python)"
+fi

@@ -5,6 +5,7 @@ set -euo pipefail
 cd "${SOURCE_ROOT:?SOURCE_ROOT must name the exact public checkout}"
 : "${CI_ROOT:?CI_ROOT must name the pinned public CI checkout}"
 source "$CI_ROOT/scripts/phase_timing.sh"
+export PYTEST_BOORST=${PYTEST_BOORST-1}
 
 readonly PYTHON_VERSION='3.14.7'
 readonly UV_VERSION='0.12.17'
@@ -144,6 +145,7 @@ install() {
     export UV_PROJECT_ENVIRONMENT="${VIRTUAL_ENV:?The uv-managed CI environment is required}"
     uv --no-config sync --locked --all-groups --python "$python_bin" --no-build --no-python-downloads
     python_bin="$UV_PROJECT_ENVIRONMENT/bin/python"
+    bash "$CI_ROOT/scripts/install_pytest_tools" "$python_bin"
 }
 
 public_hygiene() {
