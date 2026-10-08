@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 UV_STUB = """#!/usr/bin/env python3
 import json
@@ -64,6 +66,50 @@ else:
 
 
 class PytestToolTests(unittest.TestCase):
+    def test_existing_setup_installs_its_own_requirements_before_marking_ready(self):
+        action = yaml.safe_load(
+            (ROOT / "scripts/healthcare/setup/action.yml").read_text()
+        )
+        self.assertEqual(action["inputs"]["dependencies"]["default"], "false")
+        step = next(
+            step
+            for step in action["runs"]["steps"]
+            if step.get("name") == "Install source Python requirements"
+        )
+        self.assertEqual(step["if"], "inputs.dependencies == 'true'")
+        for failure in (False, True):
+            with (
+                self.subTest(failure=failure),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                setup = root / "own/setup"
+                setup.mkdir(parents=True)
+                (setup.parent / "install_python_lock").write_text(
+                    f"exit {7 if failure else 0}\n"
+                )
+                environment_file = root / "environment"
+                result = subprocess.run(
+                    ["bash", "-e", "-c", step["run"]],
+                    env={
+                        **os.environ,
+                        "GITHUB_ACTION_PATH": str(setup),
+                        "GITHUB_ENV": str(environment_file),
+                        "CI_ROOT": str(root / "older-checker"),
+                    },
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 7 if failure else 0)
+                if failure:
+                    self.assertFalse(environment_file.exists())
+                else:
+                    self.assertEqual(
+                        environment_file.read_text(),
+                        "CI_DEPS_READY=1\nCI_PYTHON_ENV_READY=1\n",
+                    )
+
     def test_install_refreshes_boorst_only_and_preserves_exact_environment(self):
         for failure in (
             "",
@@ -137,7 +183,7 @@ class PytestToolTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     installation[-1],
-                    "pytest-boorst>=0.1.0a5,<1.0",
+                    str(ROOT / "scripts/requirements-pytest-tools.in"),
                 )
                 if failure in (
                     "extra",

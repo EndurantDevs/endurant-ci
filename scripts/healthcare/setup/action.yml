@@ -5,6 +5,10 @@ inputs:
     description: Install the reviewed Rust toolchain
     default: 'false'
     required: false
+  dependencies:
+    description: Install the source Python requirements during setup
+    default: 'false'
+    required: false
 runs:
   using: composite
   steps:
@@ -48,6 +52,13 @@ runs:
       artifact_directory="$RUNNER_TEMP/healthcare-artifacts"
       mkdir -p "$artifact_directory"
       printf 'CI_ARTIFACT_ROOT=%s\n' "$artifact_directory" >> "$GITHUB_ENV"
+    shell: bash
+    working-directory: source
+  - name: Install source Python requirements
+    if: inputs.dependencies == 'true'
+    run: |
+      bash "$GITHUB_ACTION_PATH/../install_python_lock"
+      printf 'CI_DEPS_READY=1\nCI_PYTHON_ENV_READY=1\n' >> "$GITHUB_ENV"
     shell: bash
     working-directory: source
   - name: Install exact Rust toolchain
