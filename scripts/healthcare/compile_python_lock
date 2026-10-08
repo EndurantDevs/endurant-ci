@@ -45,7 +45,6 @@ uv --no-config pip compile "$temporary_directory/inputs/requirements-ci.in" \
   --python "$python_bin" \
   --python-version "$PYTHON_VERSION" \
   --python-platform x86_64-unknown-linux-gnu \
-  --find-links https://github.com/dnikolayev/pytest-boorst/releases/download/v0.1.0a4/wheels.html \
   --generate-hashes \
   --only-binary :all: \
   --emit-build-options \
@@ -74,34 +73,42 @@ if versions.get("pip-audit") != "2.10.1":
     raise SystemExit("selected lock must contain pip-audit==2.10.1")
 if versions.get("pip") != "26.2.1":
     raise SystemExit("pip-audit must retain its locked pip==26.2.1 dependency")
-# uv does not emit hashes for this release's flat wheel index.
-wheel_hashes = (
-    "265dd4a0e899520975c434c267d8c2ae2d930c0e16c9e59c796f0d46ea26f5a3",
-    "8180a4071d493ed93a0138e546657e8e87dc0047ce9d738e9e1083554441d9bc",
-    "dabd6bbf2941dd1ee6ff2984e3d2fdbd9a8b14634afee91229121c24c46892ef",
-    "f118fe02876eed998c4a2d038d66bf7456cfdc83c8ab672c29e7acfa13abf890",
+# Retain the reviewed PyPI release and its complete artifact hash set.
+release_hashes = (
+    "04912505a7da5eb2940a6c07a17188c3d5b57c508720e0f1287bd413f73fcdc3",
+    "1920329fac2bc2bb65043df36df4600dc0afe35308400a025391fd700a6f8886",
+    "1cb8a53e4b43f1e76b62872e49d676431a9731a74c7430a1d7de9f0dacf2e6b0",
+    "2458ae4c68efb5249388d4d410e79bb7d50228970a2d620820d72d7ed649fe5e",
+    "456283f18dd6490665f13ed2c1cfff42c5aacad4975fe99f3ba579bdd64c8eb6",
+    "796f3b4b87aaad1065ce48eaf28954cee817569dd48f9da2638ef41e24460f62",
+    "7c41c8498a74070725aa982208827e254ba01d8e413fd2b74a7c69bb0c17dbb7",
+    "8332d5214022469859f3caafadecfcfb0f46335c1b45b3f1248f0ff455560388",
+    "a17c6916f0e1cbbc2c1cbd0b34ad923446192488a6eb356fe221736954ca3b9c",
+    "b23c26666728dfbf3caf3bf33dc40a58e745c403794ded21f0a984d7a909a723",
+    "c58f2b8c60d09d62203135ae69bd56bb62392fe8e0b318cecf06033e418a25f0",
+    "d7050f0bff555eb7801d3d4d460339d30e11082f8c041b8d778b55ae1269594e",
+    "fd1acc96869d52604eebffb7944ebadb80f94c1cfc4945e7bfd2dfa231488106",
 )
 lines = body.splitlines(keepends=True)
 entries = [index for index, line in enumerate(lines)
            if re.match(r"(?i)^pytest[-_.]boorst(?:[= \t]|$)", line)]
-if len(entries) != 1 or versions.get("pytest-boorst") != "0.1.0a4":
-    raise SystemExit("selected lock must contain exactly pytest-boorst==0.1.0a4")
+if len(entries) != 1 or versions.get("pytest-boorst") != "0.1.0a5":
+    raise SystemExit("selected lock must contain exactly pytest-boorst==0.1.0a5")
 start = entries[0]
 end = start + 1
 while end < len(lines) and lines[end].startswith((" ", "\t")):
     end += 1
 entry = lines[start:end]
-if entry != ["pytest-boorst==0.1.0a4\n"]:
-    hashes = [re.fullmatch(r"    --hash=sha256:([a-f0-9]{64})(?: \\\n|\n)", line)
-              for line in entry[1:]]
-    if (entry[0] != "pytest-boorst==0.1.0a4 \\\n"
-            or not all(hashes)
-            or sorted(match.group(1) for match in hashes) != sorted(wheel_hashes)
-            or any(not line.endswith(" \\\n") for line in entry[1:-1])
-            or entry[-1].endswith(" \\\n")):
-        raise SystemExit("unexpected pytest-boorst release entry or wheel hashes")
-replacement = "pytest-boorst==0.1.0a4 \\\n" + " \\\n".join(
-    "    --hash=sha256:" + digest for digest in wheel_hashes
+hashes = [re.fullmatch(r"    --hash=sha256:([a-f0-9]{64})(?: \\\n|\n)", line)
+          for line in entry[1:]]
+if (entry[0] != "pytest-boorst==0.1.0a5 \\\n"
+        or not all(hashes)
+        or sorted(match.group(1) for match in hashes) != sorted(release_hashes)
+        or any(not line.endswith(" \\\n") for line in entry[1:-1])
+        or entry[-1].endswith(" \\\n")):
+    raise SystemExit("unexpected pytest-boorst release entry or artifact hashes")
+replacement = "pytest-boorst==0.1.0a5 \\\n" + " \\\n".join(
+    "    --hash=sha256:" + digest for digest in release_hashes
 ) + "\n"
 body = "".join(lines[:start]) + replacement + "".join(lines[end:])
 header = [
@@ -122,7 +129,6 @@ uv --no-config pip install \
   --python "$temporary_directory/venv/bin/python" \
   --python-version "$PYTHON_VERSION" \
   --python-platform x86_64-unknown-linux-gnu \
-  --find-links https://github.com/dnikolayev/pytest-boorst/releases/download/v0.1.0a4/wheels.html \
   --only-binary :all: \
   --require-hashes \
   -r "$candidate_lock"
