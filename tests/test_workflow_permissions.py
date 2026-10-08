@@ -85,7 +85,9 @@ class PublicWorkflowPermissions(unittest.TestCase):
             "address-canonical-db-tests": [(shard, f"Database tests ({label})", "artifact_" + shard.replace("-", "_"))
                                             for shard, label in (
                                                 ("core-services", "services"), ("core-imports", "imports"),
-                                                ("core-ptg", "PTG"), ("directory-source", "directory source"),
+                                                ("core-ptg", "PTG"),
+                                                *((f"registry-{index}", f"registry {index + 1}") for index in range(8)),
+                                                ("directory-source", "directory source"),
                                                 ("directory-storage", "directory storage"),
                                                 ("directory-address", "directory address"),
                                                 ("profile-storage", "profile storage"),
@@ -116,9 +118,9 @@ class PublicWorkflowPermissions(unittest.TestCase):
         download = next(step for step in jobs["measurement"]["steps"]
                         if step.get("name") == "Download immutable measurement artifacts")
         self.assertEqual(set(download["with"]["artifact-ids"].split(",")), set(artifact_ids))
-        self.assertEqual(len(download["with"]["artifact-ids"].split(",")), 14)
+        self.assertEqual(len(download["with"]["artifact-ids"].split(",")), 22)
         self.assertEqual(sum(len(job.get("strategy", {}).get("matrix", {}).get("include", [None]))
-                             for job in jobs.values()), 23)
+                             for job in jobs.values()), 31)
 
     def test_cheap_lint_blocks_heavy_jobs_without_changing_measurement_producers(self):
         jobs = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())["jobs"]

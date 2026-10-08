@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+import importlib.util
 import io
 import json
 from pathlib import Path
@@ -53,6 +54,20 @@ def completed_run(identifier, sha, branch, event="pull_request", conclusion="suc
 
 
 class ArtifactCleanupChecks(unittest.TestCase):
+    def test_postgres_workflow_measurement_and_cleanup_inventories_match(self):
+        spec = importlib.util.spec_from_file_location("measurement", ROOT / "scripts/healthcare/measurement.py")
+        measurement = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(measurement)
+        workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
+        rows = workflow["jobs"]["address-canonical-db-tests"]["strategy"]["matrix"]["include"]
+        shards = tuple(row["shard"] for row in rows)
+        self.assertEqual(measurement.POSTGRES_SHARDS, shards)
+        expected_run = run()
+        names = cleanup.temporary_names("healthcare", expected_run)
+        expected = {f"mrf-python-coverage-postgres-{shard}-123-{attempt}"
+                    for shard in shards for attempt in range(1, expected_run["run_attempt"] + 1)}
+        self.assertEqual({name for name in names if name.startswith("mrf-python-coverage-postgres-")}, expected)
+
     def exercise(self, items, expected=None, refresh=None, changed_artifact=None, delete_error=False,
                  job_inventory=None, refreshed_jobs=None, job_snapshots=None, settle_waits=2):
         expected = expected or run()
