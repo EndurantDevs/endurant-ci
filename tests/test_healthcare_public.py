@@ -37,6 +37,11 @@ REGISTRY_SOURCE_CUSTODY_TESTS = (
     "tests/test_cms_publication_source_session_postgres.py",
     "tests/test_provider_directory_cms_applied_archive_readiness_postgres.py",
 )
+REGISTRY_REQUIRED_TARGET_TESTS = (
+    "tests/test_registry_required_target_store_postgres.py",
+    "tests/test_registry_required_target_review_store_postgres.py",
+    "tests/test_registry_required_target_coverage_postgres.py",
+)
 REGISTRY_ADDRESS_EQUIVALENCE_TEST = "tests/test_network_cms_registry_address_equivalence_postgres.py"
 
 
@@ -110,6 +115,7 @@ class HealthcarePublicChecks(unittest.TestCase):
             "test_network_approved_source_bindings",
             "test_provider_directory_insurance_network_batch", "test_provider_directory_cms_network_batch",
         ))
+        paths = paths[:4] + REGISTRY_REQUIRED_TARGET_TESTS + paths[4:]
         paths += (
             "tests/test_registry_source_fetch.py",
             "tests/test_network_manual_provider_read_postgres.py", "tests/test_network_provider_routes_postgres.py",
@@ -125,6 +131,8 @@ class HealthcarePublicChecks(unittest.TestCase):
             "encode_network_membership_batch", "encode_cms_mlr_observations", "encode_cms_planfinder_observations",
             "validate_network_catalog_batch", "validate_company_network_assertions",
             "encode_network_source_binding_batch", "build_registry_network_coverage", "parse_registry_target_ledger",
+            "encode_registry_target_ledger_artifact", "encode_registry_required_target_review_artifact",
+            "validate_registry_required_target_review_artifacts", "validate_registry_required_target_ledger_artifact",
             "extract_fhir_network_identity_batch", "encode_fhir_network_identity_batch",
             "canonicalize_batch", "canon_version",
         )
@@ -146,10 +154,15 @@ class HealthcarePublicChecks(unittest.TestCase):
             "skipped", "error", "failure", "summary-skipped", "no-tests", "bad-count", "empty-report",
             "invalid-report", "large-report", "report-cleanup", "stale-registry-roster", "no-classname", "more-management-cases",
         )]
+        cases += [("core", "", name + ":not-callable") for name in (
+            "encode_registry_target_ledger_artifact", "encode_registry_required_target_review_artifact",
+            "validate_registry_required_target_review_artifacts", "validate_registry_required_target_ledger_artifact",
+        )]
         cases += [("registry-0", missing, "") for missing in ("all", "all-with-model", paths[-1])]
         cases += [("registry-0", "", stage) for stage in (
             "collection", "nodeids-cleanup", "wrong-selection", "duplicate-selection", "empty-selection",
         )]
+        successful_shard_members = []
         for lane, missing, failure in cases:
             with self.subTest(lane=lane, missing=missing, failure=failure), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -168,7 +181,10 @@ class HealthcarePublicChecks(unittest.TestCase):
                     "raise ImportError('synthetic dependency missing')\n" if failure == "asyncpg" else "", encoding="utf-8",
                 )
                 (source / "ptg2_address_canon.py").write_text(
-                    "\n".join(f"def {name}(): pass" for name in exports if name != failure), encoding="utf-8",
+                    "\n".join(
+                        f"{name} = 0" if failure == name + ":not-callable" else f"def {name}(): pass"
+                        for name in exports if name != failure
+                    ), encoding="utf-8",
                 )
                 log = root / "calls"
                 script = CHECK_FUNCTIONS + r'''
@@ -217,6 +233,8 @@ if os.environ["FAIL_STAGE"] == "duplicate-selection":
 if os.environ["FAIL_STAGE"] == "empty-selection":
     nodeids = []
 path.write_text("\n".join(nodeids) + ("\n" if nodeids else ""))
+with open(os.environ["CALL_LOG"], "a") as log:
+    log.write("selection\t" + "\t".join(nodeids) + "\n")
 PY
       ;;
     '-m pytest -q '*)
@@ -328,6 +346,11 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                         self.assertEqual(collected[:5], ["scripts/ci/shard_pytest_nodeids.py", "--shard-count", "8",
                                                         "--shard-index", lane.removeprefix("registry-")])
                         self.assertEqual(collected[collected.index("--") + 1:], list(paths))
+                        if not failure:
+                            selection = next(call for call in calls if call.startswith("selection\t"))
+                            successful_shard_members.extend(
+                                nodeid.split("::", 1)[0] for nodeid in selection.split("\t")[1:]
+                            )
                         self.assertEqual(selected_arguments[:3], ["-m", "pytest", "-q"])
                         self.assertEqual(len(selected_arguments), 6)
                         selection_path = Path(selected_arguments[3].removeprefix("@"))
@@ -345,6 +368,9 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     extensions = next(call for call in calls if call.startswith("extensions\t"))
                     for name in ("intarray", "btree_gin", "postgis"):
                         self.assertIn(f"CREATE EXTENSION IF NOT EXISTS {name} WITH SCHEMA public", extensions)
+
+        self.assertEqual(len(successful_shard_members), len(set(successful_shard_members)))
+        self.assertCountEqual(successful_shard_members, paths)
 
     def test_registry_report_matches_class_and_parameter_ids_exactly(self):
         validator = CHECK_FUNCTIONS.split('  python - "$registry_report" "$registry_nodeids" "${registry_tests[@]}" <<\'PY\'\n', 1)[1].split("\nPY\n", 1)[0]
@@ -370,7 +396,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                 (source_root / "tests").mkdir()
                 if present:
                     (source_root / decoder).write_text("def test_decoder(): assert True\n")
-                    for path in (*REGISTRY_SOURCE_CUSTODY_TESTS, REGISTRY_ADDRESS_EQUIVALENCE_TEST):
+                    for path in (*REGISTRY_SOURCE_CUSTODY_TESTS, *REGISTRY_REQUIRED_TARGET_TESTS, REGISTRY_ADDRESS_EQUIVALENCE_TEST):
                         (source_root / path).touch()
                 call_log = source_root / "calls"
                 script = CHECK_FUNCTIONS + r'''
@@ -394,7 +420,7 @@ for shard in 0 1 2 3; do run_python_main "$shard"; done
                     self.assertEqual(arguments[arguments.index("--ci-shard-index") + 1], str(shard))
                     self.assertIn("scripts.ci.shard_pytest_nodeids", arguments)
                     self.assertNotIn(decoder, arguments)
-                    for path in (*REGISTRY_SOURCE_CUSTODY_TESTS, REGISTRY_ADDRESS_EQUIVALENCE_TEST):
+                    for path in (*REGISTRY_SOURCE_CUSTODY_TESTS, *REGISTRY_REQUIRED_TARGET_TESTS, REGISTRY_ADDRESS_EQUIVALENCE_TEST):
                         self.assertEqual(arguments.count(path), int(present))
                         if present:
                             self.assertEqual(arguments[arguments.index(path) - 1], "--ignore")
@@ -1596,15 +1622,14 @@ run_provider_profile_postgres postgresql://synthetic/original
         self.assertIn('if [ "${1-}" != coverage ]; then', installer)
         self.assertFalse((ROOT / "scripts/healthcare/requirements-ci.lock").exists())
 
-    def test_locked_bootstrap_wheel_source_is_fixed_and_preserves_strict_flags(self):
-        source = "https://github.com/dnikolayev/pytest-boorst/releases/download/v0.1.0a4/wheels.html"
+    def test_locked_bootstrap_uses_pypi_and_preserves_strict_flags(self):
         installer = (ROOT / "scripts/healthcare/install_python_lock").read_text()
         compiler = (ROOT / "scripts/healthcare/compile_python_lock").read_text()
         sync = installer.split("uv --no-config pip sync", 1)[1].split("\nuv ", 1)[0]
         compile_command = compiler.split("uv --no-config pip compile", 1)[1].split("\n\n", 1)[0]
         dry_run = compiler.split("uv --no-config pip install", 1)[1].split("\n\n", 1)[0]
         for command in (sync, compile_command, dry_run):
-            self.assertEqual(command.count("--find-links " + source), 1)
+            self.assertNotIn("--find-links", command)
             self.assertIn("--only-binary :all:", command)
         for command in (sync, dry_run):
             self.assertIn("--require-hashes", command)
@@ -1650,7 +1675,7 @@ else:
     if os.environ["REJECT_CANDIDATE"] == "1":
         from pathlib import Path
         Path(args[args.index("--output-file") + 1]).write_text(
-            "pip==26.2.1\\npip-audit==2.10.1\\npytest-boorst==0.1.0a5\\n")
+            "pip==26.2.1\\npip-audit==2.10.1\\npytest-boorst==0.1.0a4\\n")
     else:
         sys.exit(23)
 ''')
@@ -1665,13 +1690,11 @@ else:
                     capture_output=True, text=True, check=False, timeout=30)
                 self.assertEqual(result.returncode, 1 if reject_candidate else 23, result.stderr)
                 if reject_candidate:
-                    self.assertIn("selected lock must contain exactly pytest-boorst==0.1.0a4", result.stderr)
+                    self.assertIn("selected lock must contain exactly pytest-boorst==0.1.0a5", result.stderr)
                 calls = [json.loads(line) for line in capture.read_text().splitlines()]
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(calls[0][:3], ["--no-config", "pip", operation])
-                index = calls[0].index("--find-links")
-                self.assertEqual(calls[0][index + 1],
-                    "https://github.com/dnikolayev/pytest-boorst/releases/download/v0.1.0a4/wheels.html")
+                self.assertNotIn("--find-links", calls[0])
                 self.assertEqual(list(runtime.iterdir()), [keep])
                 self.assertEqual(keep.read_text(), "unrelated")
                 self.assertEqual((source / "requirements-ci.lock").read_text(), "synthetic-pinned-input\n")
@@ -1681,23 +1704,33 @@ else:
         compiler = (ROOT / "scripts/healthcare/compile_python_lock").read_text()
         program = compiler.split("<<'PY'\n")[2].split("\nPY", 1)[0]
         hashes = (
-            "265dd4a0e899520975c434c267d8c2ae2d930c0e16c9e59c796f0d46ea26f5a3",
-            "8180a4071d493ed93a0138e546657e8e87dc0047ce9d738e9e1083554441d9bc",
-            "dabd6bbf2941dd1ee6ff2984e3d2fdbd9a8b14634afee91229121c24c46892ef",
-            "f118fe02876eed998c4a2d038d66bf7456cfdc83c8ab672c29e7acfa13abf890",
+            "04912505a7da5eb2940a6c07a17188c3d5b57c508720e0f1287bd413f73fcdc3",
+            "1920329fac2bc2bb65043df36df4600dc0afe35308400a025391fd700a6f8886",
+            "1cb8a53e4b43f1e76b62872e49d676431a9731a74c7430a1d7de9f0dacf2e6b0",
+            "2458ae4c68efb5249388d4d410e79bb7d50228970a2d620820d72d7ed649fe5e",
+            "456283f18dd6490665f13ed2c1cfff42c5aacad4975fe99f3ba579bdd64c8eb6",
+            "796f3b4b87aaad1065ce48eaf28954cee817569dd48f9da2638ef41e24460f62",
+            "7c41c8498a74070725aa982208827e254ba01d8e413fd2b74a7c69bb0c17dbb7",
+            "8332d5214022469859f3caafadecfcfb0f46335c1b45b3f1248f0ff455560388",
+            "a17c6916f0e1cbbc2c1cbd0b34ad923446192488a6eb356fe221736954ca3b9c",
+            "b23c26666728dfbf3caf3bf33dc40a58e745c403794ded21f0a984d7a909a723",
+            "c58f2b8c60d09d62203135ae69bd56bb62392fe8e0b318cecf06033e418a25f0",
+            "d7050f0bff555eb7801d3d4d460339d30e11082f8c041b8d778b55ae1269594e",
+            "fd1acc96869d52604eebffb7944ebadb80f94c1cfc4945e7bfd2dfa231488106",
         )
         continuation = " " + chr(92) + "\n"
-        hashed = "pytest-boorst==0.1.0a4" + continuation + continuation.join(
+        hashed = "pytest-boorst==0.1.0a5" + continuation + continuation.join(
             "    --hash=sha256:" + digest for digest in hashes) + "\n"
         before = "--only-binary :all:\n\npip==26.2.1" + continuation + "    --hash=sha256:" + "a" * 64 + "\n"
         after = "pip-audit==2.10.1" + continuation + "    --hash=sha256:" + "b" * 64 + "\n"
         entries = {
-            "unhashed": ("pytest-boorst==0.1.0a4\n", True),
+            "unhashed": ("pytest-boorst==0.1.0a5\n", False),
             "already-hashed": (hashed, True),
             "missing": ("", False),
-            "changed-version": ("pytest-boorst==0.1.0a5\n", False),
-            "duplicate": ("pytest-boorst==0.1.0a4\n" * 2, False),
-            "duplicate-alias": ("pytest-boorst==0.1.0a4\npytest_boorst==0.1.0a4\n", False),
+            "changed-version": ("pytest-boorst==0.1.0a4\n", False),
+            "future-version": (hashed.replace("0.1.0a5", "0.1.0a6"), False),
+            "duplicate": ("pytest-boorst==0.1.0a5\n" * 2, False),
+            "duplicate-alias": ("pytest-boorst==0.1.0a5\npytest_boorst==0.1.0a5\n", False),
             "conflicting-hash": (hashed.replace(hashes[0], "c" * 64), False),
             "missing-hash": (hashed.replace("    --hash=sha256:" + hashes[0] + continuation, ""), False),
             "duplicate-hash": (hashed.replace(hashes[0], hashes[1]), False),

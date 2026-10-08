@@ -60,7 +60,6 @@ fi
 
 uv --no-config pip sync \
   --python "$(command -v python)" \
-  --find-links https://github.com/dnikolayev/pytest-boorst/releases/download/v0.1.0a4/wheels.html \
   --only-binary :all: \
   --require-hashes \
   --strict \

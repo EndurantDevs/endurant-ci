@@ -254,6 +254,9 @@ run_python_main() {
     fi
   done
   for test_path in \
+    tests/test_registry_required_target_store_postgres.py \
+    tests/test_registry_required_target_review_store_postgres.py \
+    tests/test_registry_required_target_coverage_postgres.py \
     tests/test_network_cms_registry_source_pair_postgres.py \
     tests/test_network_cms_registry_complete_publication_postgres.py \
     tests/test_network_registry_cms_prepared_pair_postgres.py \
@@ -910,6 +913,9 @@ run_network_registry_postgres() (
     tests/test_network_serving_schema_postgres.py
     tests/test_registry_record_store_postgres.py
     tests/test_registry_targets_postgres.py
+    tests/test_registry_required_target_store_postgres.py
+    tests/test_registry_required_target_review_store_postgres.py
+    tests/test_registry_required_target_coverage_postgres.py
     tests/test_registry_management_routes_postgres.py
     tests/test_network_legacy_alias_adoption_postgres.py
     tests/test_network_address_projection_postgres.py
@@ -997,7 +1003,7 @@ run_network_registry_postgres() (
   done
   test "$(rustc --version | awk '{print $2}')" = 1.98.1
   install_address_canon_wheel
-  python -c 'import asyncpg; import ptg2_address_canon as native; assert all(callable(getattr(native, name, None)) for name in ("encode_network_membership_batch", "encode_cms_mlr_observations", "encode_cms_planfinder_observations", "validate_network_catalog_batch", "validate_company_network_assertions", "encode_network_source_binding_batch", "build_registry_network_coverage", "parse_registry_target_ledger", "extract_fhir_network_identity_batch", "encode_fhir_network_identity_batch", "canonicalize_batch", "canon_version")), "Native registry extension is incomplete"'
+  python -c 'import asyncpg; import ptg2_address_canon as native; assert all(callable(getattr(native, name, None)) for name in ("encode_network_membership_batch", "encode_cms_mlr_observations", "encode_cms_planfinder_observations", "validate_network_catalog_batch", "validate_company_network_assertions", "encode_network_source_binding_batch", "build_registry_network_coverage", "parse_registry_target_ledger", "encode_registry_target_ledger_artifact", "encode_registry_required_target_review_artifact", "validate_registry_required_target_review_artifacts", "validate_registry_required_target_ledger_artifact", "extract_fhir_network_identity_batch", "encode_fhir_network_identity_batch", "canonicalize_batch", "canon_version")), "Native registry extension is incomplete"'
   registry_report=""
   registry_nodeids=""
   cleanup_registry_report() {
