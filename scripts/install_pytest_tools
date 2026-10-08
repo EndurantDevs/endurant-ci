@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-input_root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 python_bin=${1:?A Python environment with pytest installed is required}
 temporary_directory=$(mktemp -d "${RUNNER_TEMP:-/tmp}/pytest-tools.XXXXXX")
 trap 'rm -rf -- "$temporary_directory"' EXIT
@@ -16,24 +15,28 @@ except metadata.PackageNotFoundError:
 PY
 
 uv --no-config pip freeze --python "$python_bin" --strict > "$temporary_directory/before.lock"
-uv --no-config pip install --python "$python_bin" --only-binary :all: --require-hashes --no-deps --strict \
-    -r "$input_root/requirements-pytest-tools.lock"
+uv --no-config pip install --python "$python_bin" --only-binary :all: --no-deps --strict \
+    --default-index https://pypi.org/simple --prerelease allow \
+    --upgrade-package pytest-boorst 'pytest-boorst>=0.1.0a5,<1.0'
 uv --no-config pip check --python "$python_bin"
 uv --no-config pip freeze --python "$python_bin" --strict > "$temporary_directory/after.lock"
-"$python_bin" -I - "$input_root/requirements-pytest-tools.lock" \
-    "$temporary_directory/before.lock" "$temporary_directory/after.lock" <<'PY'
+"$python_bin" -I - "$temporary_directory/before.lock" "$temporary_directory/after.lock" <<'PY'
 from pathlib import Path
-import re
 import sys
 
-lock, before, after = (Path(path).read_text().splitlines() for path in sys.argv[1:])
-expected = set(before)
-for line in lock:
-    match = re.match(r"^([A-Za-z0-9_.-]+)==([^\s;\\]+)", line)
-    if match:
-        name, version = match.groups()
-        expected = {entry for entry in expected if not entry.startswith(name + "==")}
-        expected.add(f"{name}=={version}")
-if set(after) != expected:
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
+before, after = (Path(path).read_text().splitlines() for path in sys.argv[1:])
+is_boorst = lambda entry: canonicalize_name(entry.partition("==")[0]) == "pytest-boorst"
+versions = [entry.partition("==")[2] for entry in after if is_boorst(entry)]
+requirement = Requirement("pytest-boorst>=0.1.0a5,<1.0")
+if (
+    len(versions) != 1
+    or not requirement.specifier.contains(versions[0], prereleases=True)
+    or {entry for entry in after if not is_boorst(entry)}
+    != {entry for entry in before if not is_boorst(entry)}
+):
     raise SystemExit("pytest tool installation changed the declared environment")
+print(f"pytest-boorst=={versions[0]}")
 PY

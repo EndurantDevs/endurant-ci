@@ -1,0 +1,7 @@
+name: Install pytest tools
+description: Upgrade only the bounded pytest tool dependency from PyPI
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: bash "$GITHUB_ACTION_PATH/../install_pytest_tools" "$(command -v python)"
