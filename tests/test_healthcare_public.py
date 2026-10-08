@@ -62,7 +62,14 @@ class HealthcarePublicChecks(unittest.TestCase):
             "test_network_approved_source_bindings",
             "test_provider_directory_insurance_network_batch", "test_provider_directory_cms_network_batch",
         ))
-        paths += ("tests/test_registry_source_fetch.py",)
+        paths += (
+            "tests/test_registry_source_fetch.py",
+            "tests/test_network_manual_provider_read_postgres.py", "tests/test_network_provider_routes_postgres.py",
+            "tests/test_registry_source_recipe_store_postgres.py", "tests/test_registry_source_recipe_composition_postgres.py",
+            "tests/test_registry_manual_undo_postgres.py",
+            "tests/test_registry_source_selection_receipt_postgres.py",
+            "tests/test_network_initial_source_office_bindings_postgres.py",
+        )
         self.assertEqual(len(paths), len(set(paths)))
         exports = (
             "encode_network_membership_batch", "encode_cms_mlr_observations", "encode_cms_planfinder_observations",
@@ -81,11 +88,12 @@ class HealthcarePublicChecks(unittest.TestCase):
         )]
         cases += [("core-services", path, "") for path in paths]
         cases += [("core-services", "only:" + path, "") for path in paths]
+        cases += [("core-services", "", "missing-report:" + path) for path in paths]
         cases += [("core-services", absent, "") for absent in ("all", "all-with-model")]
         cases += [("core-services", "", stage) for stage in (
             "build", "install", "pytest", "drop", "rust-version", "asyncpg", *exports,
             "skipped", "error", "failure", "summary-skipped", "no-tests", "bad-count", "empty-report",
-            "invalid-report", "large-report", "report-cleanup",
+            "invalid-report", "large-report", "report-cleanup", "stale-registry-roster", "no-classname", "more-management-cases",
         )]
         for lane, missing, failure in cases:
             with self.subTest(lane=lane, missing=missing, failure=failure), tempfile.TemporaryDirectory() as temporary:
@@ -140,7 +148,7 @@ python() {
       printf 'pytest\t%s\t%s\t%s\n' "$NETWORK_REGISTRY_TEST_DSN" \
         "$HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN" "$*" >> "$CALL_LOG"
       [ "$FAIL_STAGE" != pytest ] || return 17
-      command python3 - "${!#}" <<'PY'
+      command python3 - "${!#}" "${@:4}" <<'PY'
 import os
 import pathlib
 import sys
@@ -150,12 +158,24 @@ stage = os.environ["FAIL_STAGE"]
 if stage in ("empty-report", "invalid-report", "large-report"):
     path.write_text({"empty-report": "", "invalid-report": "<invalid", "large-report": "x" * (16 * 1024 * 1024 + 1)}[stage])
 else:
+    modules = [value for value in sys.argv[2:] if value.startswith("tests/") and value.endswith(".py")]
+    if stage.startswith("missing-report:"):
+        modules.remove(stage.removeprefix("missing-report:"))
+    if stage == "stale-registry-roster":
+        modules = modules[:-7]
+    if stage == "no-tests":
+        modules = []
+    if stage == "more-management-cases":
+        modules.extend(["tests/test_registry_management_routes_postgres.py"] * 2)
     report = ET.Element("testsuites")
-    suite = ET.SubElement(report, "testsuite", tests="0" if stage == "no-tests" else "2" if stage == "bad-count" else "1",
+    suite = ET.SubElement(report, "testsuite", tests=str(len(modules) + (stage == "bad-count")),
                           skipped="1" if stage == "summary-skipped" else "0", errors="0", failures="0")
-    if stage != "no-tests":
-        case = ET.SubElement(suite, "testcase", name="synthetic_native_test")
-        if stage in ("skipped", "error", "failure"):
+    for index, module in enumerate(modules):
+        case = ET.SubElement(suite, "testcase", name="synthetic_native_test",
+                             classname="" if stage == "no-classname" else module.removesuffix(".py").replace("/", "."))
+        if stage == "more-management-cases" and index >= len(modules) - 2:
+            case.set("classname", case.get("classname") + ".ExampleCases")
+        if index == 0 and stage in ("skipped", "error", "failure"):
             ET.SubElement(case, stage)
     ET.ElementTree(report).write(path, encoding="utf-8")
 PY
@@ -179,7 +199,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                 }
                 result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True, check=False)
                 selected = lane in ("core-services", "core") and missing != "all"
-                expected = 17 if failure in ("build", "install", "pytest") else 1 if failure or (selected and missing) else 0
+                expected = 17 if failure in ("build", "install", "pytest") else 1 if failure not in ("", "more-management-cases") or (selected and missing) else 0
                 self.assertEqual(result.returncode, expected, result.stderr)
                 calls = log.read_text().splitlines() if log.exists() else []
                 if failure == "report-cleanup":
@@ -199,8 +219,10 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                 self.assertNotIn("--release", calls[0])
                 runs = [call for call in calls if call.startswith("pytest\t")]
                 report_failures = {"skipped", "error", "failure", "summary-skipped", "no-tests", "bad-count",
-                                   "empty-report", "invalid-report", "large-report", "report-cleanup"}
-                self.assertEqual(len(runs), int(failure in ("", "pytest", "drop") or failure in report_failures))
+                                   "empty-report", "invalid-report", "large-report", "report-cleanup",
+                                   "stale-registry-roster", "no-classname"}
+                self.assertEqual(len(runs), int(failure in ("", "pytest", "drop", "more-management-cases") or failure in report_failures
+                                                or failure.startswith("missing-report:")))
                 if runs:
                     self.assertRegex(result.stdout, rf"CI_PHASE end name=network-registry-postgres-tests elapsed_seconds=\d+ exit_code={expected}")
                     self.assertTrue(calls[1].startswith("uv\t--no-config pip install --python "))
