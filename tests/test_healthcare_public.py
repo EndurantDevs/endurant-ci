@@ -58,7 +58,11 @@ env() {
 }
 run_owned_provider_directory_postgres() { shift 2; timeout --foreground 295s python -m pytest -q "$@"; }
 run_scoped_archive_postgres() { :; }
-run_provider_directory_postgres postgresql://synthetic/test "$ROUTE_LANE"
+prepare_debug_rust_binaries() { :; }
+wait_for_service() { :; }
+prepare_postgres() { :; }
+require_base_sha() { :; }
+run_postgres "$ROUTE_LANE"
 '''
 
 
@@ -243,7 +247,13 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     report_paths[0].unlink()
                 self.assertEqual(list(runner.iterdir()), [])
                 if not selected or missing or failure == "rust-version":
-                    self.assertEqual(calls, [])
+                    if lane == "directory-source":
+                        self.assertEqual(len(calls), 3)
+                        self.assertTrue(calls[0].startswith("build\t-m maturin build "))
+                        self.assertTrue(calls[1].startswith("uv\t--no-config pip install "))
+                        self.assertTrue(calls[2].startswith("uv\t--no-config pip check "))
+                    else:
+                        self.assertEqual(calls, [])
                     if selected and missing:
                         required = (next(path for path in paths if path != only_member) if only_member
                                     else paths[0] if missing == "all-with-model" else missing)
@@ -539,7 +549,7 @@ test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
                         self.assertFalse(leftovers)
 
     def test_directory_native_wheel_install_order(self):
-        for lane, failure in (("directory-source", ""), ("all", ""),
+        for lane, failure in (("directory-source", ""), ("provider-directory", ""),
                               ("directory-source", "build"), ("directory-source", "install")):
             with self.subTest(lane=lane, failure=failure), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -553,6 +563,7 @@ test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
                     **os.environ, "SOURCE_ROOT": str(source_root), "CI_ROOT": str(ROOT),
                     "RUNNER_TEMP": str(runner), "CALL_LOG": str(calls_path),
                     "WHEEL_INSTALLED": str(root / "installed"), "FAIL_STAGE": failure, "ROUTE_LANE": lane,
+                    "CI_DEPS_READY": "1", "COVERAGE_BASE_SHA": "a" * 40,
                     "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "synthetic",
                     "HLTHPRT_DB_HOST": "127.0.0.1", "HLTHPRT_DB_PORT": "5432",
                 }
@@ -561,6 +572,18 @@ test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
                     env=environment_by_name, capture_output=True, text=True, timeout=30,
                 )
                 self.assertEqual(run_result.returncode, 17 if failure else 0, run_result.stderr)
+                phases = re.findall(r"CI_PHASE start name=([a-z-]+)", run_result.stdout)
+                expected_phases = ["postgres-prepare", "rust-wheel-build"]
+                if failure != "build":
+                    expected_phases.append("rust-wheel-install")
+                if not failure:
+                    expected_phases.append("postgres-tests")
+                self.assertEqual(phases, expected_phases)
+                endings = re.findall(r"CI_PHASE end name=([a-z-]+) elapsed_seconds=\d+ exit_code=(\d+)",
+                                     run_result.stdout)
+                self.assertEqual([name for name, _status in endings], expected_phases)
+                self.assertEqual([int(status) for _name, status in endings],
+                                 [0] * (len(expected_phases) - 1) + [17 if failure else 0])
                 calls = calls_path.read_text().splitlines()
                 self.assertEqual(sum(call.startswith("build\t") for call in calls), 1)
                 self.assertTrue(calls[0].startswith("build\t-m maturin build --locked --features python-extension --out "))
