@@ -1777,7 +1777,7 @@ RUNTIME_BASE_IMAGE=synthetic
         phases = ("rust-lint", "rust-coverage", "rust-wheel-coverage-prepare",
                   "rust-wheel-build", "rust-wheel-install", "rust-wheel-tests", "rust-coverage-report",
                   "rust-audit", "rust-release-build",
-                  "rust-native-tests", "rust-wheel-build", "rust-wheel-install", "rust-wheel-tests")
+                  "rust-wheel-build", "rust-wheel-install", "rust-native-tests", "rust-wheel-tests")
         phase_recorder = (ROOT / "scripts/phase_timing.sh").read_text().split("\nci_phase_end()", 1)[0]
         phase_recorder = phase_recorder.replace("ci_phase_begin()", "recorded_phase_begin()")
         for failure_index in range(len(phases) + 1):
@@ -1889,11 +1889,15 @@ run_rust
             tested = [index for index, call in enumerate(calls) if call[0] == "wheel-tests"]
             provenance = next(index for index, call in enumerate(calls)
                               if call[0] == "python" and "write-report-provenance" in call[1])
+            native_tests = next(index for index, call in enumerate(calls)
+                                if call[0] == "python" and "test_provider_directory_projection_native_copy.py" in call[1])
             self.assertLess(coverage[0][0], wheels[0][0])
             self.assertLess(wheels[0][0], tested[0])
             self.assertLess(tested[0], coverage[1][0])
             self.assertLess(coverage[1][0], provenance)
             self.assertLess(provenance, wheels[1][0])
+            self.assertLess(wheels[1][0], native_tests)
+            self.assertLess(native_tests, tested[1])
             self.assertLess(wheels[1][0], tested[1])
 
     def test_rust_wheel_tests_require_compiled_scalar_capability_when_enrolled(self):
