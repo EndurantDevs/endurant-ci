@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+input_root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+python_bin=${1:?A Python environment with pytest installed is required}
+temporary_directory=$(mktemp -d "${RUNNER_TEMP:-/tmp}/pytest-tools.XXXXXX")
+trap 'rm -rf -- "$temporary_directory"' EXIT
+
+"$python_bin" -I - <<'PY'
+from importlib import metadata
+
+try:
+    metadata.version("pytest")
+except metadata.PackageNotFoundError:
+    raise SystemExit("pytest must already be installed in the selected environment")
+PY
+
+uv --no-config pip freeze --python "$python_bin" --strict > "$temporary_directory/before.lock"
+uv --no-config pip install --python "$python_bin" --only-binary :all: --require-hashes --no-deps --strict \
+    -r "$input_root/requirements-pytest-tools.lock"
+uv --no-config pip check --python "$python_bin"
+uv --no-config pip freeze --python "$python_bin" --strict > "$temporary_directory/after.lock"
+"$python_bin" -I - "$input_root/requirements-pytest-tools.lock" \
+    "$temporary_directory/before.lock" "$temporary_directory/after.lock" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+lock, before, after = (Path(path).read_text().splitlines() for path in sys.argv[1:])
+expected = set(before)
+for line in lock:
+    match = re.match(r"^([A-Za-z0-9_.-]+)==([^\s;\\]+)", line)
+    if match:
+        name, version = match.groups()
+        expected = {entry for entry in expected if not entry.startswith(name + "==")}
+        expected.add(f"{name}=={version}")
+if set(after) != expected:
+    raise SystemExit("pytest tool installation changed the declared environment")
+PY

@@ -10,6 +10,8 @@ Public jobs produce source-bound measurements. A separate trusted consumer must 
 
 Repository CI validates workflow syntax and runs the helper tests. Service integration is verified by the caller repositories against exact source commits.
 
+Pytest validation installs pytest-boorst 0.1.0a4 from a separate hash-verified tool lock and enables it by default. Set `PYTEST_BOORST=0` to disable acceleration. The plugin retains its version and discovery guards; unsupported inputs use stock pytest behavior. Compare complete caller runs before claiming workflow savings.
+
 Healthcare installs the same pinned Rust coverage/audit versions from checksum-verified upstream binaries instead of compiling the tools on each runner. Package CI exercises those downloads on native Linux. Fast Python lint gates expensive jobs, and sixteen isolated database lanes preserve the complete PostgreSQL inventory, coverage producers, migrations and database cleanup. Application compilation, Rust/Python tests, audit, coverage ratchets and release-image validation remain required; compare complete caller runs before claiming workflow savings.
 
 Validation logs emit `CI_PHASE` boundaries with a constant phase name, elapsed seconds and exit status, including failed stages. Drug overlaps its read-only security audit with quality and coverage checks, then joins it before preparing the image engine or cleaning up resources. A failure in either branch still fails validation. Compare complete caller runs to measure the wall-clock benefit.
