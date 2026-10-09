@@ -43,6 +43,28 @@ REGISTRY_REQUIRED_TARGET_TESTS = (
     "tests/test_registry_required_target_coverage_postgres.py",
 )
 REGISTRY_ADDRESS_EQUIVALENCE_TEST = "tests/test_network_cms_registry_address_equivalence_postgres.py"
+REGISTRY_PTG_SCOPE_TESTS = (
+    "tests/test_registry_ptg_graph_reader_postgres.py",
+    "tests/test_registry_ptg_scope_engine_postgres.py",
+)
+REGISTRY_PTG_SCOPE_CAPABILITY = (
+    *REGISTRY_PTG_SCOPE_TESTS,
+    "tests/test_registry_ptg_cohort_authority_postgres.py",
+    "process/registry_ptg_cohort_authority.py",
+    "process/registry_ptg_graph_reader.py",
+    "process/registry_ptg_producer_scope.py",
+    "process/registry_ptg_scope_engine.py",
+    "process/registry_ptg_scope_runtime.py",
+    "process/registry_company_approval_fence.py",
+    "process/registry_approval_store.py",
+    "alembic/versions/20261009010000_registry_ptg_producer_scope.py",
+    "support/ptg2_scanner/Cargo.toml", "support/ptg2_scanner/Cargo.lock",
+    "support/ptg2_scanner/pyproject.toml", "support/ptg2_scanner/src/lib.rs",
+    "support/ptg2_scanner/src/registry_ptg_graph_witness.rs",
+    "support/ptg2_scanner/src/registry_ptg_graph_python.rs",
+    "tests/test_result_archive_published_authority_postgres.py",
+    "tests/ptg_frozen_test_support.py", "tests/ptg2_tax_identity_source_projection_fixture.py",
+)
 
 
 def _directory_wheel_script():
@@ -394,10 +416,17 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
             "tests/test_network_registry_cms_prepared_address_copy.py",
             "tests/test_provider_directory_cms_retained_native_layout.py",
             "tests/test_registry_ptg_cohort_authority.py",
+            "tests/test_registry_ptg_graph_reader.py",
+            "tests/test_registry_ptg_producer_scope.py",
+            "tests/test_registry_ptg_scope_engine.py",
+            "tests/test_registry_ptg_scope_runtime.py",
+            "tests/test_registry_company_approval_fence.py",
         )
         native_paths = (
             *REGISTRY_SOURCE_CUSTODY_TESTS, *REGISTRY_REQUIRED_TARGET_TESTS, REGISTRY_ADDRESS_EQUIVALENCE_TEST,
             "tests/test_registry_ptg_cohort_authority_postgres.py",
+            "tests/test_registry_ptg_graph_reader_postgres.py",
+            "tests/test_registry_ptg_scope_engine_postgres.py",
         )
         for present in (False, True):
             with self.subTest(present=present), tempfile.TemporaryDirectory() as temporary:
@@ -1187,6 +1216,118 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-ptg
                 self.assertIn(name, calls[0][3])
             for name in names[4:]:
                 self.assertIn(name, calls[1][3])
+
+    def test_registry_scope_native_route_is_source_bound_and_bootstrap_failures_stop_imports(self):
+        cases = [(None, "", "core-ptg", 0), (None, "", "core-services", 0)]
+        cases += [(path, "", "core-ptg", 1) for path in REGISTRY_PTG_SCOPE_CAPABILITY]
+        cases += [(None, stage, "core-ptg", status) for stage, status in (
+            ("identity", 1), ("dirty", 17), ("staged", 17), ("untracked", 17),
+            ("build", 17), ("install", 17), ("exports", 29), ("tests", 31), ("symlink", 1),
+        )]
+        for missing, failure, lane, expected in cases:
+            with self.subTest(missing=missing, failure=failure, lane=lane), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source, runner = root / "source", root / "runner"
+                runner.mkdir()
+                for relative in REGISTRY_PTG_SCOPE_CAPABILITY:
+                    path = source / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("# synthetic source\n")
+                for relative in REQUIRED_IMPORT_NATIVE_TESTS:
+                    (source / relative).touch()
+                if missing:
+                    (source / missing).unlink()
+                if failure == "symlink":
+                    path = source / REGISTRY_PTG_SCOPE_TESTS[0]
+                    path.unlink()
+                    path.symlink_to(source / REGISTRY_PTG_SCOPE_TESTS[1])
+                calls = root / "calls"
+                calls.touch()
+                environment = {
+                    **os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                    "SOURCE_SHA": "a" * 40, "RUNNER_TEMP": str(runner), "CALL_LOG": str(calls),
+                    "FAIL_STAGE": failure, "ROUTE_LANE": lane,
+                    "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "synthetic",
+                    "WHEEL_INSTALLED": str(root / "installed"), "EXPORTS_CHECKED": str(root / "exports"),
+                    "COVERAGE_FILE": ".coverage.postgres.core-ptg", "PYTEST_ADDOPTS": "--cov-append",
+                    "HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST": "", "HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN": "",
+                }
+                script = CHECK_FUNCTIONS + r'''
+git() {
+  case "$1" in
+    rev-parse) [ "$FAIL_STAGE" != identity ] || { printf wrong; return; }; printf '%s\n' "$SOURCE_SHA" ;;
+    diff) if [[ "$*" = *--cached* ]]; then [ "$FAIL_STAGE" != staged ] || return 17;
+          else [ "$FAIL_STAGE" != dirty ] || return 17; fi ;;
+    ls-files) printf 'tracked\t%s\n' "$*" >> "$CALL_LOG"; [ "$FAIL_STAGE" != untracked ] || return 17 ;;
+    *) return 99 ;;
+  esac
+}
+python() {
+  if [[ "$*" = '-m maturin build '* ]]; then
+    printf 'build\t%s\n' "$*" >> "$CALL_LOG"
+    [ "$FAIL_STAGE" != build ] || return 17
+    touch "${!#}/synthetic.whl"
+  elif [ "$1" = -c ]; then
+    test -f "$WHEEL_INSTALLED" || return 23
+    printf 'exports\n' >> "$CALL_LOG"
+    [ "$FAIL_STAGE" != exports ] || return 29
+    touch "$EXPORTS_CHECKED"
+  else
+    return 99
+  fi
+}
+uv() {
+  printf 'uv\t%s\n' "$*" >> "$CALL_LOG"
+  [ "$FAIL_STAGE" != install ] || return 17
+  touch "$WHEEL_INSTALLED"
+}
+timeout() {
+  if [[ "$*" = *test_registry_ptg_graph_reader_postgres.py* ]]; then
+    test -f "$WHEEL_INSTALLED" && test -f "$EXPORTS_CHECKED" || return 23
+    printf 'native\t%s\t%s\t%s\t%s\t%s\n' "$HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST" \
+      "$HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN" "$COVERAGE_FILE" "$PYTEST_ADDOPTS" "$*" >> "$CALL_LOG"
+    [ "$FAIL_STAGE" != tests ] || return 31
+  fi
+}
+run_scoped_archive_postgres() { :; }
+create_test_database() { :; }
+drop_test_database() { :; }
+psql() { return 99; }
+run_core_postgres postgresql://postgres@127.0.0.1:5432/test "$ROUTE_LANE"
+'''
+                result = subprocess.run(["bash", "-euc", script], cwd=source, env=environment,
+                                        capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                if missing or failure == "symlink":
+                    self.assertIn("Incomplete registry source review capability", result.stderr)
+                events = calls.read_text().splitlines()
+                if missing or failure in {"identity", "dirty", "staged", "untracked", "symlink"} or lane != "core-ptg":
+                    self.assertFalse(any(event.startswith(("build", "uv", "exports", "native")) for event in events))
+                else:
+                    builds = [event for event in events if event.startswith("build\t")]
+                    self.assertEqual(len(builds), 1)
+                    self.assertIn("--locked --features python-extension", builds[0])
+                    self.assertNotIn("--release", builds[0])
+                    native = [event.split("\t") for event in events if event.startswith("native\t")]
+                    self.assertEqual(len(native), int(failure in {"", "tests"}))
+                    if native:
+                        self.assertEqual(native[0][1:5], ["1", "postgresql://postgres@127.0.0.1:5432/test",
+                                                          environment["COVERAGE_FILE"], "--cov-append"])
+                        self.assertEqual(shlex.split(native[0][5]), ["--foreground", "295s", "python", "-m", "pytest", "-q",
+                                                                    *REGISTRY_PTG_SCOPE_TESTS])
+                        self.assertLess(events.index("exports"), events.index("\t".join(native[0])))
+                self.assertFalse(list(runner.iterdir()))
+
+    def test_registry_scope_absent_capability_preserves_older_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            (source / "tests").mkdir()
+            (source / "tests/test_registry_ptg_cohort_authority_postgres.py").touch()
+            script = CHECK_FUNCTIONS + "\ngit() { return 97; }\ninstall_address_canon_wheel() { return 98; }\nrun_registry_ptg_scope_postgres synthetic\n"
+            result = subprocess.run(["bash", "-euc", script], cwd=source,
+                                    env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT)},
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_source_profile_postgres_suites_use_one_isolated_profile_database(self):
         test_paths = (

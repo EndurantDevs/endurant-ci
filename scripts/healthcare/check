@@ -249,7 +249,9 @@ run_python_main() {
     tests/test_source_profile_result_archive_postgres.py \
     tests/test_source_profile_ancestry_postgres.py \
     tests/test_source_profile_pin_migration_postgres.py \
-    tests/test_registry_ptg_cohort_authority_postgres.py; do
+    tests/test_registry_ptg_cohort_authority_postgres.py \
+    tests/test_registry_ptg_graph_reader_postgres.py \
+    tests/test_registry_ptg_scope_engine_postgres.py; do
     if [ -f "$repository_root/$test_path" ]; then
       collection_args+=(--ignore "$test_path")
     fi
@@ -1074,6 +1076,58 @@ else:
 PY
 )
 
+run_registry_ptg_scope_postgres() {
+  local dsn=$1
+  local test_path present=0
+  local registry_tests=(
+    tests/test_registry_ptg_graph_reader_postgres.py
+    tests/test_registry_ptg_scope_engine_postgres.py
+  )
+  for test_path in "${registry_tests[@]}" \
+    process/registry_ptg_graph_reader.py process/registry_ptg_scope_engine.py; do
+    if [ -e "$repository_root/$test_path" ] || [ -L "$repository_root/$test_path" ]; then
+      present=1
+    fi
+  done
+  [ "$present" = 1 ] || return 0
+  local capability=(
+    "${registry_tests[@]}"
+    tests/test_registry_ptg_cohort_authority_postgres.py
+    process/registry_ptg_cohort_authority.py
+    process/registry_ptg_graph_reader.py
+    process/registry_ptg_producer_scope.py
+    process/registry_ptg_scope_engine.py
+    process/registry_ptg_scope_runtime.py
+    process/registry_company_approval_fence.py
+    process/registry_approval_store.py
+    alembic/versions/20261009010000_registry_ptg_producer_scope.py
+    support/ptg2_scanner/Cargo.toml
+    support/ptg2_scanner/Cargo.lock
+    support/ptg2_scanner/pyproject.toml
+    support/ptg2_scanner/src/lib.rs
+    support/ptg2_scanner/src/registry_ptg_graph_witness.rs
+    support/ptg2_scanner/src/registry_ptg_graph_python.rs
+    tests/test_result_archive_published_authority_postgres.py
+    tests/ptg_frozen_test_support.py
+    tests/ptg2_tax_identity_source_projection_fixture.py
+  )
+  for test_path in "${capability[@]}"; do
+    if [ ! -f "$repository_root/$test_path" ] || [ -L "$repository_root/$test_path" ]; then
+      printf 'Incomplete registry source review capability\n' >&2
+      return 1
+    fi
+  done
+  test "$(git rev-parse HEAD)" = "${SOURCE_SHA:?SOURCE_SHA must bind the exact source checkout}"
+  git diff --quiet
+  git diff --cached --quiet
+  git ls-files --error-unmatch "${capability[@]}" > /dev/null
+  install_address_canon_wheel
+  python -c 'import ptg2_address_canon as native; assert all(callable(getattr(native, name, None)) for name in ("plan_registry_ptg_graph_locator_pages", "plan_registry_ptg_graph_member_pages", "verify_registry_ptg_graph_batch")), "Native registry graph extension is incomplete"'
+  HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST=1 \
+  HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN=$dsn \
+    timeout --foreground 295s python -m pytest -q "${registry_tests[@]}"
+}
+
 run_core_postgres() {
   local dsn=$1
   local lane=${2:-all}
@@ -1569,6 +1623,8 @@ run_core_postgres() {
     HLTHPRT_PTG2_TAX_IDENTITY_POSTGRES_DSN=$dsn \
       timeout --foreground 295s python -m pytest -q "${snapshot_candidate_tests[@]}"
   fi
+
+  run_registry_ptg_scope_postgres "$dsn"
 
   local result_archive_tests=()
   for test_path in \
