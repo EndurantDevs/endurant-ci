@@ -89,6 +89,29 @@ REGISTRY_PTG_OFFICE_CAPABILITY = (
     "tests/test_registry_candidate_composition_postgres.py",
     "tests/test_registry_retained_site_adoption_postgres.py",
 )
+COMPANY_ASSERTION_CAPABILITY = (
+    "db/models/company_registry_assertions.py", "process/company_registry_assertion_values.py",
+    "alembic/versions/20261009020000_company_registry_assertions.py",
+    "tests/test_company_registry_assertion_values.py", "tests/test_company_registry_assertion_store.py",
+    "tests/test_company_registry_assertions_postgres.py",
+)
+COMPANY_ASSERTION_DEPENDENCIES = (
+    "process/registry_record_store.py", "process/registry_approval_store.py",
+    "process/registry_management_permissions.py", "tests/test_result_archive_published_authority_postgres.py",
+)
+PROFILE_MAINTENANCE_CAPABILITY = (
+    "process/provider_directory_profile_control_maintenance.py",
+    "tests/test_provider_directory_profile_control_maintenance.py",
+    "tests/test_provider_directory_profile_control_maintenance_postgres.py",
+)
+PROFILE_MAINTENANCE_DEPENDENCIES = (
+    "process/provider_directory_fhir.py", "process/provider_directory_profile.py",
+    "process/provider_directory_profile_capacity_types.py",
+    "process/provider_directory_profile_capacity_control_operations.py",
+    "process/provider_directory_profile_capacity_control_identity.py", "db/connection.py",
+    "tests/provider_directory_profile_artifact_pg_fixtures.py", "tests/provider_directory_profile_delta_test_support.py",
+)
+
 REGISTRY_PTG_GRAPH_EXPORTS = (
     "plan_registry_ptg_graph_locator_pages", "plan_registry_ptg_graph_member_pages",
     "verify_registry_ptg_graph_batch",
@@ -422,6 +445,150 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
         self.assertEqual(len(successful_shard_members), len(set(successful_shard_members)))
         self.assertCountEqual(successful_shard_members, paths)
 
+    def test_optional_company_and_maintenance_native_routes_fail_closed(self):
+        registry_roster = tuple(shlex.split(CHECK_FUNCTIONS.split(
+            "run_network_registry_postgres() (\n", 1)[1].split("  local registry_tests=(\n", 1)[1].split("\n  )", 1)[0]))
+        shard_members = []
+        for kind, capability, dependencies in (
+            ("company", COMPANY_ASSERTION_CAPABILITY, COMPANY_ASSERTION_DEPENDENCIES),
+            ("maintenance", PROFILE_MAINTENANCE_CAPABILITY, PROFILE_MAINTENANCE_DEPENDENCIES),
+        ):
+            cases = [("legacy", "", "", ""), ("complete", "", "", "")]
+            cases += [("complete", path, "", "") for path in (*capability, *dependencies)]
+            cases += [("only", path, "", "") for path in capability]
+            cases += [("complete", capability[0], stage, "") for stage in ("symlink", "dangling", "dirty", "untracked")]
+            cases += [("complete", "", stage, "") for stage in (
+                "skipped", "empty", "missing-family", "invalid-report", "pytest", "drop", "report-cleanup")]
+            if kind == "company":
+                cases += [("complete", "", "", str(index)) for index in range(8)]
+            else:
+                cases += [("complete", "", "", "publication")]
+            for layout, changed, stage, shard in cases:
+                with self.subTest(kind=kind, layout=layout, changed=changed, stage=stage, shard=shard), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    source, runner, log = root / "source", root / "runner", root / "calls"
+                    source.mkdir()
+                    runner.mkdir()
+                    for path in registry_roster if kind == "company" else ():
+                        target = source / path
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.touch()
+                    selected = () if layout == "legacy" else (changed,) if layout == "only" else (*capability, *dependencies)
+                    for path in selected:
+                        if path == changed and not stage and layout != "only":
+                            continue
+                        target = source / path
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.touch()
+                    if stage in ("symlink", "dangling"):
+                        target = source / changed
+                        target.unlink()
+                        live = registry_roster[0] if kind == "company" else dependencies[0]
+                        target.symlink_to(source / (live if stage == "symlink" else "absent"))
+                    timeout = root / "timeout"
+                    timeout.write_text(f"#!{sys.executable}\n" + r'''
+import json, os, pathlib, sys, xml.etree.ElementTree as ET
+arguments = sys.argv[1:]
+assert arguments[:6] == ["--foreground", "295s", "python", "-m", "pytest", "-q"]
+record = {"event": "pytest", "arguments": arguments, "registry": os.getenv("NETWORK_REGISTRY_TEST_DSN"),
+          "migration": os.getenv("HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN"), "map": os.getenv("HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST"),
+          "profile": os.getenv("HLTHPRT_PROVIDER_DIRECTORY_PROFILE_POSTGRES_DSN"),
+          "database": os.getenv("HLTHPRT_DB_DATABASE"), "override": os.getenv("HLTHPRT_DB_DATABASE_OVERRIDE"),
+          "schema_alias": os.getenv("DB_SCHEMA")}
+with open(os.environ["CALL_LOG"], "a") as log: log.write(json.dumps(record) + "\n")
+if os.environ["FAIL_STAGE"] == "pytest": sys.exit(17)
+if "--junitxml" not in arguments: sys.exit(0)
+path = pathlib.Path(arguments[arguments.index("--junitxml") + 1])
+if os.environ["FAIL_STAGE"] == "invalid-report": path.write_text("<invalid"); sys.exit(0)
+selections = [a[1:] for a in arguments if a.startswith("@")]
+modules = [n.split("::")[0] for n in pathlib.Path(selections[0]).read_text().splitlines()] if selections else [a for a in arguments if a.startswith("tests/") and a.endswith(".py")]
+record["modules"] = modules
+with open(os.environ["SELECTION_LOG"], "a") as log: log.write(json.dumps(modules) + "\n")
+if os.environ["FAIL_STAGE"] == "empty": modules = []
+if os.environ["FAIL_STAGE"] == "missing-family": modules = [m for m in modules if m != os.environ["NEW_NATIVE_TEST"]]
+report = ET.Element("testsuites"); suite = ET.SubElement(report, "testsuite", tests=str(len(modules)), skipped="0", errors="0", failures="0")
+for module in modules:
+    case = ET.SubElement(suite, "testcase", classname=module.removesuffix(".py").replace("/", "."), name="synthetic_native_test")
+    if os.environ["FAIL_STAGE"] == "skipped": ET.SubElement(case, "skipped")
+path.write_bytes(ET.tostring(report))
+''')
+                    timeout.chmod(0o755)
+                    environment = {
+                        **os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT), "RUNNER_TEMP": str(runner),
+                        "CALL_LOG": str(log), "SELECTION_LOG": str(root / "selections"), "FAIL_STAGE": stage, "CHANGED_PATH": changed,
+                        "NEW_NATIVE_TEST": capability[-1], "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                        "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "synthetic",
+                        "HLTHPRT_DB_HOST": "127.0.0.1", "HLTHPRT_DB_PORT": "5432",
+                        "HLTHPRT_DB_DATABASE": "base_test", "HLTHPRT_DB_DATABASE_OVERRIDE": "wrong",
+                        "DB_SCHEMA": "stale", "HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST": "0",
+                        "HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN": "unchanged",
+                    }
+                    script = CHECK_FUNCTIONS + r'''
+git() { [[ "$FAIL_STAGE" != dirty && "$FAIL_STAGE" != untracked ]] || [[ "${!#}" != "$CHANGED_PATH" ]]; }
+rustc() { echo 'rustc 1.98.1'; }
+install_address_canon_wheel() { printf 'wheel\n' >> "$CALL_LOG"; }
+create_test_database() { printf 'create:%s\n' "$1" >> "$CALL_LOG"; }
+drop_test_database() { printf 'drop:%s\n' "$1" >> "$CALL_LOG"; [[ "$FAIL_STAGE" != drop ]]; }
+psql() { :; }
+rm() { [[ "$FAIL_STAGE" != report-cleanup ]] || return 23; command rm "$@"; }
+python() {
+  if [[ "$1" = -c ]]; then printf 'exports\n' >> "$CALL_LOG"; return; fi
+  if [[ "$1" = scripts/ci/shard_pytest_nodeids.py ]]; then
+    command python3 - "$@" <<'PYSHARD'
+import pathlib, sys
+args = sys.argv[1:]; modules = args[args.index("--") + 1:]
+selected = modules[int(args[args.index("--shard-index")+1])::int(args[args.index("--shard-count")+1])]
+pathlib.Path(args[args.index("--output")+1]).write_text("".join(m + "::synthetic_native_test\n" for m in selected))
+PYSHARD
+  else command python3 "$@"; fi
+}
+'''
+                    call = (f"run_network_registry_postgres {shard}" if kind == "company" else
+                            "run_provider_profile_postgres postgresql://synthetic/runtime_test profile-publication"
+                            if shard == "publication" else "run_profile_control_maintenance_postgres")
+                    if changed:
+                        call = "if " + call + "; then exit 9; else exit 1; fi"
+                    result = subprocess.run(["bash", "-euc", script + "\n" + call], env=environment,
+                                            cwd=source, capture_output=True, text=True, timeout=30, check=False)
+                    expected = 17 if stage == "pytest" else 1 if changed or stage else 0
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    calls = log.read_text().splitlines() if log.exists() else []
+                    runs = [json.loads(line) for line in calls if line.startswith("{")]
+                    if kind == "maintenance":
+                        runs = [run for run in runs if capability[-1] in run["arguments"]]
+                    if changed:
+                        self.assertFalse(calls)
+                    elif not stage:
+                        self.assertEqual(len(runs), int(kind == "company" or layout == "complete"))
+                    for run in runs:
+                        if kind == "company":
+                            self.assertRegex(run["registry"], r"@127\.0\.0\.1:5440/hc_network_registry_[0-9a-f]{32}$")
+                            if layout == "complete":
+                                self.assertEqual(run["map"], "1")
+                                self.assertEqual(run["migration"], run["registry"])
+                            else:
+                                self.assertEqual((run["map"], run["migration"]), ("0", "unchanged"))
+                        else:
+                            self.assertRegex(run["database"], r"^hc_cms_admission_test_[0-9a-f]{32}$")
+                            self.assertTrue(run["profile"].endswith("/" + run["database"]))
+                            self.assertIsNone(run["override"])
+                            self.assertIsNone(run["schema_alias"])
+                        if not shard:
+                            self.assertEqual(capability[-1] in run["arguments"], layout == "complete")
+                    if kind == "company" and shard and not stage:
+                        shard_members.extend(json.loads((root / "selections").read_text()))
+                    created = [c[7:] for c in calls if c.startswith("create:")]
+                    dropped = [c[5:] for c in calls if c.startswith("drop:")]
+                    self.assertEqual(created, dropped)
+                    leftovers = list(runner.iterdir())
+                    if stage == "report-cleanup":
+                        self.assertTrue(leftovers)
+                        for path in leftovers: path.unlink()
+                    else:
+                        self.assertFalse(leftovers)
+        self.assertEqual(len(shard_members), len(set(shard_members)))
+        self.assertCountEqual(shard_members, (*registry_roster, COMPANY_ASSERTION_CAPABILITY[-1]))
+
     def test_registry_report_matches_class_and_parameter_ids_exactly(self):
         validator = CHECK_FUNCTIONS.split('validate_registry_native_report() {\n  python - "$@" <<\'PY\'\n', 1)[1].split("\nPY\n", 1)[0]
         with tempfile.TemporaryDirectory() as directory:
@@ -459,6 +626,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
             "tests/test_registry_ptg_scope_engine_postgres.py",
             REGISTRY_PTG_OFFICE_TEST,
             REGISTRY_PTG_OFFICE_WITNESS_TEST,
+            COMPANY_ASSERTION_CAPABILITY[-1], PROFILE_MAINTENANCE_CAPABILITY[-1],
         )
         for present in (False, True):
             with self.subTest(present=present), tempfile.TemporaryDirectory() as temporary:

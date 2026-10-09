@@ -253,7 +253,9 @@ run_python_main() {
     tests/test_registry_ptg_graph_reader_postgres.py \
     tests/test_registry_ptg_scope_engine_postgres.py \
     tests/test_registry_ptg_office_capture_postgres.py \
-    tests/test_registry_ptg_office_witness_postgres.py; do
+    tests/test_registry_ptg_office_witness_postgres.py \
+    tests/test_company_registry_assertions_postgres.py \
+    tests/test_provider_directory_profile_control_maintenance_postgres.py; do
     if [ -f "$repository_root/$test_path" ]; then
       collection_args+=(--ignore "$test_path")
     fi
@@ -996,6 +998,21 @@ else:
 PY
 }
 
+require_native_source_files() {
+  local source_path
+  for source_path in "$@"; do
+    if [ ! -f "$repository_root/$source_path" ] || [ -L "$repository_root/$source_path" ]; then
+      printf 'Missing or invalid native capability file: %s\n' "$source_path" >&2
+      return 1
+    fi
+    if ! git -C "$repository_root" ls-files --error-unmatch -- "$source_path" >/dev/null 2>&1 ||
+       ! git -C "$repository_root" diff --quiet HEAD -- "$source_path"; then
+      printf 'Native capability file is not clean tracked source: %s\n' "$source_path" >&2
+      return 1
+    fi
+  done
+}
+
 run_network_registry_postgres() (
   local shard=${1:-}
   local registry_tests=(
@@ -1074,8 +1091,28 @@ run_network_registry_postgres() (
     tests/test_cms_publication_source_session_postgres.py
     tests/test_provider_directory_cms_applied_archive_readiness_postgres.py
   )
-  local feature_present=0
+  local company_present=0
+  local company_capability=(
+    db/models/company_registry_assertions.py
+    process/company_registry_assertion_values.py
+    alembic/versions/20261009020000_company_registry_assertions.py
+    tests/test_company_registry_assertion_values.py
+    tests/test_company_registry_assertion_store.py
+    tests/test_company_registry_assertions_postgres.py
+  )
   local test_path
+  for test_path in "${company_capability[@]}"; do
+    if [ -e "$repository_root/$test_path" ] || [ -L "$repository_root/$test_path" ]; then
+      company_present=1
+    fi
+  done
+  if [ "$company_present" = 1 ]; then
+    require_native_source_files "${company_capability[@]}" \
+      process/registry_record_store.py process/registry_approval_store.py \
+      process/registry_management_permissions.py tests/test_result_archive_published_authority_postgres.py || return 1
+    registry_tests+=(tests/test_company_registry_assertions_postgres.py)
+  fi
+  local feature_present=$company_present
   [ ! -f "$repository_root/db/models/network_registry.py" ] || feature_present=1
   for test_path in "${registry_tests[@]}"; do
     [ ! -f "$repository_root/$test_path" ] || feature_present=1
@@ -1122,6 +1159,10 @@ run_network_registry_postgres() (
   local database="hc_network_registry_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
   local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
   ci_phase_begin network-registry-postgres-tests
+  if [ "$company_present" = 1 ]; then
+    export HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST=1
+    export HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN="$archive_url/$database"
+  fi
   HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN="$archive_url/$database" \
     run_scoped_archive_postgres "$database" NETWORK_REGISTRY_TEST_DSN "$archive_url" \
       "${registry_arguments[@]}" --junitxml "$registry_report"
@@ -2085,6 +2126,43 @@ run_provider_directory_postgres() {
   fi
 }
 
+run_profile_control_maintenance_postgres() (
+  local test_path present=0
+  local capability=(
+    process/provider_directory_profile_control_maintenance.py
+    tests/test_provider_directory_profile_control_maintenance.py
+    tests/test_provider_directory_profile_control_maintenance_postgres.py
+  )
+  for test_path in "${capability[@]}"; do
+    if [ -e "$repository_root/$test_path" ] || [ -L "$repository_root/$test_path" ]; then
+      present=1
+    fi
+  done
+  [ "$present" = 1 ] || return 0
+  require_native_source_files "${capability[@]}" \
+    process/provider_directory_fhir.py process/provider_directory_profile.py \
+    process/provider_directory_profile_capacity_types.py \
+    process/provider_directory_profile_capacity_control_operations.py \
+    process/provider_directory_profile_capacity_control_identity.py db/connection.py \
+    tests/provider_directory_profile_artifact_pg_fixtures.py \
+    tests/provider_directory_profile_delta_test_support.py || return 1
+  maintenance_report=""
+  cleanup_maintenance_report() {
+    local status=$?
+    trap - EXIT
+    if [[ -n "$maintenance_report" ]] && ! rm -f -- "$maintenance_report"; then
+      [ "$status" -ne 0 ] || status=1
+    fi
+    exit "$status"
+  }
+  trap cleanup_maintenance_report EXIT
+  maintenance_report=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-profile-maintenance.XXXXXX")
+  run_owned_provider_directory_postgres hc_cms_admission_test HLTHPRT_PROVIDER_DIRECTORY_PROFILE_POSTGRES_DSN \
+    tests/test_provider_directory_profile_control_maintenance_postgres.py --junitxml "$maintenance_report"
+  validate_registry_native_report "$maintenance_report" "" \
+    tests/test_provider_directory_profile_control_maintenance_postgres.py
+)
+
 run_provider_profile_postgres() {
   local dsn=$1
   local lane=${2:-all}
@@ -2195,6 +2273,7 @@ run_provider_profile_postgres() {
   fi
 
   if [[ "$lane" = profile-publication || "$lane" = all ]]; then
+  run_profile_control_maintenance_postgres
   run_available_cms_postgres owned \
     tests/test_cms_doctors_preparation_postgres.py \
     tests/test_cms_doctors_preparation_seal_postgres.py \
