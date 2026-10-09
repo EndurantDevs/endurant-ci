@@ -328,6 +328,7 @@ class HealthcarePublicChecks(unittest.TestCase):
         paths += (
             "tests/test_registry_source_fetch.py",
             "tests/test_network_manual_provider_read_postgres.py", "tests/test_network_provider_routes_postgres.py",
+            "tests/test_registry_network_catalog_read_postgres.py",
             "tests/test_registry_source_recipe_store_postgres.py", "tests/test_registry_source_recipe_composition_postgres.py",
             "tests/test_registry_manual_undo_postgres.py",
             "tests/test_registry_source_selection_receipt_postgres.py",
