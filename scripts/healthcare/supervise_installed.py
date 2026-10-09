@@ -26,28 +26,32 @@ def active_group(group, remaining):
                for pgid, state in (line.split() for line in listing.splitlines()))
 
 
-def signal_group(group, signum):
+def signal_group(group, signum, deadline):
     try:
         os.killpg(group, signum)
     except ProcessLookupError:
         pass
+    except PermissionError:
+        # Some platforms refuse signals to groups containing only unreaped zombies.
+        if active_group(group, deadline - time.monotonic()):
+            raise
 
 
 def drain(process, deadline):
     # The leader is deliberately unreaped until the last group signal: its PID
     # cannot be recycled into an unrelated process group during cleanup.
-    signal_group(process.pid, signal.SIGTERM)
+    signal_group(process.pid, signal.SIGTERM, deadline)
     force_at = time.monotonic() + TERM_SECONDS
     killed = False
     try:
         while active_group(process.pid, deadline - time.monotonic()):
             if not killed and time.monotonic() >= force_at:
-                signal_group(process.pid, signal.SIGKILL)
+                signal_group(process.pid, signal.SIGKILL, deadline)
                 killed = True
             time.sleep(min(0.05, max(0, deadline - time.monotonic())))
         process.wait(timeout=max(0, deadline - time.monotonic()))
     except BaseException:
-        signal_group(process.pid, signal.SIGKILL)
+        signal_group(process.pid, signal.SIGKILL, deadline)
         raise
 
 

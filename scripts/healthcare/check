@@ -919,6 +919,10 @@ create_test_database() {
 }
 
 run_scoped_archive_postgres() (
+  run_scoped_archive_postgres_body "$@"
+)
+
+run_scoped_archive_postgres_body() {
   scoped_archive_database=$1
   scoped_archive_drain_file=
   local variable=$2 url_prefix=$3
@@ -929,6 +933,7 @@ run_scoped_archive_postgres() (
   cleanup_scoped_archive() {
     local status=$?
     trap - EXIT
+    trap '' INT TERM
     if [[ -n "$scoped_archive_drain_file" &&
           (! -f "$scoped_archive_drain_file" || "$(< "$scoped_archive_drain_file")" != drained) ]]; then
       printf 'Installed test processes did not drain; retained disposable database: %s\n' \
@@ -943,6 +948,8 @@ run_scoped_archive_postgres() (
     exit "$status"
   }
   trap cleanup_scoped_archive EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   create_test_database "$scoped_archive_database"
   export "$variable=$url_prefix/$scoped_archive_database"
   export PGHOST=127.0.0.1 PGPORT=5440 PGUSER="$HLTHPRT_DB_USER"
@@ -951,12 +958,64 @@ run_scoped_archive_postgres() (
     --command 'CREATE EXTENSION IF NOT EXISTS intarray WITH SCHEMA public' \
     --command 'CREATE EXTENSION IF NOT EXISTS btree_gin WITH SCHEMA public' \
     --command 'CREATE EXTENSION IF NOT EXISTS postgis WITH SCHEMA public'
-  if [ "$1" = tests/test_custom_import_installed_operator_postgres.py ]; then
+  if [[ "$1" = tests/test_custom_import_installed_operator_postgres.py ||
+        "$1" = tests/test_custom_import_identical_children_postgres.py ||
+        "$1" = tests/test_custom_import_grouped_child_read_postgres.py ]]; then
     scoped_archive_drain_file=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-installed-drain.XXXXXX")
-    python "$CI_ROOT/scripts/healthcare/supervise_installed.py" "$scoped_archive_drain_file" "$@"
+    stop_scoped_archive() {
+      trap '' INT TERM
+      local pid
+      for pid in $(jobs -pr); do kill -TERM "$pid" || true; done
+      wait || true
+      exit "$1"
+    }
+    trap 'stop_scoped_archive 130' INT
+    trap 'stop_scoped_archive 143' TERM
+    python "$CI_ROOT/scripts/healthcare/supervise_installed.py" "$scoped_archive_drain_file" "$@" &
+    wait "$!"
   else
     timeout --foreground 295s python -m pytest -q "$@"
   fi
+  exit 0
+}
+
+run_import_family_postgres() (
+  local archive_url=$1
+  family_coverage_directory=
+  family_test_pids=()
+  local pid status=0 result
+  cleanup_import_families() {
+    local status=$?
+    trap - EXIT
+    trap '' INT TERM
+    local pid
+    for pid in $(jobs -pr); do kill -TERM "$pid" || true; done
+    wait || true
+    if [[ -n "$family_coverage_directory" ]] && ! rm -rf -- "$family_coverage_directory"; then
+      [ "$status" -ne 0 ] || status=1
+    fi
+    exit "$status"
+  }
+  trap cleanup_import_families EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  family_coverage_directory=$(mktemp -d "${RUNNER_TEMP:-/tmp}/healthcare-family-coverage.XXXXXX")
+  local test_path
+  for test_path in tests/test_custom_import_identical_children_postgres.py \
+                   tests/test_custom_import_grouped_child_read_postgres.py; do
+    COVERAGE_FILE="$family_coverage_directory/${test_path##*/}" run_scoped_archive_postgres_body \
+      "hc_custom_import_test_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')" \
+      HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN "$archive_url" "$test_path" &
+    family_test_pids+=("$!")
+  done
+  for pid in "${family_test_pids[@]}"; do
+    if wait "$pid"; then result=0; else result=$?; fi
+    [ "$status" -ne 0 ] || status=$result
+  done
+  [ "$status" -eq 0 ] || exit "$status"
+  timeout --foreground 295s python -m coverage combine --append \
+    "$family_coverage_directory/test_custom_import_identical_children_postgres.py" \
+    "$family_coverage_directory/test_custom_import_grouped_child_read_postgres.py"
 )
 
 validate_registry_native_report() {
@@ -1514,11 +1573,7 @@ run_core_postgres() {
   fi
 
   local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
-  run_scoped_archive_postgres \
-    "hc_custom_import_test_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')" \
-    HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN "$archive_url" \
-    tests/test_custom_import_identical_children_postgres.py \
-    tests/test_custom_import_grouped_child_read_postgres.py
+  run_import_family_postgres "$archive_url"
 
   local custom_import_postgres_tests=()
   local custom_import_test_path
