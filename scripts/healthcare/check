@@ -1095,6 +1095,7 @@ run_network_registry_postgres() (
     tests/test_registry_identity_materialization_postgres.py
     tests/test_registry_source_admission_postgres.py
     tests/test_registry_approval_store_postgres.py
+    tests/test_registry_approved_company_read_postgres.py
     tests/test_registry_approval_preview_postgres.py
     tests/test_network_membership_writer_closure_postgres.py
     tests/test_network_serving_read_postgres.py
