@@ -1,8 +1,10 @@
 """Exercise hosted artifact placement and exact-image cleanup without services."""
 
+import base64
 import hashlib
 import json
 import os
+import py_compile
 import re
 import shlex
 import subprocess
@@ -64,6 +66,32 @@ REGISTRY_PTG_SCOPE_CAPABILITY = (
     "support/ptg2_scanner/src/registry_ptg_graph_python.rs",
     "tests/test_result_archive_published_authority_postgres.py",
     "tests/ptg_frozen_test_support.py", "tests/ptg2_tax_identity_source_projection_fixture.py",
+)
+
+REGISTRY_PTG_OFFICE_TEST = "tests/test_registry_ptg_office_capture_postgres.py"
+REGISTRY_PTG_OFFICE_WITNESS_TEST = "tests/test_registry_ptg_office_witness_postgres.py"
+REGISTRY_PTG_OFFICE_SOURCES = (
+    "process/registry_ptg_office_capture.py",
+    "process/registry_ptg_office_witness.py",
+    "tests/test_registry_ptg_office_capture.py",
+    "tests/test_registry_ptg_office_witness.py",
+    REGISTRY_PTG_OFFICE_TEST,
+    "support/ptg2_scanner/src/registry_ptg_capture_input.rs",
+    "support/ptg2_scanner/tests/registry_ptg_capture_input.rs",
+)
+REGISTRY_PTG_OFFICE_CAPABILITY = (
+    *REGISTRY_PTG_OFFICE_SOURCES,
+    "support/ptg2_scanner/src/network_membership_codec.rs",
+    "support/ptg2_scanner/src/npi_identifier.rs",
+    "tests/test_network_custom_address_source_postgres.py",
+    "tests/test_network_serving_schema_postgres.py",
+    "tests/test_registry_approval_store_postgres.py",
+    "tests/test_registry_candidate_composition_postgres.py",
+    "tests/test_registry_retained_site_adoption_postgres.py",
+)
+REGISTRY_PTG_GRAPH_EXPORTS = (
+    "plan_registry_ptg_graph_locator_pages", "plan_registry_ptg_graph_member_pages",
+    "verify_registry_ptg_graph_batch",
 )
 
 
@@ -161,7 +189,7 @@ class HealthcarePublicChecks(unittest.TestCase):
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         setup = next(step for step in workflow["jobs"]["address-canonical-db-tests"]["steps"]
                      if step["name"] == "Prepare source and toolchain")
-        self.assertEqual(setup["with"], {"rust": "${{ matrix.shard == 'core-services' || matrix.shard == 'directory-source' || startsWith(matrix.shard, 'registry-') }}"})
+        self.assertEqual(setup["with"], {"rust": "${{ matrix.shard == 'core-services' || matrix.shard == 'core-ptg' || matrix.shard == 'directory-source' || startsWith(matrix.shard, 'registry-') }}"})
         cases = [(lane, "", "") for lane in (
             "core-services", "core", "core-imports", "core-ptg", "directory-source", "directory-storage",
             "directory-address", "profile-storage", "profile-publication",
@@ -395,7 +423,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
         self.assertCountEqual(successful_shard_members, paths)
 
     def test_registry_report_matches_class_and_parameter_ids_exactly(self):
-        validator = CHECK_FUNCTIONS.split('  python - "$registry_report" "$registry_nodeids" "${registry_tests[@]}" <<\'PY\'\n', 1)[1].split("\nPY\n", 1)[0]
+        validator = CHECK_FUNCTIONS.split('validate_registry_native_report() {\n  python - "$@" <<\'PY\'\n', 1)[1].split("\nPY\n", 1)[0]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             selected, report = root / "nodeids", root / "report.xml"
@@ -421,12 +449,16 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
             "tests/test_registry_ptg_scope_engine.py",
             "tests/test_registry_ptg_scope_runtime.py",
             "tests/test_registry_company_approval_fence.py",
+            "tests/test_registry_ptg_office_capture.py",
+            "tests/test_registry_ptg_office_witness.py",
         )
         native_paths = (
             *REGISTRY_SOURCE_CUSTODY_TESTS, *REGISTRY_REQUIRED_TARGET_TESTS, REGISTRY_ADDRESS_EQUIVALENCE_TEST,
             "tests/test_registry_ptg_cohort_authority_postgres.py",
             "tests/test_registry_ptg_graph_reader_postgres.py",
             "tests/test_registry_ptg_scope_engine_postgres.py",
+            REGISTRY_PTG_OFFICE_TEST,
+            REGISTRY_PTG_OFFICE_WITNESS_TEST,
         )
         for present in (False, True):
             with self.subTest(present=present), tempfile.TemporaryDirectory() as temporary:
@@ -1217,6 +1249,69 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-ptg
             for name in names[4:]:
                 self.assertIn(name, calls[1][3])
 
+    def test_registry_native_wheel_probe_refuses_source_shims_and_unverified_records(self):
+        probe = CHECK_FUNCTIONS.split("verify_registry_native_wheel() {\n  python -I - \"$1\" \"$2\" <<'PY'\n", 1)[1].split("\nPY\n}", 1)[0]
+        for stage in ("source-shadow", "python-shim", "missing-record", "changed-record", "pure-wheel"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as temporary:
+                source = Path(temporary)
+                module = source / "ptg2_address_canon.py"
+                module.write_text("\n".join(f"{name} = len" for name in (*REGISTRY_PTG_GRAPH_EXPORTS, "encode_registry_ptg_capture_batch")))
+                info = source / "ptg2_address_canon-0.1.0.dist-info"
+                info.mkdir()
+                (info / "METADATA").write_text("Metadata-Version: 2.4\nName: ptg2_address_canon\nVersion: 0.1.0\n")
+                (info / "WHEEL").write_text("Wheel-Version: 1.0\nRoot-Is-Purelib: " + ("true" if stage == "pure-wheel" else "false") + "\n")
+                digest = base64.urlsafe_b64encode(hashlib.sha256(module.read_bytes()).digest()).decode().rstrip("=")
+                (info / "RECORD").write_text("" if stage == "missing-record" else
+                                            f"ptg2_address_canon.py,sha256={'wrong' if stage == 'changed-record' else digest},{module.stat().st_size}\n")
+                environment = {**os.environ, "PYTHONPATH": str(source), "PYTHONDONTWRITEBYTECODE": "1"}
+                checkout = source if stage == "source-shadow" else source / "checkout"
+                checkout.mkdir(exist_ok=True)
+                for office in ("0", "1"):
+                    prefix = "" if stage == "source-shadow" else "import sys; sys.path.insert(0, sys.argv[3])\n"
+                    result = subprocess.run([sys.executable, "-I", "-S", "-", str(checkout), office, str(source)],
+                                            input=prefix + probe, cwd=source, env=environment,
+                                            capture_output=True, text=True, timeout=30)
+                    self.assertNotEqual(result.returncode, 0, result.stderr)
+                    expected = {"source-shadow": "Source checkout shadows native registry wheel", "python-shim": "no loaded compiled module",
+                                "missing-record": "outside its installed wheel", "changed-record": "wheel content changed",
+                                "pure-wheel": "wheel metadata is missing"}[stage]
+                    self.assertIn(expected, result.stderr)
+
+    def test_registry_native_probe_refuses_conventional_pytest_source_shadows_without_importing(self):
+        probe = CHECK_FUNCTIONS.split("verify_registry_native_wheel() {\n  python -I - \"$1\" \"$2\" <<'PY'\n", 1)[1].split("\nPY\n}", 1)[0]
+        shadow_check = probe.split("\nimport ptg2_address_canon as native", 1)[0]
+        for kind in ("module", "package", "bytecode", "extension", "symlink", "test-module", "test-package", "absent"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                source = Path(temporary) / "source"
+                source.mkdir()
+                directory = source / "tests" if kind.startswith("test-") else source
+                directory.mkdir(exist_ok=True)
+                body = "raise AssertionError('source shadow must not execute')\n"
+                if kind in ("module", "test-module"):
+                    (directory / "ptg2_address_canon.py").write_text(body)
+                elif kind in ("package", "test-package"):
+                    package = directory / "ptg2_address_canon"
+                    package.mkdir()
+                    (package / "__init__.py").write_text(body)
+                elif kind == "bytecode":
+                    original = Path(temporary) / "original.py"
+                    original.write_text(body)
+                    py_compile.compile(str(original), cfile=str(directory / "ptg2_address_canon.pyc"), doraise=True)
+                elif kind == "extension":
+                    from importlib.machinery import EXTENSION_SUFFIXES
+                    (directory / ("ptg2_address_canon" + EXTENSION_SUFFIXES[0])).touch()
+                elif kind == "symlink":
+                    original = Path(temporary) / "original.py"
+                    original.write_text(body)
+                    (directory / "ptg2_address_canon.py").symlink_to(original)
+                for office in ("0", "1"):
+                    result = subprocess.run([sys.executable, "-I", "-S", "-", str(source), office], input=shadow_check,
+                                            cwd=source, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(result.returncode == 0, kind == "absent", result.stderr)
+                    if kind != "absent":
+                        self.assertIn("Source checkout shadows native registry wheel", result.stderr)
+                        self.assertNotIn("source shadow must not execute", result.stderr)
+
     def test_registry_scope_native_route_is_source_bound_and_bootstrap_failures_stop_imports(self):
         cases = [(None, "", "core-ptg", 0), (None, "", "core-services", 0)]
         cases += [(path, "", "core-ptg", 1) for path in REGISTRY_PTG_SCOPE_CAPABILITY]
@@ -1224,23 +1319,55 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-ptg
             ("identity", 1), ("dirty", 17), ("staged", 17), ("untracked", 17),
             ("build", 17), ("install", 17), ("exports", 29), ("tests", 31), ("symlink", 1),
         )]
-        for missing, failure, lane, expected in cases:
-            with self.subTest(missing=missing, failure=failure, lane=lane), tempfile.TemporaryDirectory() as temporary:
+        cases += [(None, name + ":non-builtin", "core-ptg", 1) for name in REGISTRY_PTG_GRAPH_EXPORTS]
+        cases = [(missing, failure, lane, expected, False) for missing, failure, lane, expected in cases]
+        cases += [(None, "", "core-ptg", 0, True), (None, "", "core-services", 0, True)]
+        cases += [(None, stage, "core-ptg", status, True) for stage, status in (
+            ("witness", 0), ("missing-witness-report", 1), ("witness-symlink", 1), ("dangling-witness", 1),
+        )]
+        cases += [(path, "", "core-ptg", 1, True) for path in REGISTRY_PTG_OFFICE_CAPABILITY]
+        cases += [("only:" + path, "", "core-ptg", 1, True) for path in REGISTRY_PTG_OFFICE_SOURCES]
+        cases += [(None, stage, "core-ptg", 1, True) for stage in (
+            "empty-report", "invalid-report", "large-report", "no-tests", "bad-count", "summary-skipped",
+            "skipped", "error", "failure", "missing-office-report", "report-cleanup",
+            *REGISTRY_PTG_GRAPH_EXPORTS, "encode_registry_ptg_capture_batch",
+            *(name + ":non-builtin" for name in (*REGISTRY_PTG_GRAPH_EXPORTS, "encode_registry_ptg_capture_batch")),
+            "encode_registry_ptg_capture_batch:not-callable", "symlink", "dangling-office", "identity",
+        )]
+        cases += [(None, stage, "core-ptg", status, True) for stage, status in (
+            ("build", 17), ("install", 17), ("tests", 31), ("dirty", 17), ("staged", 17), ("untracked", 17),
+        )]
+        for missing, failure, lane, expected, office in cases:
+            with self.subTest(missing=missing, failure=failure, lane=lane, office=office), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 source, runner = root / "source", root / "runner"
                 runner.mkdir()
-                for relative in REGISTRY_PTG_SCOPE_CAPABILITY:
+                witness = failure in {"witness", "missing-witness-report", "witness-symlink", "dangling-witness"}
+                capability = (*REGISTRY_PTG_SCOPE_CAPABILITY, *(REGISTRY_PTG_OFFICE_CAPABILITY if office else ()),
+                              *((REGISTRY_PTG_OFFICE_WITNESS_TEST,) if witness else ()))
+                only = missing.removeprefix("only:") if missing and missing.startswith("only:") else None
+                for relative in capability:
                     path = source / relative
                     path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text("# synthetic source\n")
+                    if not only or relative == only:
+                        path.write_text("# synthetic source\n")
+                exports = (*REGISTRY_PTG_GRAPH_EXPORTS, "encode_registry_ptg_capture_batch") if office else REGISTRY_PTG_GRAPH_EXPORTS
+                (source / "ptg2_address_canon.py").write_text("\n".join(
+                    f"{name} = 0" if failure == name + ":not-callable" else
+                    f"def {name}(): pass" if failure == name + ":non-builtin" else
+                    f"{name} = len  # synthetic builtin placeholder"
+                    for name in exports if name != failure
+                ))
                 for relative in REQUIRED_IMPORT_NATIVE_TESTS:
                     (source / relative).touch()
-                if missing:
+                if missing and not only:
                     (source / missing).unlink()
-                if failure == "symlink":
-                    path = source / REGISTRY_PTG_SCOPE_TESTS[0]
+                if failure in {"symlink", "dangling-office", "witness-symlink", "dangling-witness"}:
+                    path = source / (REGISTRY_PTG_OFFICE_WITNESS_TEST if witness else
+                                     REGISTRY_PTG_OFFICE_SOURCES[0] if office else REGISTRY_PTG_SCOPE_TESTS[0])
                     path.unlink()
-                    path.symlink_to(source / REGISTRY_PTG_SCOPE_TESTS[1])
+                    path.symlink_to(source / ("missing-office.py" if failure in {"dangling-office", "dangling-witness"}
+                                              else REGISTRY_PTG_SCOPE_TESTS[1]))
                 calls = root / "calls"
                 calls.touch()
                 environment = {
@@ -1251,8 +1378,13 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-ptg
                     "WHEEL_INSTALLED": str(root / "installed"), "EXPORTS_CHECKED": str(root / "exports"),
                     "COVERAGE_FILE": ".coverage.postgres.core-ptg", "PYTEST_ADDOPTS": "--cov-append",
                     "HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST": "", "HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN": "",
+                    "NETWORK_REGISTRY_TEST_DSN": "",
                 }
                 script = CHECK_FUNCTIONS + r'''
+# Routing fixture isolates the native import/provenance boundary; these placeholders are synthetic.
+verify_registry_native_wheel() {
+  python -c 'import inspect; import sys; import ptg2_address_canon as native; names = ("plan_registry_ptg_graph_locator_pages", "plan_registry_ptg_graph_member_pages", "verify_registry_ptg_graph_batch") + (("encode_registry_ptg_capture_batch",) if sys.argv[1] == "1" else ()); assert all(inspect.isbuiltin(getattr(native, name, None)) for name in names), "Synthetic native boundary is incomplete"' "$2"
+}
 git() {
   case "$1" in
     rev-parse) [ "$FAIL_STAGE" != identity ] || { printf wrong; return; }; printf '%s\n' "$SOURCE_SHA" ;;
@@ -1271,9 +1403,10 @@ python() {
     test -f "$WHEEL_INSTALLED" || return 23
     printf 'exports\n' >> "$CALL_LOG"
     [ "$FAIL_STAGE" != exports ] || return 29
+    command python3 "$@" || return $?
     touch "$EXPORTS_CHECKED"
   else
-    return 99
+    command python3 "$@"
   fi
 }
 uv() {
@@ -1284,24 +1417,61 @@ uv() {
 timeout() {
   if [[ "$*" = *test_registry_ptg_graph_reader_postgres.py* ]]; then
     test -f "$WHEEL_INSTALLED" && test -f "$EXPORTS_CHECKED" || return 23
-    printf 'native\t%s\t%s\t%s\t%s\t%s\n' "$HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST" \
-      "$HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN" "$COVERAGE_FILE" "$PYTEST_ADDOPTS" "$*" >> "$CALL_LOG"
+    printf 'native\t%s\t%s\t%s\t%s\t%s\t%s\n' "$HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST" \
+      "$HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN" "$NETWORK_REGISTRY_TEST_DSN" \
+      "$COVERAGE_FILE" "$PYTEST_ADDOPTS" "$*" >> "$CALL_LOG"
     [ "$FAIL_STAGE" != tests ] || return 31
+    command python3 - "${!#}" "$@" <<'PY'
+import os
+import pathlib
+import sys
+import xml.etree.ElementTree as ET
+path = pathlib.Path(sys.argv[1])
+stage = os.environ["FAIL_STAGE"]
+if stage in ("empty-report", "invalid-report", "large-report"):
+    path.write_text({"empty-report": "", "invalid-report": "<invalid", "large-report": "x" * (16 * 1024 * 1024 + 1)}[stage])
+else:
+    modules = [arg for arg in sys.argv[2:] if arg.startswith("tests/") and arg.endswith(".py")]
+    if stage == "missing-office-report":
+        modules.remove("tests/test_registry_ptg_office_capture_postgres.py")
+    if stage == "missing-witness-report":
+        modules.remove("tests/test_registry_ptg_office_witness_postgres.py")
+    if stage == "no-tests":
+        modules = []
+    report = ET.Element("testsuites")
+    suite = ET.SubElement(report, "testsuite", tests=str(len(modules) + (stage == "bad-count")),
+                          skipped="1" if stage == "summary-skipped" else "0", errors="0", failures="0")
+    for index, module in enumerate(modules):
+        case = ET.SubElement(suite, "testcase", name="synthetic_native_test",
+                             classname=module.removesuffix(".py").replace("/", "."))
+        if index == 0 and stage in ("skipped", "error", "failure"):
+            ET.SubElement(case, stage)
+    ET.ElementTree(report).write(path, encoding="utf-8")
+PY
   fi
+}
+rm() {
+  if [[ "$FAIL_STAGE" = report-cleanup && "${!#}" = *"/healthcare-registry-scope."* ]]; then return 23; fi
+  command rm "$@"
 }
 run_scoped_archive_postgres() { :; }
 create_test_database() { :; }
 drop_test_database() { :; }
 psql() { return 99; }
+ci_phase_begin source-review-route
 run_core_postgres postgresql://postgres@127.0.0.1:5432/test "$ROUTE_LANE"
+ci_phase_end
 '''
                 result = subprocess.run(["bash", "-euc", script], cwd=source, env=environment,
                                         capture_output=True, text=True, timeout=15)
                 self.assertEqual(result.returncode, expected, result.stderr)
-                if missing or failure == "symlink":
+                endings = [line for line in result.stdout.splitlines() if line.startswith("CI_PHASE end name=source-review-route ")]
+                self.assertEqual(len(endings), 1, result.stdout)
+                self.assertTrue(endings[0].endswith(f"exit_code={expected}"), result.stdout)
+                if missing or failure in {"symlink", "dangling-office", "witness-symlink", "dangling-witness"}:
                     self.assertIn("Incomplete registry source review capability", result.stderr)
                 events = calls.read_text().splitlines()
-                if missing or failure in {"identity", "dirty", "staged", "untracked", "symlink"} or lane != "core-ptg":
+                if missing or failure in {"identity", "dirty", "staged", "untracked", "symlink", "dangling-office", "witness-symlink", "dangling-witness"} or lane != "core-ptg":
                     self.assertFalse(any(event.startswith(("build", "uv", "exports", "native")) for event in events))
                 else:
                     builds = [event for event in events if event.startswith("build\t")]
@@ -1309,13 +1479,27 @@ run_core_postgres postgresql://postgres@127.0.0.1:5432/test "$ROUTE_LANE"
                     self.assertIn("--locked --features python-extension", builds[0])
                     self.assertNotIn("--release", builds[0])
                     native = [event.split("\t") for event in events if event.startswith("native\t")]
-                    self.assertEqual(len(native), int(failure in {"", "tests"}))
+                    export_failures = {*REGISTRY_PTG_GRAPH_EXPORTS, "encode_registry_ptg_capture_batch",
+                                       *(name + ":non-builtin" for name in (*REGISTRY_PTG_GRAPH_EXPORTS, "encode_registry_ptg_capture_batch")),
+                                       "encode_registry_ptg_capture_batch:not-callable", "exports", "build", "install"}
+                    self.assertEqual(len(native), int(failure not in export_failures))
+                    tracked = [shlex.split(event.split("\t", 1)[1]) for event in events if event.startswith("tracked\t")]
+                    self.assertEqual(tracked, [["ls-files", "--error-unmatch", *capability]])
                     if native:
-                        self.assertEqual(native[0][1:5], ["1", "postgresql://postgres@127.0.0.1:5432/test",
-                                                          environment["COVERAGE_FILE"], "--cov-append"])
-                        self.assertEqual(shlex.split(native[0][5]), ["--foreground", "295s", "python", "-m", "pytest", "-q",
-                                                                    *REGISTRY_PTG_SCOPE_TESTS])
+                        dsn = "postgresql://postgres@127.0.0.1:5432/test"
+                        self.assertEqual(native[0][1:6], ["1", dsn, dsn, environment["COVERAGE_FILE"], "--cov-append"])
+                        arguments = shlex.split(native[0][6])
+                        selected = (*REGISTRY_PTG_SCOPE_TESTS, *((REGISTRY_PTG_OFFICE_TEST,) if office else ()),
+                                    *((REGISTRY_PTG_OFFICE_WITNESS_TEST,) if witness else ()))
+                        self.assertEqual(arguments[:-2], ["--foreground", "295s", "python", "-m", "pytest", "-q", *selected])
+                        self.assertEqual(arguments[-2], "--junitxml")
+                        self.assertEqual(Path(arguments[-1]).parent, runner)
                         self.assertLess(events.index("exports"), events.index("\t".join(native[0])))
+                leftovers = list(runner.iterdir())
+                if failure == "report-cleanup":
+                    self.assertEqual(len(leftovers), 1)
+                    self.assertTrue(leftovers[0].name.startswith("healthcare-registry-scope."))
+                    leftovers[0].unlink()
                 self.assertFalse(list(runner.iterdir()))
 
     def test_registry_scope_absent_capability_preserves_older_source(self):
