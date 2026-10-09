@@ -7,6 +7,7 @@ import os
 import py_compile
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -147,12 +148,147 @@ env() {
 }
 run_owned_provider_directory_postgres() { shift 2; timeout --foreground 295s python -m pytest -q "$@"; }
 run_scoped_archive_postgres() { :; }
+run_scoped_archive_postgres_body() { run_scoped_archive_postgres "$@"; }
 prepare_debug_rust_binaries() { :; }
 wait_for_service() { :; }
 prepare_postgres() { :; }
 require_base_sha() { :; }
 run_postgres "$ROUTE_LANE"
 '''
+
+
+def _import_family_environment(root):
+    return {
+        **os.environ,
+        "SOURCE_ROOT": str(root), "CI_ROOT": str(ROOT), "RUNNER_TEMP": str(root),
+        "CALL_LOG": str(root / "calls"), "COVERAGE_FILE": str(root / "earlier-coverage"),
+        "BASE_COVERAGE": str(root / "earlier-coverage"), "PAIR_ROOT": str(root),
+        "PYTHON_BIN": sys.executable, "HLTHPRT_DB_USER": "synthetic",
+        "HLTHPRT_DB_PASSWORD": "synthetic",
+    }
+
+
+def _import_family_pair_script():
+    return CHECK_FUNCTIONS + r'''
+run_scoped_archive_postgres_body() {
+  local test_path=$4
+  trap 'printf "finished\t%s\n" "$test_path" >> "$CALL_LOG"' EXIT
+  printf 'started\t%s\t%s\t%s\n' "$test_path" "$1" "$COVERAGE_FILE" >> "$CALL_LOG"
+  touch "$PAIR_ROOT/${test_path##*/}.started"
+  while [ ! -f "$PAIR_ROOT/test_custom_import_identical_children_postgres.py.started" ] ||
+        [ ! -f "$PAIR_ROOT/test_custom_import_grouped_child_read_postgres.py.started" ]; do sleep 0.01; done
+  printf '%s\n' "$test_path" > "$COVERAGE_FILE"
+  [ "$test_path" != "$FAILURE_PATH" ] || exit 17
+  sleep 0.05
+  exit 0
+}
+timeout() {
+  test "$1:$2" = '--foreground:295s'
+  shift 2
+  "$@"
+}
+python() {
+  test "$#" = 6
+  test "${*:1:4}" = '-m coverage combine --append'
+  test "$COVERAGE_FILE" = "$BASE_COVERAGE"
+  test "$(< "$COVERAGE_FILE")" = earlier
+  test "$(grep -c '^finished' "$CALL_LOG")" = 2
+  test -f "$5" && test -f "$6"
+  printf 'combine\t%s\t%s\t%s\n' "$COVERAGE_FILE" "$5" "$6" >> "$CALL_LOG"
+  [ "$COMBINE_STATUS" = 0 ] || return "$COMBINE_STATUS"
+  cat "$5" "$6" >> "$COVERAGE_FILE"
+  rm -- "$5" "$6"
+}
+run_import_family_postgres postgresql://synthetic
+'''
+
+
+def _import_family_process_files(root):
+    (root / "worker.py").write_text('''
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+name = Path(sys.argv[1]).name
+root = Path(os.environ["PAIR_ROOT"])
+def finish(_signum, _frame):
+    time.sleep(0.1)
+    assert Path(os.environ["COVERAGE_FILE"]).parent.is_dir()
+    (root / (name + ".finished")).touch()
+    sys.exit(0)
+signal.signal(signal.SIGTERM, finish)
+(root / (name + ".started")).write_text(str(os.getpid()))
+while True:
+    time.sleep(0.01)
+''')
+    (root / "runner.py").write_text('''
+import importlib.util
+import os
+from pathlib import Path
+import sys
+spec = importlib.util.spec_from_file_location("supervisor", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.RUN_SECONDS, module.TERM_SECONDS, module.DRAIN_SECONDS = 3, 0.2, 1
+sys.exit(module.supervise([sys.executable, str(Path(os.environ["PAIR_ROOT"]) / "worker.py"), sys.argv[3]], sys.argv[2]))
+''')
+
+
+def _import_family_cancellation_script(functions):
+    return functions + r'''
+create_test_database() { printf 'create\t%s\n' "$1" >> "$CALL_LOG"; }
+drop_test_database() {
+  local test_path=$(< "$PAIR_ROOT/$1.owner")
+  test -f "$PAIR_ROOT/${test_path##*/}.finished"
+  printf 'drop\t%s\n' "$1" >> "$CALL_LOG"
+}
+psql() { :; }
+python() {
+  test "$1" = "$CI_ROOT/scripts/healthcare/supervise_installed.py"
+  printf '%s\n' "$3" > "$PAIR_ROOT/$HLTHPRT_DB_DATABASE.owner"
+  exec "$PYTHON_BIN" "$PAIR_ROOT/runner.py" "$@"
+}
+timeout() { printf 'unexpected combine\n' >> "$CALL_LOG"; return 99; }
+run_import_family_postgres postgresql://synthetic
+'''
+
+
+def _import_family_signal_hook(functions, location, signum):
+    hook = r'''
+    while [ ! -f "$PAIR_ROOT/${test_path##*/}.started" ]; do sleep 0.01; done
+    "$PYTHON_BIN" -c 'import os, signal; print("receiver", os.getppid(), flush=True); os.kill(os.getppid(), signal.SIGNAL_NAME)'
+'''.replace("SIGNAL_NAME", signum)
+    if location == "pair":
+        anchor = '    family_test_pids+=("$!")\n'
+        hook = hook.replace(
+            'while [ ! -f "$PAIR_ROOT/${test_path##*/}.started" ];',
+            'while [ ! -f "$PAIR_ROOT/test_custom_import_identical_children_postgres.py.started" ] || '
+            '[ ! -f "$PAIR_ROOT/test_custom_import_grouped_child_read_postgres.py.started" ];',
+        )
+        hook = '    if [[ "$test_path" = *grouped_child_read_postgres.py ]]; then\n' + hook + '    fi\n'
+    else:
+        anchor = '    wait "$!"\n'
+        hook = hook.replace('${test_path##*/}', '${1##*/}')
+    assert functions.count(anchor) == 1
+    dispatch = '    family_test_pids+=("$!")\n'
+    observation = r'''    printf 'dispatch\t%s\t%s\t%s\n' "$test_path" "$!" "$(/bin/ps -p "$!" -o ppid=)" >> "$CALL_LOG"
+'''
+    assert functions.count(dispatch) == 1
+    functions = functions.replace(dispatch, observation + dispatch)
+    return functions.replace(anchor, hook + anchor)
+
+
+def _stop_import_family_workers(root):
+    for receipt in root.glob("*.started"):
+        pid = int(receipt.read_text())
+        process = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "args="],
+                                 capture_output=True, text=True, check=False)
+        if str(root / "worker.py") in process.stdout:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 class HealthcarePublicChecks(unittest.TestCase):
@@ -1295,24 +1431,42 @@ psql() { :; }
 timeout() { echo 'installed tests must not use foreground timeout' >&2; return 99; }
 python() {
   test "$1" = "$CI_ROOT/scripts/healthcare/supervise_installed.py"
-  test "$3" = tests/test_custom_import_installed_operator_postgres.py
-  test "${*:4}" = '-n 2 --dist worksteal --durations=9 -vv'
+  test "$3" = "$TEST_PATH"
+  if [[ "$TEST_PATH" = *installed_operator_postgres.py ]]; then
+    test "${*:4}" = '-n 2 --dist worksteal --durations=9 -vv'
+  else
+    test "$#" = 3
+  fi
   printf 'supervised\n' >> "$CALL_LOG"
   if [ "$DRAINED" = 1 ]; then printf 'drained\n' > "$2"; fi
   return "$TEST_STATUS"
 }
-run_scoped_archive_postgres hc_custom_import_test_0123456789abcdef0123456789abcdef \
-  HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN postgresql://postgres@127.0.0.1:5440 \
-  tests/test_custom_import_installed_operator_postgres.py -n 2 --dist worksteal --durations=9 -vv
+set -- "$TEST_PATH"
+if [[ "$TEST_PATH" = *installed_operator_postgres.py ]]; then
+  set -- "$@" -n 2 --dist worksteal --durations=9 -vv
+fi
+if [ "$BACKGROUND" = 1 ]; then
+  run_scoped_archive_postgres_body hc_custom_import_test_0123456789abcdef0123456789abcdef \
+    HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN postgresql://postgres@127.0.0.1:5440 "$@" &
+  wait "$!"
+else
+  run_scoped_archive_postgres hc_custom_import_test_0123456789abcdef0123456789abcdef \
+    HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN postgresql://postgres@127.0.0.1:5440 "$@"
+fi
 '''
-            for status, drained in ((0, 1), (17, 1), (124, 1), (0, 0), (17, 0), (124, 0)):
-                with self.subTest(status=status, drained=drained):
+            paths = ("tests/test_custom_import_installed_operator_postgres.py", *REQUIRED_IMPORT_NATIVE_TESTS[1:])
+            cases = [(path, status, drained, 0) for path in paths
+                     for status, drained in ((0, 1), (17, 1), (124, 1), (0, 0), (17, 0), (124, 0))]
+            cases += [(path, status, 1, 1) for path in paths[1:] for status in (0, 17)]
+            for path, status, drained, background in cases:
+                with self.subTest(path=path, status=status, drained=drained, background=background):
                     result = subprocess.run(
                         ["bash", "-euc", script], capture_output=True, text=True,
                         env={**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT),
                              "RUNNER_TEMP": temporary, "CALL_LOG": str(log),
                              "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "postgres",
-                             "TEST_STATUS": str(status), "DRAINED": str(drained)},
+                             "TEST_STATUS": str(status), "DRAINED": str(drained), "TEST_PATH": path,
+                             "BACKGROUND": str(background)},
                     )
                     self.assertEqual(result.returncode, status or (0 if drained else 1), result.stderr)
                     calls = log.read_text().splitlines()
@@ -1389,6 +1543,7 @@ run_provider_directory_postgres postgresql://postgres:postgres@127.0.0.1:5432/te
             log = Path(temporary) / "routes"
             script = CHECK_FUNCTIONS + r'''
 run_scoped_archive_postgres() { :; }
+run_scoped_archive_postgres_body() { run_scoped_archive_postgres "$@"; }
 timeout() {
   if [[ "$*" = *test_result_archive_* ]]; then
     printf '%s\t%s\t%s\t%s\n' "$HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST" \
@@ -1623,6 +1778,7 @@ rm() {
   command rm "$@"
 }
 run_scoped_archive_postgres() { :; }
+run_scoped_archive_postgres_body() { run_scoped_archive_postgres "$@"; }
 create_test_database() { :; }
 drop_test_database() { :; }
 psql() { return 99; }
@@ -2965,6 +3121,7 @@ prepare_debug_rust_binaries() { :; }
 create_test_database() { :; }
 drop_test_database() { :; }
 run_scoped_archive_postgres() { :; }
+run_scoped_archive_postgres_body() { run_scoped_archive_postgres "$@"; }
 python() {
   printf '%s\t%s\t%s\n' "${HLTHPRT_NPI_RESULT_ARCHIVE_TEST_DSN:-}" \
     "${HLTHPRT_PUBLIC_EVIDENCE_STORAGE_POSTGRES_DSN:-}" "$*" >> "$CALL_LOG"
@@ -3075,6 +3232,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                  for lane in ("core-imports", "core-services", "core-ptg") for paths in present_path_sets]
         cases += [(lane, test_paths, group[0], "")
                   for lane, groups in groups_by_lane.items() for group in groups]
+        cases += [(lane, test_paths, family_test_paths[1], "") for lane in ("core-ptg", "all")]
         cases += [(lane, tuple(path for path in required if path != missing), "", missing)
                   for lane, required in required_by_lane.items() for missing in required]
         cases += [(lane, test_paths, "", "") for lane in ("core-services", "all")]
@@ -3098,6 +3256,8 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                     "HLTHPRT_DB_USER": "postgres",
                     "HLTHPRT_DB_PASSWORD": "postgres",
                     "HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN": "",
+                    "RUNNER_TEMP": str(root),
+                    "COVERAGE_FILE": str(root / "coverage"),
                     "CALL_LOG": str(call_log),
                     "FAILURE_PATH": failure_path,
                     "ROUTE_LANE": lane,
@@ -3113,6 +3273,7 @@ run_scoped_archive_postgres() {
     if [ "$test_path" = "$FAILURE_PATH" ]; then return 17; fi
   done
 }
+run_scoped_archive_postgres_body() { run_scoped_archive_postgres "$@"; }
 python() {
   printf '%s\t%s\n' "${HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN:-}" "$*" >> "$CALL_LOG"
 }
@@ -3151,23 +3312,173 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                     failed_group = next(i for i, group in enumerate(expected_groups) if failure_path in group)
                     expected_groups = expected_groups[:failed_group + 1]
                 self.assertEqual(executions, [])
-                self.assertEqual(len(routes), len(expected_groups))
+                expected_route_count = sum(2 if group == list(family_test_paths) else 1 for group in expected_groups)
+                self.assertEqual(len(routes), expected_route_count)
                 databases = [route.split()[0] for route in routes]
                 self.assertEqual(len(databases), len(set(databases)))
-                for route, expected_paths in zip(routes, expected_groups):
+                for route in routes:
                     self.assertRegex(
                         route,
                         rf"^hc_custom_import_test_[0-9a-f]{{32}} "
                         rf"HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN {re.escape(archive_url)}(?: |$)",
                     )
+                route_index = 0
+                for expected_paths in expected_groups:
+                    if expected_paths == list(family_test_paths):
+                        self.assertCountEqual(
+                            [route.split()[3:] for route in routes[route_index:route_index + 2]],
+                            [[path] for path in family_test_paths],
+                        )
+                        route_index += 2
+                        continue
                     expected_arguments = list(expected_paths)
                     if expected_paths == [installed_test_path]:
                         expected_arguments += ["-n", "2", "--dist", "worksteal", "--durations=9", "-vv"]
-                    self.assertEqual(route.split()[3:], expected_arguments)
+                    self.assertEqual(routes[route_index].split()[3:], expected_arguments)
+                    route_index += 1
+                combines = [call.split("\t", 1)[1].split() for call in calls if "\t-m coverage combine" in call]
+                combines_expected = list(family_test_paths) in expected_groups and failure_path not in family_test_paths
+                self.assertEqual(len(combines), int(combines_expected))
+                if combines:
+                    self.assertEqual(combines[0][:4], ["-m", "coverage", "combine", "--append"])
+                    self.assertEqual([Path(path).name for path in combines[0][4:]],
+                                     [Path(path).name for path in family_test_paths])
+                    self.assertEqual(len({Path(path).parent for path in combines[0][4:]}), 1)
+                    self.assertFalse(Path(combines[0][4]).parent.exists())
                 tails = [path for call in calls if "--ignore" not in call
                          for path in historical_tail_paths if path in call.split()]
                 expected_tails = list(historical_tail_paths) if lane in ("core-imports", "all") and not failure_path else []
                 self.assertEqual(tails, expected_tails)
+
+    def test_import_family_pair_isolates_inputs_and_joins_before_combining(self):
+        paths = REQUIRED_IMPORT_NATIVE_TESTS[1:]
+        for failure, combine_status, expected in (("", 0, 0), (paths[0], 0, 17),
+                                                   (paths[1], 0, 17), ("", 23, 23)):
+            with self.subTest(failure=failure, combine_status=combine_status), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                base = root / "earlier-coverage"
+                base.write_text("earlier\n")
+                result = subprocess.run(
+                    ["bash", "-euc", _import_family_pair_script()], capture_output=True, text=True, timeout=10,
+                    env={**_import_family_environment(root), "FAILURE_PATH": failure, "COMBINE_STATUS": str(combine_status)},
+                    check=False,
+                )
+                self.assertEqual(result.returncode, expected, result.stderr)
+                calls = (root / "calls").read_text().splitlines()
+                started = [call.split("\t")[1:] for call in calls if call.startswith("started\t")]
+                self.assertCountEqual([call[0] for call in started], paths)
+                self.assertEqual(len({call[1] for call in started}), 2)
+                self.assertEqual(len({call[2] for call in started}), 2)
+                self.assertNotIn(str(base), [call[2] for call in started])
+                self.assertCountEqual([call.split("\t")[1] for call in calls if call.startswith("finished\t")], paths)
+                combines = [call.split("\t")[1:] for call in calls if call.startswith("combine\t")]
+                self.assertEqual(len(combines), int(not failure))
+                expected_base = ["earlier", *paths] if expected == 0 else ["earlier"]
+                self.assertEqual(base.read_text().splitlines(), expected_base)
+                self.assertFalse(list(root.glob("healthcare-family-coverage.*")))
+                self.assertTrue(all(not Path(call[2]).exists() for call in started))
+
+    def test_import_family_cancellation_drains_dispatch_before_bookkeeping(self):
+        for location, signum, expected in (("pair", "SIGTERM", 143), ("pair", "SIGINT", 130),
+                                           ("scope", "SIGTERM", 143)):
+            with self.subTest(location=location, signum=signum):
+                temporary = tempfile.TemporaryDirectory()
+                self.addCleanup(temporary.cleanup)
+                root = Path(temporary.name)
+                self.addCleanup(_stop_import_family_workers, root)
+                _import_family_process_files(root)
+                (root / "earlier-coverage").write_text("earlier\n")
+                functions = _import_family_signal_hook(CHECK_FUNCTIONS, location, signum)
+                with (root / "stdout").open("w") as stdout, (root / "stderr").open("w") as stderr:
+                    result = subprocess.run(
+                        ["bash", "-euc", _import_family_cancellation_script(functions)],
+                        stdout=stdout, stderr=stderr, timeout=10, env=_import_family_environment(root),
+                        check=False,
+                    )
+                self.assertEqual(result.returncode, expected, (root / "stderr").read_text())
+                calls = (root / "calls").read_text().splitlines()
+                dispatched = [call.split("\t")[2:] for call in calls if call.startswith("dispatch\t")]
+                receivers = [int(line.split()[1]) for line in (root / "stdout").read_text().splitlines()]
+                self.assertEqual(len(dispatched), 2)
+                if location == "pair":
+                    self.assertEqual(len({int(parent) for _, parent in dispatched}), 1)
+                    self.assertEqual(receivers, [int(dispatched[0][1])])
+                else:
+                    self.assertCountEqual(receivers, [int(pid) for pid, _ in dispatched])
+                created = [call.split("\t")[1] for call in calls if call.startswith("create\t")]
+                dropped = [call.split("\t")[1] for call in calls if call.startswith("drop\t")]
+                self.assertEqual(len(set(created)), 2)
+                self.assertCountEqual(created, dropped, (root / "stderr").read_text())
+                self.assertNotIn("unexpected combine", calls)
+                for path in REQUIRED_IMPORT_NATIVE_TESTS[1:]:
+                    name = Path(path).name
+                    self.assertTrue((root / (name + ".finished")).exists())
+                    pid = int((root / (name + ".started")).read_text())
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(pid, 0)
+                self.assertEqual((root / "earlier-coverage").read_text(), "earlier\n")
+                self.assertFalse(list(root.glob("healthcare-family-coverage.*")))
+                self.assertFalse(list(root.glob("healthcare-installed-drain.*")))
+
+    def test_supervised_archive_cleanup_ignores_signals_after_process_drain(self):
+        script = CHECK_FUNCTIONS + r'''
+create_test_database() { printf 'create\n' >> "$CALL_LOG"; }
+drop_test_database() {
+  printf 'drop started\n' >> "$CALL_LOG"
+  "$PYTHON_BIN" -c 'import os, signal; os.kill(os.getppid(), getattr(signal, os.environ["DROP_SIGNAL"]))'
+  printf 'drop finished\n' >> "$CALL_LOG"
+}
+psql() { :; }
+python() {
+  test "$1" = "$CI_ROOT/scripts/healthcare/supervise_installed.py"
+  printf 'drained\n' > "$2"
+  printf 'supervised\n' >> "$CALL_LOG"
+  return "$TEST_STATUS"
+}
+run_scoped_archive_postgres hc_custom_import_test_0123456789abcdef0123456789abcdef \
+  HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN postgresql://synthetic \
+  tests/test_custom_import_identical_children_postgres.py
+'''
+        for signum in ("SIGTERM", "SIGINT"):
+            for status in (0, 17):
+                with self.subTest(signum=signum, status=status), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    result = subprocess.run(
+                        ["bash", "-euc", script], capture_output=True, text=True, timeout=5,
+                        env={**_import_family_environment(root), "DROP_SIGNAL": signum, "TEST_STATUS": str(status)},
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, status, result.stderr)
+                    self.assertEqual((root / "calls").read_text().splitlines(),
+                                     ["create", "supervised", "drop started", "drop finished"])
+                    self.assertFalse(list(root.glob("healthcare-installed-drain.*")))
+
+    def test_import_family_cancellation_during_database_setup_cleans_exact_database(self):
+        script = CHECK_FUNCTIONS + r'''
+create_test_database() {
+  printf 'create\t%s\n' "$1" >> "$CALL_LOG"
+  "$PYTHON_BIN" -c 'import os, signal; os.kill(os.getppid(), signal.SIGTERM)'
+}
+drop_test_database() { printf 'drop\t%s\n' "$1" >> "$CALL_LOG"; }
+psql() { printf 'unexpected extension setup\n' >> "$CALL_LOG"; return 99; }
+python() { printf 'unexpected supervisor\n' >> "$CALL_LOG"; return 99; }
+timeout() { printf 'unexpected combine\n' >> "$CALL_LOG"; return 99; }
+run_import_family_postgres postgresql://synthetic
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result = subprocess.run(
+                ["bash", "-euc", script], capture_output=True, text=True, timeout=5,
+                env=_import_family_environment(root), check=False,
+            )
+            self.assertEqual(result.returncode, 143, result.stderr)
+            calls = [call.split("\t") for call in (root / "calls").read_text().splitlines()]
+            created = [call[1] for call in calls if call[0] == "create"]
+            self.assertEqual(len(set(created)), 2)
+            self.assertCountEqual([call[1] for call in calls if call[0] == "drop"], created)
+            self.assertEqual(len(calls), 4)
+            self.assertFalse(list(root.glob("healthcare-family-coverage.*")))
+            self.assertFalse(list(root.glob("healthcare-installed-drain.*")))
 
     def test_optional_import_database_routes_cleanup_after_success_and_failure(self):
         routes = (
@@ -3202,6 +3513,7 @@ prepare_debug_rust_binaries() { :; }
 create_test_database() { printf 'create\t%s\n' "$1" >> "$CALL_LOG"; }
 drop_test_database() { printf 'drop\t%s\n' "$1" >> "$CALL_LOG"; }
 run_scoped_archive_postgres() { :; }
+run_scoped_archive_postgres_body() { run_scoped_archive_postgres "$@"; }
 python() {
   printf '%s\t%s\n' "${!ROUTE_VARIABLE:-}" "$*" >> "$CALL_LOG"
   if [[ "$*" = "-m pytest -q $ROUTE_TEST" && "$ROUTE_FAILURE" = 1 ]]; then
@@ -3290,6 +3602,7 @@ prepare_debug_rust_binaries() { :; }
 create_test_database() { printf 'create\t%s\n' "$1" >> "$CALL_LOG"; }
 drop_test_database() { printf 'drop\t%s\n' "$1" >> "$CALL_LOG"; }
 run_scoped_archive_postgres() { :; }
+run_scoped_archive_postgres_body() { run_scoped_archive_postgres "$@"; }
 python() {
   printf '%s\t%s\t%s\t%s\n' \
     "${HLTHPRT_REFERENCE_FAMILY_ARCHIVE_TEST_DSN:-}" \
