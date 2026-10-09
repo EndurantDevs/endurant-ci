@@ -251,7 +251,9 @@ run_python_main() {
     tests/test_source_profile_pin_migration_postgres.py \
     tests/test_registry_ptg_cohort_authority_postgres.py \
     tests/test_registry_ptg_graph_reader_postgres.py \
-    tests/test_registry_ptg_scope_engine_postgres.py; do
+    tests/test_registry_ptg_scope_engine_postgres.py \
+    tests/test_registry_ptg_office_capture_postgres.py \
+    tests/test_registry_ptg_office_witness_postgres.py; do
     if [ -f "$repository_root/$test_path" ]; then
       collection_args+=(--ignore "$test_path")
     fi
@@ -454,6 +456,52 @@ install_address_canon_wheel() (
   uv --no-config pip check --python "$(command -v python)"
   ci_phase_end
 )
+
+verify_registry_native_wheel() {
+  python -I - "$1" "$2" <<'PY'
+import base64
+import hashlib
+import inspect
+import sys
+from importlib import machinery, metadata
+from pathlib import Path
+
+source_root = Path(sys.argv[1]).resolve()
+for directory in (source_root, source_root / "tests"):
+    assert machinery.PathFinder.find_spec("ptg2_address_canon", [str(directory)]) is None, "Source checkout shadows native registry wheel"
+
+import ptg2_address_canon as native
+
+distribution = metadata.distribution("ptg2_address_canon")
+assert "Root-Is-Purelib: false" in (distribution.read_text("WHEEL") or ""), "Native registry wheel metadata is missing"
+records = {Path(distribution.locate_file(item)).resolve(): item for item in distribution.files or ()}
+
+def verify_module(module):
+    spec = module.__spec__
+    path = Path(spec.origin)
+    record = records.get(path.resolve())
+    assert path.is_file() and not path.is_symlink() and record is not None, "Native registry module is outside its installed wheel"
+    assert record.hash is not None and record.hash.mode == "sha256", "Native registry wheel hash is missing"
+    with path.open("rb") as stream:
+        digest = base64.urlsafe_b64encode(hashlib.file_digest(stream, "sha256").digest()).decode().rstrip("=")
+    assert digest == record.hash.value and path.stat().st_size == record.size, "Native registry wheel content changed"
+
+verify_module(native)
+extensions = [module for module in tuple(sys.modules.values())
+              if isinstance(getattr(getattr(module, "__spec__", None), "loader", None), machinery.ExtensionFileLoader)
+              and Path(module.__spec__.origin).resolve() in records]
+assert extensions, "Native registry wheel has no loaded compiled module"
+for module in extensions:
+    verify_module(module)
+names = ("plan_registry_ptg_graph_locator_pages", "plan_registry_ptg_graph_member_pages", "verify_registry_ptg_graph_batch")
+if sys.argv[2] == "1":
+    names += ("encode_registry_ptg_capture_batch",)
+assert all(inspect.isbuiltin(function := getattr(native, name, None))
+           and any(getattr(module, name, None) is function
+                   and function.__module__ in (module.__name__, native.__name__) for module in extensions)
+           for name in names), "Native registry extension is incomplete"
+PY
+}
 
 run_rust_wheel_tests() {
   ci_phase_begin rust-wheel-tests
@@ -909,6 +957,45 @@ run_scoped_archive_postgres() (
   fi
 )
 
+validate_registry_native_report() {
+  python - "$@" <<'PY'
+import pathlib
+import sys
+import xml.etree.ElementTree as ET
+
+with pathlib.Path(sys.argv[1]).open("rb") as report:
+    document = report.read(16 * 1024 * 1024 + 1)
+assert 0 < len(document) <= 16 * 1024 * 1024, "Native registry report is missing or oversized"
+root = ET.fromstring(document)
+assert root.tag in ("testsuite", "testsuites"), "Native registry report has an invalid root"
+suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
+assert suites, "Native registry report has no suites"
+for suite in suites:
+    cases = list(suite.findall("testcase"))
+    assert cases and int(suite.attrib["tests"]) == len(cases), "Native registry report has no tests or inconsistent counts"
+    assert all(int(suite.attrib.get(name, "0")) == 0 for name in ("skipped", "errors", "failures")), "Native registry tests must all pass without skips"
+assert not any(item.tag in ("skipped", "error", "failure") for item in root.iter()), "Native registry tests must all pass without skips"
+cases = [case for suite in suites for case in suite.findall("testcase")]
+if sys.argv[2]:
+    selected = pathlib.Path(sys.argv[2]).read_text().splitlines()
+    expected = []
+    for nodeid in selected:
+        location, bracket, parameters = nodeid.partition("[")
+        module, *names = location.split("::")
+        assert names, "Native registry selection has an invalid node ID"
+        names[-1] += bracket + parameters
+        expected.append((".".join([module.removesuffix(".py").replace("/", "."), *names[:-1]]), names[-1]))
+    actual = [(case.attrib.get("classname", ""), case.attrib.get("name", "")) for case in cases]
+    assert expected and len(expected) == len(set(expected)), "Native registry selection is empty or duplicated"
+    assert len(actual) == len(expected) and set(actual) == set(expected), "Native registry report differs from its exact shard selection"
+else:
+    required = {path.removesuffix(".py").replace("/", ".") for path in sys.argv[3:]}
+    assert required, "Native registry report has no required families"
+    class_names = {case.attrib.get("classname", "") for case in cases}
+    assert all(any(name == module or name.startswith(module + ".") for name in class_names) for module in required), "Native registry report omits a required family"
+PY
+}
+
 run_network_registry_postgres() (
   local shard=${1:-}
   local registry_tests=(
@@ -1038,51 +1125,39 @@ run_network_registry_postgres() (
   HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN="$archive_url/$database" \
     run_scoped_archive_postgres "$database" NETWORK_REGISTRY_TEST_DSN "$archive_url" \
       "${registry_arguments[@]}" --junitxml "$registry_report"
-  python - "$registry_report" "$registry_nodeids" "${registry_tests[@]}" <<'PY'
-import pathlib
-import sys
-import xml.etree.ElementTree as ET
-
-with pathlib.Path(sys.argv[1]).open("rb") as report:
-    document = report.read(16 * 1024 * 1024 + 1)
-assert 0 < len(document) <= 16 * 1024 * 1024, "Native registry report is missing or oversized"
-root = ET.fromstring(document)
-assert root.tag in ("testsuite", "testsuites"), "Native registry report has an invalid root"
-suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
-assert suites, "Native registry report has no suites"
-for suite in suites:
-    cases = list(suite.findall("testcase"))
-    assert cases and int(suite.attrib["tests"]) == len(cases), "Native registry report has no tests or inconsistent counts"
-    assert all(int(suite.attrib.get(name, "0")) == 0 for name in ("skipped", "errors", "failures")), "Native registry tests must all pass without skips"
-assert not any(item.tag in ("skipped", "error", "failure") for item in root.iter()), "Native registry tests must all pass without skips"
-cases = [case for suite in suites for case in suite.findall("testcase")]
-if sys.argv[2]:
-    selected = pathlib.Path(sys.argv[2]).read_text().splitlines()
-    expected = []
-    for nodeid in selected:
-        location, bracket, parameters = nodeid.partition("[")
-        module, *names = location.split("::")
-        assert names, "Native registry selection has an invalid node ID"
-        names[-1] += bracket + parameters
-        expected.append((".".join([module.removesuffix(".py").replace("/", "."), *names[:-1]]), names[-1]))
-    actual = [(case.attrib.get("classname", ""), case.attrib.get("name", "")) for case in cases]
-    assert expected and len(expected) == len(set(expected)), "Native registry selection is empty or duplicated"
-    assert len(actual) == len(expected) and set(actual) == set(expected), "Native registry report differs from its exact shard selection"
-else:
-    required = {path.removesuffix(".py").replace("/", ".") for path in sys.argv[3:]}
-    assert required, "Native registry report has no required families"
-    class_names = {case.attrib.get("classname", "") for case in cases}
-    assert all(any(name == module or name.startswith(module + ".") for name in class_names) for module in required), "Native registry report omits a required family"
-PY
+  validate_registry_native_report "$registry_report" "$registry_nodeids" "${registry_tests[@]}"
 )
 
-run_registry_ptg_scope_postgres() {
+run_registry_ptg_scope_postgres() (
   local dsn=$1
-  local test_path present=0
+  # Measure bootstrap phases without closing the caller's database phase.
+  ci_phase_name=''
+  local test_path present=0 office_present=0 office_witness_present=0
+  local office_witness_test=tests/test_registry_ptg_office_witness_postgres.py
   local registry_tests=(
     tests/test_registry_ptg_graph_reader_postgres.py
     tests/test_registry_ptg_scope_engine_postgres.py
   )
+  local office_capability=(
+    process/registry_ptg_office_capture.py
+    process/registry_ptg_office_witness.py
+    tests/test_registry_ptg_office_capture.py
+    tests/test_registry_ptg_office_witness.py
+    tests/test_registry_ptg_office_capture_postgres.py
+    support/ptg2_scanner/src/registry_ptg_capture_input.rs
+    support/ptg2_scanner/tests/registry_ptg_capture_input.rs
+  )
+  for test_path in "${office_capability[@]}"; do
+    if [ -e "$repository_root/$test_path" ] || [ -L "$repository_root/$test_path" ]; then
+      office_present=1
+      present=1
+    fi
+  done
+  if [ -e "$repository_root/$office_witness_test" ] || [ -L "$repository_root/$office_witness_test" ]; then
+    office_witness_present=1
+    office_present=1
+    present=1
+  fi
   for test_path in "${registry_tests[@]}" \
     process/registry_ptg_graph_reader.py process/registry_ptg_scope_engine.py; do
     if [ -e "$repository_root/$test_path" ] || [ -L "$repository_root/$test_path" ]; then
@@ -1111,6 +1186,23 @@ run_registry_ptg_scope_postgres() {
     tests/ptg_frozen_test_support.py
     tests/ptg2_tax_identity_source_projection_fixture.py
   )
+  if [ "$office_present" = 1 ]; then
+    registry_tests+=(tests/test_registry_ptg_office_capture_postgres.py)
+    capability+=(
+      "${office_capability[@]}"
+      support/ptg2_scanner/src/network_membership_codec.rs
+      support/ptg2_scanner/src/npi_identifier.rs
+      tests/test_network_custom_address_source_postgres.py
+      tests/test_network_serving_schema_postgres.py
+      tests/test_registry_approval_store_postgres.py
+      tests/test_registry_candidate_composition_postgres.py
+      tests/test_registry_retained_site_adoption_postgres.py
+    )
+    if [ "$office_witness_present" = 1 ]; then
+      registry_tests+=("$office_witness_test")
+      capability+=("$office_witness_test")
+    fi
+  fi
   for test_path in "${capability[@]}"; do
     if [ ! -f "$repository_root/$test_path" ] || [ -L "$repository_root/$test_path" ]; then
       printf 'Incomplete registry source review capability\n' >&2
@@ -1122,11 +1214,24 @@ run_registry_ptg_scope_postgres() {
   git diff --cached --quiet
   git ls-files --error-unmatch "${capability[@]}" > /dev/null
   install_address_canon_wheel
-  python -c 'import ptg2_address_canon as native; assert all(callable(getattr(native, name, None)) for name in ("plan_registry_ptg_graph_locator_pages", "plan_registry_ptg_graph_member_pages", "verify_registry_ptg_graph_batch")), "Native registry graph extension is incomplete"'
+  verify_registry_native_wheel "$repository_root" "$office_present"
+  registry_report=""
+  cleanup_registry_scope_report() {
+    local status=$?
+    trap - EXIT
+    if [[ -n "$registry_report" ]] && ! rm -f -- "$registry_report"; then
+      [ "$status" -ne 0 ] || status=1
+    fi
+    exit "$status"
+  }
+  trap cleanup_registry_scope_report EXIT
+  registry_report=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-registry-scope.XXXXXX")
   HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST=1 \
   HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN=$dsn \
-    timeout --foreground 295s python -m pytest -q "${registry_tests[@]}"
-}
+  NETWORK_REGISTRY_TEST_DSN=$dsn \
+    timeout --foreground 295s python -m pytest -q "${registry_tests[@]}" --junitxml "$registry_report"
+  validate_registry_native_report "$registry_report" "" "${registry_tests[@]}"
+)
 
 run_core_postgres() {
   local dsn=$1
