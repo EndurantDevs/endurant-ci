@@ -99,7 +99,55 @@ class InstalledSupervisorTests(unittest.TestCase):
                 receipt = Path(temporary) / "drain"
                 self.assertEqual(supervisor.supervise(["synthetic"], receipt), status or 125)
                 self.assertFalse(receipt.exists())
-                self.assertEqual([call.args for call in send.call_args_list], [(42, signal.SIGTERM), (42, signal.SIGKILL)])
+                self.assertEqual([call.args[:2] for call in send.call_args_list], [(42, signal.SIGTERM), (42, signal.SIGKILL)])
+                self.assertEqual(send.call_args_list[0].args[2], send.call_args_list[1].args[2])
+                process.wait.assert_called_once_with(timeout=0)
+
+    def test_permission_refusal_requires_no_active_members_within_the_same_deadline(self):
+        for signum in (signal.SIGTERM, signal.SIGKILL):
+            for state in (False, True, RuntimeError("accounting unavailable"), TimeoutError("expired")):
+                refusal = PermissionError("synthetic signal refusal")
+                with self.subTest(signum=signum, state=state), \
+                        patch.object(supervisor.os, "killpg", side_effect=refusal), \
+                        patch.object(supervisor.time, "monotonic", return_value=10), \
+                        patch.object(supervisor, "active_group") as active:
+                    if isinstance(state, Exception):
+                        active.side_effect = state
+                        with self.assertRaises(type(state)):
+                            supervisor.signal_group(42, signum, 12)
+                    elif state:
+                        active.return_value = True
+                        with self.assertRaises(PermissionError) as raised:
+                            supervisor.signal_group(42, signum, 12)
+                        self.assertIs(raised.exception, refusal)
+                    else:
+                        active.return_value = False
+                        supervisor.signal_group(42, signum, 12)
+                    active.assert_called_once_with(42, 2)
+
+    def test_exited_child_without_descendants_is_reaped_after_verified_drain(self):
+        for status in (0, 17):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
+                receipt = Path(temporary) / "drain"
+                self.assertEqual(supervisor.supervise([sys.executable, "-c", f"raise SystemExit({status})"], receipt), status)
+                self.assertEqual(receipt.read_text(), "drained\n")
+
+    def test_signal_refusal_without_complete_accounting_withholds_drain_receipt(self):
+        for state in (True, RuntimeError("accounting unavailable"), TimeoutError("expired")):
+            process = Mock(pid=42)
+            exited = SimpleNamespace(si_status=0, si_code=os.CLD_EXITED)
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as temporary, \
+                    patch.object(supervisor.subprocess, "Popen", return_value=process), \
+                    patch.object(supervisor.os, "waitid", return_value=exited), \
+                    patch.object(supervisor.os, "killpg", side_effect=PermissionError("synthetic refusal")), \
+                    patch.object(supervisor, "active_group") as active, patch.object(supervisor, "print"):
+                if isinstance(state, Exception):
+                    active.side_effect = state
+                else:
+                    active.return_value = state
+                receipt = Path(temporary) / "drain"
+                self.assertEqual(supervisor.supervise(["synthetic"], receipt), 125)
+                self.assertFalse(receipt.exists())
                 process.wait.assert_called_once_with(timeout=0)
 
     def _cleanup_tree(self, root, tree):
@@ -111,7 +159,7 @@ class InstalledSupervisorTests(unittest.TestCase):
         # A fallback signal requires this exact test-owned script in the group.
         if any(int(fields[0]) == group and str(tree) in fields[1]
                for line in listing.splitlines() if len(fields := line.split(maxsplit=1)) == 2):
-            supervisor.signal_group(group, signal.SIGKILL)
+            supervisor.signal_group(group, signal.SIGKILL, time.monotonic() + 1)
         deadline = time.monotonic() + 1
         while supervisor.active_group(group, deadline - time.monotonic()):
             time.sleep(0.02)
