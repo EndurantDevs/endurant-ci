@@ -301,6 +301,7 @@ class HealthcarePublicChecks(unittest.TestCase):
             "test_network_membership_candidate_indexes", "test_network_membership_serving_indexes",
             "test_network_membership_publication", "test_registry_source_observation_store",
             "test_registry_identity_materialization", "test_registry_source_admission", "test_registry_approval_store",
+            "test_registry_approved_company_read",
             "test_registry_approval_preview", "test_network_membership_writer_closure", "test_network_serving_read",
             "test_network_address_read_scope", "test_registry_source_import",
             "test_network_membership_pipeline", "test_network_serving_routes",
