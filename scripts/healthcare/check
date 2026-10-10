@@ -1226,7 +1226,7 @@ run_network_registry_postgres() (
   fi
   HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN="$archive_url/$database" \
     run_scoped_archive_postgres "$database" NETWORK_REGISTRY_TEST_DSN "$archive_url" \
-      "${registry_arguments[@]}" --junitxml "$registry_report"
+      "${registry_arguments[@]}" --verbosity=1 --junitxml "$registry_report"
   validate_registry_native_report "$registry_report" "$registry_nodeids" "${registry_tests[@]}"
 )
 
