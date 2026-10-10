@@ -622,7 +622,7 @@ jobs:
     - security
     - worker-queue-smoke
     - address-canonical-db-tests
-    if: ${{ always() }}
+    if: ${{ !cancelled() }}
     steps:
     - name: Require all validation jobs
       env:
@@ -683,7 +683,7 @@ jobs:
     name: Validation complete
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    if: ${{ always() }}
+    if: ${{ !cancelled() }}
     needs:
     - measurement
     permissions:
