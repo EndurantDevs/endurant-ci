@@ -563,12 +563,13 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                                 nodeid.split("::", 1)[0] for nodeid in selection.split("\t")[1:]
                             )
                         self.assertEqual(selected_arguments[:3], ["-m", "pytest", "-q"])
-                        self.assertEqual(len(selected_arguments), 6)
+                        self.assertEqual(len(selected_arguments), 7)
                         selection_path = Path(selected_arguments[3].removeprefix("@"))
                         self.assertEqual(selection_path.parent, runner)
                         self.assertFalse(selection_path.exists())
                     else:
-                        self.assertEqual(selected_arguments[:-2], ["-m", "pytest", "-q", *paths])
+                        self.assertEqual(selected_arguments[:-3], ["-m", "pytest", "-q", *paths])
+                    self.assertEqual(selected_arguments[-3], "--verbosity=1")
                     self.assertEqual(selected_arguments[-2], "--junitxml")
                     self.assertEqual(Path(selected_arguments[-1]).parent, runner)
                     self.assertFalse(Path(selected_arguments[-1]).exists())
