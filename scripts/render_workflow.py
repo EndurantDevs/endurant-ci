@@ -44,7 +44,7 @@ def render_workflow(kind, revision, caller):
     workflow["jobs"] = {"smoke": workflow["jobs"]["smoke"], **canonical["jobs"]}
     if kind == "drug":
         publish = workflow["jobs"]["publish"]
-        publish["if"] = "always()"
+        publish["if"] = "!cancelled()"
         for step in publish["steps"]:
             condition = step.get("if", "success()").removeprefix("${{").removesuffix("}}").strip()
             step["if"] = "${{ " + GUARD + condition + ") }}"

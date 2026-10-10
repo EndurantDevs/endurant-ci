@@ -60,7 +60,7 @@ class RenderWorkflowChecks(unittest.TestCase):
                         expected = json.loads(json.dumps(template).replace("${{ inputs.ci_revision }}", "1" * 40))
                         if (kind, job_id) == ("drug", "publish"):
                             # The complete export contract and the reused gate are checked below.
-                            expected["if"] = "always()"
+                            expected["if"] = "!cancelled()"
                             expected["steps"] = job["steps"]
                         metadata_required = job_id == "smoke" or (kind, job_id) in {
                             ("healthcare", "source-validation"), ("drug", "publish"),
@@ -214,7 +214,7 @@ class RenderWorkflowChecks(unittest.TestCase):
         self.assertTrue(required_contexts <= {job["name"] for job in jobs.values()})
         self.assertEqual(jobs["publish"]["name"], "Coverage results")
         self.assertEqual(jobs["publish"]["needs"], "validate")
-        self.assertEqual(jobs["publish"]["if"], "${{ always() }}")
+        self.assertEqual(jobs["publish"]["if"], "${{ !cancelled() }}")
         self.assertEqual(jobs["publish"]["timeout-minutes"], 10)
         self.assertNotIn("continue-on-error", jobs["publish"])
         canonical = yaml.safe_load((ROOT / ".github/workflows/drug.yml").read_text())
@@ -240,9 +240,11 @@ class RenderWorkflowChecks(unittest.TestCase):
             caller.write_text(yaml.safe_dump(original))
             workflow = yaml.safe_load(RENDERER.render_workflow("healthcare", "1" * 40, caller))
         source_validation = workflow["jobs"]["source-validation"]
+        self.assertEqual(workflow["jobs"]["measurement"]["if"],
+                         "${{ " + RENDERER.GUARD + "!cancelled()) }}")
         self.assertEqual(source_validation["name"], "Validation complete")
         self.assertEqual(source_validation["timeout-minutes"], 45)
-        self.assertEqual(source_validation["if"], "${{ always() }}")
+        self.assertEqual(source_validation["if"], "${{ !cancelled() }}")
         self.assertEqual(source_validation["permissions"], {"actions": "read"})
         step = source_validation["steps"][0]
         self.assertEqual(step["env"], {
