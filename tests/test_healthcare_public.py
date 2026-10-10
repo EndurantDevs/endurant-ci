@@ -100,6 +100,42 @@ COMPANY_ASSERTION_DEPENDENCIES = (
     "process/registry_record_store.py", "process/registry_approval_store.py",
     "process/registry_management_permissions.py", "tests/test_result_archive_published_authority_postgres.py",
 )
+REGISTRY_COMPLETION_CAPABILITY = (
+    "process/registry_source_admission_receipt.py",
+    "alembic/versions/20261010030000_registry_source_admission_receipt.py",
+    "tests/test_registry_source_admission_receipt.py",
+    "tests/test_registry_source_admission_receipt_postgres.py",
+)
+REGISTRY_COMPLETION_DEPENDENCIES = (
+    "db/models/registry_evidence.py", "process/registry_source_admission.py",
+    "process/registry_source_observation_store.py", "process/registry_management_permissions.py",
+    "tests/test_registry_management_permissions_postgres.py", "tests/test_registry_planfinder_admission_postgres.py",
+    "tests/test_network_serving_schema_postgres.py",
+)
+REGISTRY_OFFICE_CUSTODY_CAPABILITY = (
+    "process/registry_ptg_office_custody.py", "tests/test_registry_ptg_office_custody.py",
+    "tests/test_registry_ptg_office_custody_postgres.py",
+)
+REGISTRY_OFFICE_PREPARATION_CAPABILITY = (
+    "process/registry_ptg_office_preparation.py", "process/registry_ptg_office_preparation_contract.py",
+    "process/registry_ptg_office_preparation_producer.py", "tests/test_registry_ptg_office_preparation.py",
+    "tests/test_registry_ptg_office_preparation_api.py", "tests/test_registry_ptg_office_preparation_runtime.py",
+    "tests/test_registry_ptg_office_preparation_postgres.py",
+)
+REGISTRY_OFFICE_CHOICES_CAPABILITY = (
+    "process/registry_ptg_graph_payload_read.py", "process/registry_ptg_office_choices.py",
+    "tests/test_registry_ptg_office_choices.py", "tests/test_registry_ptg_office_choices_postgres.py",
+)
+REGISTRY_OFFICE_CHOICES_DEPENDENCIES = (
+    "api/control_registry_ptg_scope.py", "api/ptg2_v4_graph.py",
+    "process/registry_ptg_graph_reader.py", "tests/test_ptg2_v4_graph.py",
+)
+REGISTRY_OFFICE_NEW_DEPENDENCIES = (
+    "process/registry_ptg_published_provisioning.py", "tests/test_registry_management_permissions_postgres.py",
+    "process/registry_ptg_published_plan_scope.py", "process/registry_ptg_published_office_scope.py",
+    "process/registry_ptg_office_review_contract.py", "tests/test_registry_site_membership_composition_postgres.py",
+)
+
 PROFILE_MAINTENANCE_CAPABILITY = (
     "process/provider_directory_profile_control_maintenance.py",
     "tests/test_provider_directory_profile_control_maintenance.py",
@@ -485,6 +521,7 @@ else:
                              classname="" if stage == "no-classname" else module.removesuffix(".py").replace("/", "."))
         if stage == "more-management-cases" and index >= len(modules) - 2:
             case.set("classname", case.get("classname") + ".ExampleCases")
+            case.set("name", f"synthetic_management_test_{index}")
         if index == 0 and stage in ("skipped", "error", "failure"):
             ET.SubElement(case, stage)
     ET.ElementTree(report).write(path, encoding="utf-8")
@@ -587,18 +624,20 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
     def test_optional_company_and_maintenance_native_routes_fail_closed(self):
         registry_roster = tuple(shlex.split(CHECK_FUNCTIONS.split(
             "run_network_registry_postgres() (\n", 1)[1].split("  local registry_tests=(\n", 1)[1].split("\n  )", 1)[0]))
-        shard_members = []
+        shard_members_by_kind = {}
         for kind, capability, dependencies in (
             ("company", COMPANY_ASSERTION_CAPABILITY, COMPANY_ASSERTION_DEPENDENCIES),
+            ("completion", REGISTRY_COMPLETION_CAPABILITY, REGISTRY_COMPLETION_DEPENDENCIES),
             ("maintenance", PROFILE_MAINTENANCE_CAPABILITY, PROFILE_MAINTENANCE_DEPENDENCIES),
         ):
+            shard_members = []
             cases = [("legacy", "", "", ""), ("complete", "", "", "")]
             cases += [("complete", path, "", "") for path in (*capability, *dependencies)]
             cases += [("only", path, "", "") for path in capability]
             cases += [("complete", capability[0], stage, "") for stage in ("symlink", "dangling", "dirty", "untracked")]
             cases += [("complete", "", stage, "") for stage in (
                 "skipped", "empty", "missing-family", "invalid-report", "pytest", "drop", "report-cleanup")]
-            if kind == "company":
+            if kind in {"company", "completion"}:
                 cases += [("complete", "", "", str(index)) for index in range(8)]
             else:
                 cases += [("complete", "", "", "publication")]
@@ -608,7 +647,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     source, runner, log = root / "source", root / "runner", root / "calls"
                     source.mkdir()
                     runner.mkdir()
-                    for path in registry_roster if kind == "company" else ():
+                    for path in registry_roster if kind in {"company", "completion"} else ():
                         target = source / path
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.touch()
@@ -619,10 +658,12 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                         target = source / path
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.touch()
+                    if kind == "completion" and layout == "complete" and changed in registry_roster and not stage:
+                        (source / changed).unlink()
                     if stage in ("symlink", "dangling"):
                         target = source / changed
                         target.unlink()
-                        live = registry_roster[0] if kind == "company" else dependencies[0]
+                        live = registry_roster[0] if kind in {"company", "completion"} else dependencies[0]
                         target.symlink_to(source / (live if stage == "symlink" else "absent"))
                     timeout = root / "timeout"
                     timeout.write_text(f"#!{sys.executable}\n" + r'''
@@ -682,7 +723,7 @@ PYSHARD
   else command python3 "$@"; fi
 }
 '''
-                    call = (f"run_network_registry_postgres {shard}" if kind == "company" else
+                    call = (f"run_network_registry_postgres {shard}" if kind in {"company", "completion"} else
                             "run_provider_profile_postgres postgresql://synthetic/runtime_test profile-publication"
                             if shard == "publication" else "run_profile_control_maintenance_postgres")
                     if changed:
@@ -698,11 +739,11 @@ PYSHARD
                     if changed:
                         self.assertFalse(calls)
                     elif not stage:
-                        self.assertEqual(len(runs), int(kind == "company" or layout == "complete"))
+                        self.assertEqual(len(runs), int(kind in {"company", "completion"} or layout == "complete"))
                     for run in runs:
-                        if kind == "company":
+                        if kind in {"company", "completion"}:
                             self.assertRegex(run["registry"], r"@127\.0\.0\.1:5440/hc_network_registry_[0-9a-f]{32}$")
-                            if layout == "complete":
+                            if layout == "complete" and kind == "company":
                                 self.assertEqual(run["map"], "1")
                                 self.assertEqual(run["migration"], run["registry"])
                             else:
@@ -714,7 +755,7 @@ PYSHARD
                             self.assertIsNone(run["schema_alias"])
                         if not shard:
                             self.assertEqual(capability[-1] in run["arguments"], layout == "complete")
-                    if kind == "company" and shard and not stage:
+                    if kind in {"company", "completion"} and shard and not stage:
                         shard_members.extend(json.loads((root / "selections").read_text()))
                     created = [c[7:] for c in calls if c.startswith("create:")]
                     dropped = [c[5:] for c in calls if c.startswith("drop:")]
@@ -725,8 +766,114 @@ PYSHARD
                         for path in leftovers: path.unlink()
                     else:
                         self.assertFalse(leftovers)
-        self.assertEqual(len(shard_members), len(set(shard_members)))
-        self.assertCountEqual(shard_members, (*registry_roster, COMPANY_ASSERTION_CAPABILITY[-1]))
+            shard_members_by_kind[kind] = shard_members
+        for kind, extra in (("company", COMPANY_ASSERTION_CAPABILITY[-1]),
+                            ("completion", REGISTRY_COMPLETION_CAPABILITY[-1])):
+            members = shard_members_by_kind[kind]
+            self.assertEqual(len(members), len(set(members)))
+            self.assertCountEqual(members, (*registry_roster, extra))
+
+    def test_office_completion_routes_require_closed_source_and_complete_native_report(self):
+        for family, capability, dependencies, expected_tests in (
+            ("custody", REGISTRY_OFFICE_CUSTODY_CAPABILITY, REGISTRY_OFFICE_NEW_DEPENDENCIES[:2],
+             (*REGISTRY_PTG_SCOPE_TESTS, REGISTRY_PTG_OFFICE_TEST, REGISTRY_OFFICE_CUSTODY_CAPABILITY[-1])),
+            ("preparation", REGISTRY_OFFICE_PREPARATION_CAPABILITY,
+             (*REGISTRY_OFFICE_CUSTODY_CAPABILITY, *REGISTRY_OFFICE_NEW_DEPENDENCIES),
+             (*REGISTRY_PTG_SCOPE_TESTS, REGISTRY_PTG_OFFICE_TEST, REGISTRY_OFFICE_CUSTODY_CAPABILITY[-1],
+              REGISTRY_OFFICE_PREPARATION_CAPABILITY[-1])),
+            ("choices", REGISTRY_OFFICE_CHOICES_CAPABILITY,
+             (*REGISTRY_OFFICE_CUSTODY_CAPABILITY, *REGISTRY_OFFICE_PREPARATION_CAPABILITY,
+              *REGISTRY_OFFICE_NEW_DEPENDENCIES, *REGISTRY_OFFICE_CHOICES_DEPENDENCIES),
+             (*REGISTRY_PTG_SCOPE_TESTS, REGISTRY_PTG_OFFICE_TEST, REGISTRY_OFFICE_CUSTODY_CAPABILITY[-1],
+              REGISTRY_OFFICE_PREPARATION_CAPABILITY[-1], REGISTRY_OFFICE_CHOICES_CAPABILITY[-1])),
+        ):
+            cases = [("complete", "", ""), ("legacy", "", "")]
+            missing_paths = (*capability[:-1], *dependencies) if family == "custody" else (*capability, *dependencies)
+            cases += [("complete", path, "missing") for path in missing_paths]
+            triggers = capability if family != "custody" else capability[-1:]
+            cases += [("only", path, "") for path in triggers]
+            changed_paths = capability if family == "choices" else capability[-1:]
+            cases += [("complete", path, stage) for path in changed_paths for stage in
+                      ("symlink", "dangling", "dirty", "untracked", "staged")]
+            cases += [("complete", "", stage) for stage in
+                      ("skip", "missing-family", "duplicate", "pytest", "cleanup")]
+            for layout, changed, stage in cases:
+                with self.subTest(family=family, layout=layout, changed=changed, stage=stage), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    source, runner, log = root / "source", root / "runner", root / "calls"
+                    source.mkdir(); runner.mkdir()
+                    selected = (*REGISTRY_PTG_SCOPE_CAPABILITY, *REGISTRY_PTG_OFFICE_CAPABILITY)
+                    if layout == "legacy":
+                        selected += REGISTRY_OFFICE_CUSTODY_CAPABILITY[:-1]
+                        if family == "choices": selected += dependencies
+                    if layout == "complete": selected += (*capability, *dependencies)
+                    if layout == "only": selected += (changed,)
+                    for name in selected:
+                        if name == changed and stage == "missing": continue
+                        path = source / name
+                        path.parent.mkdir(parents=True, exist_ok=True); path.touch()
+                    if stage in {"symlink", "dangling"}:
+                        path = source / changed; path.unlink()
+                        path.symlink_to(source / (REGISTRY_PTG_SCOPE_TESTS[0] if stage == "symlink" else "absent"))
+                    environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                                   "SOURCE_SHA": "a" * 40, "RUNNER_TEMP": str(runner), "CALL_LOG": str(log),
+                                   "FAIL_STAGE": stage, "CHANGED_PATH": changed,
+                                   "NEW_NATIVE_TEST": capability[-1]}
+                    script = CHECK_FUNCTIONS + r'''
+git() {
+  if [[ "$1" = -C ]]; then shift 2; fi
+  case "$1" in
+    rev-parse) printf '%s\n' "$SOURCE_SHA" ;;
+    diff) [[ "$FAIL_STAGE" != dirty && "$FAIL_STAGE" != staged ]] || [[ "${!#}" != "$CHANGED_PATH" ]] ;;
+    ls-files) [[ "$FAIL_STAGE" != untracked ]] || [[ "${!#}" != "$CHANGED_PATH" ]] ;;
+    *) return 99 ;;
+  esac
+}
+python() { command python3 "$@"; }
+install_address_canon_wheel() { printf 'wheel\n' >> "$CALL_LOG"; }
+verify_registry_native_wheel() { [[ "$2" = 1 ]]; printf 'exports\n' >> "$CALL_LOG"; }
+timeout() {
+  [[ "$1 $2 $3 $4 $5 $6" = '--foreground 295s python -m pytest -q' ]] || return 98
+  printf 'native\t%s\n' "$*" >> "$CALL_LOG"
+  [[ "$FAIL_STAGE" != pytest ]] || return 17
+  command python3 - "$@" <<'REPORT'
+import os, pathlib, sys, xml.etree.ElementTree as ET
+args=sys.argv[1:]; modules=[a for a in args if a.startswith('tests/') and a.endswith('.py')]
+stage=os.environ['FAIL_STAGE']; required=os.environ['NEW_NATIVE_TEST']
+if stage=='missing-family': modules.remove(required)
+if stage=='duplicate': modules.append(required)
+report=ET.Element('testsuites'); suite=ET.SubElement(report,'testsuite',tests=str(len(modules)),skipped='0',errors='0',failures='0')
+for module in modules:
+    case=ET.SubElement(suite,'testcase',classname=module.removesuffix('.py').replace('/','.'),name='synthetic_native_case')
+    if stage=='skip' and module==required: ET.SubElement(case,'skipped')
+pathlib.Path(args[-1]).write_bytes(ET.tostring(report))
+REPORT
+}
+rm() { [[ "$FAIL_STAGE" != cleanup ]] || return 23; command rm "$@"; }
+run_registry_ptg_scope_postgres postgresql://synthetic/runtime_test
+'''
+                    result = subprocess.run(["bash", "-euc", script], cwd=source, env=environment,
+                                            capture_output=True, text=True, timeout=15, check=False)
+                    failed = layout == "only" or bool(stage)
+                    expected_status = 17 if stage == "pytest" else 1 if failed else 0
+                    self.assertEqual(result.returncode, expected_status, result.stderr)
+                    calls = log.read_text().splitlines() if log.exists() else []
+                    if changed:
+                        self.assertFalse(calls)
+                    else:
+                        self.assertEqual(calls[:2], ["wheel", "exports"])
+                        self.assertEqual(len(calls), 3)
+                        arguments = shlex.split(calls[-1].split("\t", 1)[1])
+                        actual = [arg for arg in arguments if arg.startswith("tests/") and arg.endswith(".py")]
+                        legacy_tests = (expected_tests[:-1] if family == "choices" else
+                                        (*REGISTRY_PTG_SCOPE_TESTS, REGISTRY_PTG_OFFICE_TEST))
+                        self.assertEqual(actual, list(expected_tests if layout == "complete" else legacy_tests))
+                        self.assertEqual(len(actual), len(set(actual)))
+                    leftovers = list(runner.iterdir())
+                    if stage == "cleanup":
+                        self.assertEqual(len(leftovers), 1)
+                        leftovers[0].unlink()
+                    self.assertFalse(list(runner.iterdir()))
 
     def test_registry_report_matches_class_and_parameter_ids_exactly(self):
         validator = CHECK_FUNCTIONS.split('validate_registry_native_report() {\n  python - "$@" <<\'PY\'\n', 1)[1].split("\nPY\n", 1)[0]
