@@ -1037,6 +1037,8 @@ for suite in suites:
     assert all(int(suite.attrib.get(name, "0")) == 0 for name in ("skipped", "errors", "failures")), "Native registry tests must all pass without skips"
 assert not any(item.tag in ("skipped", "error", "failure") for item in root.iter()), "Native registry tests must all pass without skips"
 cases = [case for suite in suites for case in suite.findall("testcase")]
+identities = [(case.attrib.get("classname", ""), case.attrib.get("name", "")) for case in cases]
+assert len(identities) == len(set(identities)), "Native registry report duplicates a test identity"
 if sys.argv[2]:
     selected = pathlib.Path(sys.argv[2]).read_text().splitlines()
     expected = []
@@ -1173,7 +1175,28 @@ run_network_registry_postgres() (
       process/registry_management_permissions.py tests/test_result_archive_published_authority_postgres.py || return 1
     registry_tests+=(tests/test_company_registry_assertions_postgres.py)
   fi
+  local completion_present=0
+  local completion_capability=(
+    process/registry_source_admission_receipt.py
+    alembic/versions/20261010030000_registry_source_admission_receipt.py
+    tests/test_registry_source_admission_receipt.py
+    tests/test_registry_source_admission_receipt_postgres.py
+  )
+  for test_path in "${completion_capability[@]}"; do
+    if [ -e "$repository_root/$test_path" ] || [ -L "$repository_root/$test_path" ]; then
+      completion_present=1
+    fi
+  done
+  if [ "$completion_present" = 1 ]; then
+    require_native_source_files "${completion_capability[@]}" \
+      db/models/registry_evidence.py process/registry_source_admission.py \
+      process/registry_source_observation_store.py process/registry_management_permissions.py \
+      tests/test_registry_management_permissions_postgres.py tests/test_registry_planfinder_admission_postgres.py \
+      tests/test_network_serving_schema_postgres.py || return 1
+    registry_tests+=(tests/test_registry_source_admission_receipt_postgres.py)
+  fi
   local feature_present=$company_present
+  [ "$completion_present" != 1 ] || feature_present=1
   [ ! -f "$repository_root/db/models/network_registry.py" ] || feature_present=1
   for test_path in "${registry_tests[@]}"; do
     [ ! -f "$repository_root/$test_path" ] || feature_present=1
@@ -1234,7 +1257,7 @@ run_registry_ptg_scope_postgres() (
   local dsn=$1
   # Measure bootstrap phases without closing the caller's database phase.
   ci_phase_name=''
-  local test_path present=0 office_present=0 office_witness_present=0
+  local test_path present=0 office_present=0 office_witness_present=0 custody_present=0 preparation_present=0 choices_present=0
   local office_witness_test=tests/test_registry_ptg_office_witness_postgres.py
   local registry_tests=(
     tests/test_registry_ptg_graph_reader_postgres.py
@@ -1249,6 +1272,47 @@ run_registry_ptg_scope_postgres() (
     support/ptg2_scanner/src/registry_ptg_capture_input.rs
     support/ptg2_scanner/tests/registry_ptg_capture_input.rs
   )
+  local custody_capability=(
+    process/registry_ptg_office_custody.py
+    tests/test_registry_ptg_office_custody.py
+    tests/test_registry_ptg_office_custody_postgres.py
+  )
+  local preparation_capability=(
+    process/registry_ptg_office_preparation.py
+    process/registry_ptg_office_preparation_contract.py
+    process/registry_ptg_office_preparation_producer.py
+    tests/test_registry_ptg_office_preparation.py
+    tests/test_registry_ptg_office_preparation_api.py
+    tests/test_registry_ptg_office_preparation_runtime.py
+    tests/test_registry_ptg_office_preparation_postgres.py
+  )
+  local choices_capability=(
+    process/registry_ptg_graph_payload_read.py
+    process/registry_ptg_office_choices.py
+    tests/test_registry_ptg_office_choices.py
+    tests/test_registry_ptg_office_choices_postgres.py
+  )
+  for test_path in "${choices_capability[@]}"; do
+    if [ -e "$repository_root/$test_path" ] || [ -L "$repository_root/$test_path" ]; then
+      choices_present=1
+      preparation_present=1
+      custody_present=1
+    fi
+  done
+  if [ -e "$repository_root/tests/test_registry_ptg_office_custody_postgres.py" ] ||
+     [ -L "$repository_root/tests/test_registry_ptg_office_custody_postgres.py" ]; then
+    custody_present=1
+  fi
+  for test_path in "${preparation_capability[@]}"; do
+    if [ -e "$repository_root/$test_path" ] || [ -L "$repository_root/$test_path" ]; then
+      preparation_present=1
+      custody_present=1
+    fi
+  done
+  if [ "$custody_present" = 1 ]; then
+    office_present=1
+    present=1
+  fi
   for test_path in "${office_capability[@]}"; do
     if [ -e "$repository_root/$test_path" ] || [ -L "$repository_root/$test_path" ]; then
       office_present=1
@@ -1304,6 +1368,27 @@ run_registry_ptg_scope_postgres() (
       registry_tests+=("$office_witness_test")
       capability+=("$office_witness_test")
     fi
+  fi
+  if [ "$custody_present" = 1 ]; then
+    require_native_source_files "${custody_capability[@]}" \
+      process/registry_ptg_published_provisioning.py \
+      tests/test_registry_management_permissions_postgres.py || return 1
+    capability+=("${custody_capability[@]}")
+    registry_tests+=(tests/test_registry_ptg_office_custody_postgres.py)
+  fi
+  if [ "$preparation_present" = 1 ]; then
+    require_native_source_files "${preparation_capability[@]}" \
+      process/registry_ptg_published_plan_scope.py process/registry_ptg_published_office_scope.py \
+      process/registry_ptg_office_review_contract.py tests/test_registry_site_membership_composition_postgres.py || return 1
+    capability+=("${preparation_capability[@]}")
+    registry_tests+=(tests/test_registry_ptg_office_preparation_postgres.py)
+  fi
+  if [ "$choices_present" = 1 ]; then
+    require_native_source_files "${choices_capability[@]}" \
+      api/control_registry_ptg_scope.py api/ptg2_v4_graph.py \
+      process/registry_ptg_graph_reader.py tests/test_ptg2_v4_graph.py || return 1
+    capability+=("${choices_capability[@]}")
+    registry_tests+=(tests/test_registry_ptg_office_choices_postgres.py)
   fi
   for test_path in "${capability[@]}"; do
     if [ ! -f "$repository_root/$test_path" ] || [ -L "$repository_root/$test_path" ]; then
