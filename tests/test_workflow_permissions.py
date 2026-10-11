@@ -46,9 +46,17 @@ class PublicWorkflowPermissions(unittest.TestCase):
         for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
             with self.subTest(workflow=path.name):
                 workflow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
+                recovery = path.name == "metadata-recovery.yml"
+                if recovery:
+                    self.assertEqual(workflow["on"].keys(), {"workflow_call"})
+                    self.assertEqual(workflow["permissions"], {
+                        "contents": "read", "pull-requests": "read", "actions": "write",
+                    })
                 for permissions in [workflow.get("permissions", {})] + [job.get("permissions", {}) for job in workflow.get("jobs", {}).values()]:
                     self.assertIsInstance(permissions, dict)
-                    self.assertTrue(all(value in ("read", "none") for value in permissions.values()))
+                    self.assertTrue(all(value in ("read", "none") or
+                                        recovery and key == "actions" and value == "write"
+                                        for key, value in permissions.items()))
                 for job in workflow.get("jobs", {}).values():
                     if "runs-on" in job:
                         self.assertEqual(job["runs-on"], "ubuntu-latest")
