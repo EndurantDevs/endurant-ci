@@ -167,9 +167,36 @@ run_quality() {
   ci_phase_end
 }
 
+company_group_native_test_paths() {
+  local capability=(
+    process/registry_approved_company_groups.py
+    alembic/versions/20261011010000_company_registry_group_assertions.py
+    tests/test_registry_approved_company_groups.py
+  )
+  local source_path present=0
+  for source_path in "${capability[@]}"; do
+    if [ -e "$repository_root/$source_path" ] || [ -L "$repository_root/$source_path" ]; then
+      present=1
+    fi
+  done
+  [ "$present" = 1 ] || return 0
+  require_native_source_files "${capability[@]}" \
+    db/models/company_registry_assertions.py process/company_registry_assertion_values.py \
+    alembic/versions/20261009020000_company_registry_assertions.py \
+    process/registry_record_store.py process/registry_approval_store.py \
+    process/registry_management_permissions.py tests/test_result_archive_published_authority_postgres.py \
+    tests/test_company_registry_assertions_postgres.py \
+    tests/test_company_registry_assertion_values.py tests/test_company_registry_assertion_store.py \
+    support/ptg2_scanner/src/lib.rs support/ptg2_scanner/src/company_group_assertions.rs || return 1
+  printf '%s\n' tests/test_company_registry_assertion_values.py \
+    tests/test_company_registry_assertion_store.py tests/test_registry_approved_company_groups.py
+}
+
 run_python_main() {
   local shard=${1:-}
   case "$shard" in 0|1|2|3) ;; *) usage ;; esac
+  local company_group_tests
+  company_group_tests=$(company_group_native_test_paths) || return 1
   if [ "${CI_DEPS_READY:-0}" = 1 ]; then
     prepare_debug_rust_binaries cargo build --locked --bins --manifest-path support/ptg2_scanner/Cargo.toml
   else
@@ -185,6 +212,9 @@ run_python_main() {
   mapfile -t capacity_tests <<< "$capacity_test_paths"
   local collection_args=()
   local test_path
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
+  done <<< "$company_group_tests"
   for test_path in "${capacity_tests[@]}"; do
     collection_args+=(--ignore "$test_path")
   done
@@ -1182,6 +1212,11 @@ run_network_registry_postgres() (
       process/registry_management_permissions.py tests/test_result_archive_published_authority_postgres.py || return 1
     registry_tests+=(tests/test_company_registry_assertions_postgres.py)
   fi
+  local company_group_tests
+  company_group_tests=$(company_group_native_test_paths) || return 1
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || registry_tests+=("$test_path")
+  done <<< "$company_group_tests"
   local completion_present=0
   local completion_capability=(
     process/registry_source_admission_receipt.py

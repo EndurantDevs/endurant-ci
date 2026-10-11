@@ -100,6 +100,16 @@ COMPANY_ASSERTION_DEPENDENCIES = (
     "process/registry_record_store.py", "process/registry_approval_store.py",
     "process/registry_management_permissions.py", "tests/test_result_archive_published_authority_postgres.py",
 )
+COMPANY_GROUP_CAPABILITY = (
+    "process/registry_approved_company_groups.py",
+    "alembic/versions/20261011010000_company_registry_group_assertions.py",
+    "tests/test_registry_approved_company_groups.py",
+)
+COMPANY_GROUP_HOST_TESTS = (*COMPANY_ASSERTION_CAPABILITY[3:5], COMPANY_GROUP_CAPABILITY[-1])
+COMPANY_GROUP_DEPENDENCIES = (
+    *COMPANY_ASSERTION_CAPABILITY, *COMPANY_ASSERTION_DEPENDENCIES,
+    "support/ptg2_scanner/src/lib.rs", "support/ptg2_scanner/src/company_group_assertions.rs",
+)
 REGISTRY_COMPLETION_CAPABILITY = (
     "process/registry_source_admission_receipt.py",
     "alembic/versions/20261010030000_registry_source_admission_receipt.py",
@@ -664,6 +674,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
         shard_members_by_kind = {}
         for kind, capability, dependencies in (
             ("company", COMPANY_ASSERTION_CAPABILITY, COMPANY_ASSERTION_DEPENDENCIES),
+            ("company-groups", COMPANY_GROUP_CAPABILITY, COMPANY_GROUP_DEPENDENCIES),
             ("completion", REGISTRY_COMPLETION_CAPABILITY, REGISTRY_COMPLETION_DEPENDENCIES),
             ("pricing", REGISTRY_PRICING_CAPABILITY, REGISTRY_PRICING_DEPENDENCIES),
             ("maintenance", PROFILE_MAINTENANCE_CAPABILITY, PROFILE_MAINTENANCE_DEPENDENCIES),
@@ -676,7 +687,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
             cases += [("complete", capability[0], stage, "") for stage in ("symlink", "dangling", "dirty", "untracked")]
             cases += [("complete", "", stage, "") for stage in (
                 "skipped", "empty", "missing-family", "invalid-report", "pytest", "drop", "report-cleanup")]
-            if kind in {"company", "completion", "pricing"}:
+            if kind in {"company", "company-groups", "completion", "pricing"}:
                 cases += [("complete", "", "", str(index)) for index in range(8)]
             else:
                 cases += [("complete", "", "", "publication")]
@@ -686,7 +697,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     source, runner, log = root / "source", root / "runner", root / "calls"
                     source.mkdir()
                     runner.mkdir()
-                    for path in registry_roster if kind in {"company", "completion", "pricing"} else ():
+                    for path in registry_roster if kind in {"company", "company-groups", "completion", "pricing"} else ():
                         target = source / path
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.touch()
@@ -702,7 +713,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     if stage in ("symlink", "dangling"):
                         target = source / changed
                         target.unlink()
-                        live = registry_roster[0] if kind in {"company", "completion", "pricing"} else dependencies[0]
+                        live = registry_roster[0] if kind in {"company", "company-groups", "completion", "pricing"} else dependencies[0]
                         target.symlink_to(source / (live if stage == "symlink" else "absent"))
                     timeout = root / "timeout"
                     timeout.write_text(f"#!{sys.executable}\n" + r'''
@@ -762,7 +773,7 @@ PYSHARD
   else command python3 "$@"; fi
 }
 '''
-                    call = (f"run_network_registry_postgres {shard}" if kind in {"company", "completion", "pricing"} else
+                    call = (f"run_network_registry_postgres {shard}" if kind in {"company", "company-groups", "completion", "pricing"} else
                             "run_provider_profile_postgres postgresql://synthetic/runtime_test profile-publication"
                             if shard == "publication" else "run_profile_control_maintenance_postgres")
                     if changed:
@@ -778,11 +789,11 @@ PYSHARD
                     if changed:
                         self.assertFalse(calls)
                     elif not stage:
-                        self.assertEqual(len(runs), int(kind in {"company", "completion", "pricing"} or layout == "complete"))
+                        self.assertEqual(len(runs), int(kind in {"company", "company-groups", "completion", "pricing"} or layout == "complete"))
                     for run in runs:
-                        if kind in {"company", "completion", "pricing"}:
+                        if kind in {"company", "company-groups", "completion", "pricing"}:
                             self.assertRegex(run["registry"], r"@127\.0\.0\.1:5440/hc_network_registry_[0-9a-f]{32}$")
-                            if layout == "complete" and kind == "company":
+                            if layout == "complete" and kind in {"company", "company-groups"}:
                                 self.assertEqual(run["map"], "1")
                                 self.assertEqual(run["migration"], run["registry"])
                             else:
@@ -794,7 +805,7 @@ PYSHARD
                             self.assertIsNone(run["schema_alias"])
                         if not shard:
                             self.assertEqual(capability[-1] in run["arguments"], layout == "complete")
-                    if kind in {"company", "completion", "pricing"} and shard and not stage:
+                    if kind in {"company", "company-groups", "completion", "pricing"} and shard and not stage:
                         shard_members.extend(json.loads((root / "selections").read_text()))
                     created = [c[7:] for c in calls if c.startswith("create:")]
                     dropped = [c[5:] for c in calls if c.startswith("drop:")]
@@ -806,12 +817,13 @@ PYSHARD
                     else:
                         self.assertFalse(leftovers)
             shard_members_by_kind[kind] = shard_members
-        for kind, extra in (("company", COMPANY_ASSERTION_CAPABILITY[-1]),
-                            ("completion", REGISTRY_COMPLETION_CAPABILITY[-1]),
-                            ("pricing", REGISTRY_PRICING_CAPABILITY[-1])):
+        for kind, extras in (("company", (COMPANY_ASSERTION_CAPABILITY[-1],)),
+                             ("company-groups", (COMPANY_ASSERTION_CAPABILITY[-1], *COMPANY_GROUP_HOST_TESTS)),
+                            ("completion", (REGISTRY_COMPLETION_CAPABILITY[-1],)),
+                            ("pricing", (REGISTRY_PRICING_CAPABILITY[-1],))):
             members = shard_members_by_kind[kind]
             self.assertEqual(len(members), len(set(members)))
-            self.assertCountEqual(members, (*registry_roster, extra))
+            self.assertCountEqual(members, (*registry_roster, *extras))
 
     def test_office_completion_routes_require_closed_source_and_complete_native_report(self):
         for family, capability, dependencies, expected_tests in (
@@ -970,6 +982,7 @@ run_registry_ptg_scope_postgres postgresql://synthetic/runtime_test
 
     def test_planfinder_decoder_uses_python_discovery(self):
         offline_paths = (
+            *COMPANY_ASSERTION_CAPABILITY[3:5],
             "tests/test_cms_planfinder_workbook_input.py",
             "tests/test_network_registry_cms_prepared_address_copy.py",
             "tests/test_provider_directory_cms_retained_native_layout.py",
@@ -1040,6 +1053,73 @@ for shard in 0 1 2 3; do run_python_main "$shard"; done
                     self.assertIn("--cov=process", arguments)
                 provenance_calls = [call for call in calls if "write-shard-provenance" in call]
                 self.assertEqual(len(provenance_calls), 4)
+
+    def test_company_group_modules_leave_python_discovery_only_with_closed_native_capability(self):
+        required = (*COMPANY_GROUP_CAPABILITY, *COMPANY_GROUP_DEPENDENCIES)
+        cases = [("legacy", "", ""), ("complete", "", "")]
+        cases += [("complete", path, "missing") for path in required]
+        cases += [("only", path, "") for path in COMPANY_GROUP_CAPABILITY]
+        cases += [("complete", path, stage) for path in COMPANY_GROUP_CAPABILITY
+                  for stage in ("symlink", "dangling", "dirty", "staged", "untracked")]
+        for layout, changed, stage in cases:
+            with self.subTest(layout=layout, changed=changed, stage=stage), tempfile.TemporaryDirectory() as temporary:
+                source, log = Path(temporary) / "source", Path(temporary) / "calls"
+                source.mkdir()
+                selected = (COMPANY_ASSERTION_CAPABILITY if layout == "legacy" else
+                            (changed,) if layout == "only" else required)
+                for name in selected:
+                    if name == changed and stage == "missing":
+                        continue
+                    path = source / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.touch()
+                if stage in {"symlink", "dangling"}:
+                    path = source / changed
+                    path.unlink()
+                    path.symlink_to(source / (COMPANY_ASSERTION_CAPABILITY[0] if stage == "symlink" else "absent"))
+                environment = {
+                    **os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                    "CI_DEPS_READY": "1", "COVERAGE_BASE_SHA": "a" * 40,
+                    "CALL_LOG": str(log), "CHANGED_PATH": changed, "FAIL_STAGE": stage,
+                }
+                script = CHECK_FUNCTIONS + r'''
+git() {
+  if [[ "$1" = -C ]]; then shift 2; fi
+  case "$1" in
+    diff)
+      [[ "${!#}" != "$CHANGED_PATH" ]] && return 0
+      [[ "$FAIL_STAGE" != dirty ]] || return 1
+      [[ "$FAIL_STAGE" != staged || " $* " != *" HEAD "* ]]
+      ;;
+    ls-files) [[ "$FAIL_STAGE" != untracked ]] || [[ "${!#}" != "$CHANGED_PATH" ]] ;;
+    *) return 99 ;;
+  esac
+}
+mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
+prepare_debug_rust_binaries() { printf 'build\n' >> "$CALL_LOG"; }
+python() { printf '%s\n' "$*" >> "$CALL_LOG"; }
+timeout() { shift 2; "$@"; }
+for shard in 0 1 2 3; do run_python_main "$shard" || exit 1; done
+'''
+                result = subprocess.run(["bash", "-euc", script], cwd=source, env=environment,
+                                        capture_output=True, text=True, timeout=30, check=False)
+                rejected = bool(changed)
+                self.assertEqual(result.returncode, int(rejected), result.stderr)
+                calls = [shlex.split(line) for line in log.read_text().splitlines()] if log.exists() else []
+                if rejected:
+                    self.assertFalse(calls)
+                    continue
+                runs = [arguments for arguments in calls if arguments[:2] == ["-m", "pytest"]]
+                self.assertEqual(len(runs), 4)
+                for shard, arguments in enumerate(runs):
+                    self.assertEqual(arguments[arguments.index("--ci-shard-index") + 1], str(shard))
+                    self.assertEqual(arguments[arguments.index("--ci-shard-count") + 1], "4")
+                    for path in COMPANY_GROUP_HOST_TESTS:
+                        self.assertEqual(arguments.count(path), int(layout == "complete"))
+                        if layout == "complete":
+                            self.assertEqual(arguments[arguments.index(path) - 1], "--ignore")
+                    self.assertNotIn("-k", arguments)
+                    self.assertNotIn("-m", arguments[2:])
 
     def test_completed_coverage_compacts_before_provenance_and_failure_stops_publication(self):
         for producer in ("run_python_main 0", "run_capacity", "run_postgres core-services"):
@@ -2963,7 +3043,7 @@ RUNTIME_BASE_IMAGE=synthetic
                 for name in files:
                     script += (f'\noutput=$(artifact_path {shlex.quote(name)})\n'
                                'mkdir -p "$(dirname "$output")"\nprintf synthetic > "$output"\n')
-            subprocess.run(["bash", "-euc", script], cwd=source, env=env, check=True)
+            subprocess.run(["bash", "-eus"], input=script, text=True, cwd=source, env=env, check=True)
             for upload in uploads:
                 self.assertTrue(Path(upload.replace("${{ runner.temp }}", str(runner))).exists())
             self.assertEqual(len(freezes), 23)
