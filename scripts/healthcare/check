@@ -254,6 +254,13 @@ run_python_main() {
     tests/test_registry_ptg_scope_engine_postgres.py \
     tests/test_registry_ptg_office_capture_postgres.py \
     tests/test_registry_ptg_office_witness_postgres.py \
+    tests/test_registry_ptg_office_custody_postgres.py \
+    tests/test_registry_ptg_office_preparation_postgres.py \
+    tests/test_registry_ptg_office_choices_postgres.py \
+    tests/test_registry_ptg_office_intent_postgres.py \
+    tests/test_registry_ptg_office_coordinator_postgres.py \
+    tests/test_registry_publication_permissions_postgres.py \
+    tests/test_registry_ptg_office_intent_runtime_postgres.py \
     tests/test_company_registry_assertions_postgres.py \
     tests/test_provider_directory_profile_control_maintenance_postgres.py; do
     if [ -f "$repository_root/$test_path" ]; then
@@ -1258,6 +1265,7 @@ run_registry_ptg_scope_postgres() (
   # Measure bootstrap phases without closing the caller's database phase.
   ci_phase_name=''
   local test_path present=0 office_present=0 office_witness_present=0 custody_present=0 preparation_present=0 choices_present=0
+  local source_reviews_present=0 coordinator_present=0
   local office_witness_test=tests/test_registry_ptg_office_witness_postgres.py
   local registry_tests=(
     tests/test_registry_ptg_graph_reader_postgres.py
@@ -1292,6 +1300,48 @@ run_registry_ptg_scope_postgres() (
     tests/test_registry_ptg_office_choices.py
     tests/test_registry_ptg_office_choices_postgres.py
   )
+  local source_reviews_capability=(
+    process/registry_ptg_source_reviews.py
+    tests/test_registry_ptg_source_reviews.py
+    tests/test_registry_ptg_source_reviews_transport.py
+  )
+  local source_reviews_dependencies=(
+    process/registry_ptg_published_plan_contract.py
+    process/registry_ptg_published_plan_scope.py
+    process/registry_ptg_published_plan_source.py
+    process/registry_ptg_published_provisioning.py
+    api/control_registry_ptg_scope.py
+    tests/test_registry_ptg_published_source.py
+  )
+  local coordinator_capability=(
+    process/registry_ptg_office_intent.py
+    process/registry_ptg_office_intent_view.py
+    process/registry_ptg_office_coordinator.py
+    process/registry_publication_permissions.py
+    tests/test_registry_ptg_office_intent.py
+    tests/test_registry_ptg_office_intent_view.py
+    tests/test_registry_ptg_office_intent_runtime.py
+    tests/test_registry_ptg_office_coordinator.py
+    tests/test_registry_publication_permissions.py
+    tests/test_registry_ptg_office_intent_postgres.py
+    tests/test_registry_ptg_office_coordinator_postgres.py
+    tests/test_registry_publication_permissions_postgres.py
+    tests/test_registry_ptg_office_intent_runtime_postgres.py
+  )
+  for test_path in "${coordinator_capability[@]}"; do
+    if [ -e "$repository_root/$test_path" ] || [ -L "$repository_root/$test_path" ]; then
+      coordinator_present=1
+      source_reviews_present=1
+      preparation_present=1
+      custody_present=1
+    fi
+  done
+  for test_path in "${source_reviews_capability[@]}"; do
+    if [ -e "$repository_root/$test_path" ] || [ -L "$repository_root/$test_path" ]; then
+      source_reviews_present=1
+      present=1
+    fi
+  done
   for test_path in "${choices_capability[@]}"; do
     if [ -e "$repository_root/$test_path" ] || [ -L "$repository_root/$test_path" ]; then
       choices_present=1
@@ -1389,6 +1439,23 @@ run_registry_ptg_scope_postgres() (
       process/registry_ptg_graph_reader.py tests/test_ptg2_v4_graph.py || return 1
     capability+=("${choices_capability[@]}")
     registry_tests+=(tests/test_registry_ptg_office_choices_postgres.py)
+  fi
+  if [ "$source_reviews_present" = 1 ]; then
+    require_native_source_files "${source_reviews_capability[@]}" "${source_reviews_dependencies[@]}" || return 1
+    capability+=("${source_reviews_capability[@]}" "${source_reviews_dependencies[@]}")
+  fi
+  if [ "$coordinator_present" = 1 ]; then
+    require_native_source_files "${coordinator_capability[@]}" \
+      process/registry_publication_queue.py process/registry_management_permissions.py \
+      db/models/registry_publication_request.py \
+      tests/test_manual_provider_identity_store_postgres.py || return 1
+    capability+=("${coordinator_capability[@]}")
+    registry_tests+=(
+      tests/test_registry_ptg_office_intent_postgres.py
+      tests/test_registry_ptg_office_coordinator_postgres.py
+      tests/test_registry_publication_permissions_postgres.py
+      tests/test_registry_ptg_office_intent_runtime_postgres.py
+    )
   fi
   for test_path in "${capability[@]}"; do
     if [ ! -f "$repository_root/$test_path" ] || [ -L "$repository_root/$test_path" ]; then
