@@ -1202,6 +1202,18 @@ run_network_registry_postgres() (
       tests/test_network_serving_schema_postgres.py || return 1
     registry_tests+=(tests/test_registry_source_admission_receipt_postgres.py)
   fi
+  local pricing_test=tests/test_pricing_canonical_network_claims_postgres.py
+  if [ -e "$repository_root/$pricing_test" ] || [ -L "$repository_root/$pricing_test" ]; then
+    require_native_source_files "$pricing_test" \
+      api/endpoint/pricing.py api/provider_service_scope.py api/network_address_scope.py \
+      api/network_provider_read.py process/network_serving_read.py \
+      tests/test_pricing_canonical_network_claims.py tests/test_pricing_procedure_fast_path.py tests/test_pricing_api.py \
+      tests/test_network_address_projection_postgres.py tests/test_network_membership_candidate_indexes_postgres.py \
+      tests/test_network_membership_publication_postgres.py tests/test_network_membership_serving_indexes_postgres.py \
+      tests/test_network_membership_validation_postgres.py tests/test_network_serving_routes_postgres.py \
+      tests/test_network_serving_schema_postgres.py || return 1
+    registry_tests+=("$pricing_test")
+  fi
   local feature_present=$company_present
   [ "$completion_present" != 1 ] || feature_present=1
   [ ! -f "$repository_root/db/models/network_registry.py" ] || feature_present=1
