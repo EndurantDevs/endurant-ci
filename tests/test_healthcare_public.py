@@ -423,9 +423,9 @@ class HealthcarePublicChecks(unittest.TestCase):
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         setup = next(step for step in workflow["jobs"]["address-canonical-db-tests"]["steps"]
                      if step["name"] == "Prepare source and toolchain")
-        self.assertEqual(setup["with"], {"rust": "${{ matrix.shard == 'core-services' || matrix.shard == 'core-ptg' || matrix.shard == 'directory-source' || startsWith(matrix.shard, 'registry-') }}"})
+        self.assertEqual(setup["with"], {"rust": "${{ matrix.shard == 'core-services' || matrix.shard == 'core-snapshots' || matrix.shard == 'core-ptg' || matrix.shard == 'directory-source' || startsWith(matrix.shard, 'registry-') }}"})
         cases = [(lane, "", "") for lane in (
-            "core-services", "core", "core-imports", "core-ptg", "directory-source", "directory-storage",
+            "core-services", "core", "core-imports", "core-snapshots", "core-ptg", "directory-source", "directory-storage",
             "directory-address", "profile-storage", "profile-publication",
             *(f"registry-{index}" for index in range(8)),
         )]
@@ -2952,7 +2952,7 @@ RUNTIME_BASE_IMAGE=synthetic
                             uploads.extend(line.strip().replace("${{ matrix.shard }}", row.get("shard", ""))
                                            for line in step["with"]["path"].splitlines() if line.strip())
                             freezes.append(validation[validation.index("git diff --exit-code"):])
-            self.assertEqual(len(uploads), 43)  # Twenty-one Python pairs plus the Rust directory.
+            self.assertEqual(len(uploads), 45)  # Twenty-two Python pairs plus the Rust directory.
             script = CHECK_FUNCTIONS
             for upload in uploads:
                 prefix = "${{ runner.temp }}/healthcare-artifacts/"
@@ -2966,7 +2966,7 @@ RUNTIME_BASE_IMAGE=synthetic
             subprocess.run(["bash", "-euc", script], cwd=source, env=env, check=True)
             for upload in uploads:
                 self.assertTrue(Path(upload.replace("${{ runner.temp }}", str(runner))).exists())
-            self.assertEqual(len(freezes), 22)
+            self.assertEqual(len(freezes), 23)
             self.assertEqual(len(set(freezes)), 1)
             def freeze():
                 return subprocess.run(["bash", "-euc", freezes[0]], cwd=source, capture_output=True).returncode
@@ -3436,12 +3436,13 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_build_counts_postgres.py",
             "tests/test_custom_import_bulk_cutover_reads_postgres.py",
         )
-        test_groups = (lifecycle_test_paths, materialization_test_paths, capture_test_paths, build_test_paths,
-                       operator_test_paths, (installed_test_path,), family_test_paths, snapshot_test_paths, bulk_test_paths)
-        groups_by_lane = {"core-imports": test_groups[:2] + test_groups[3:5],
-                          "core-services": (capture_test_paths,), "core-ptg": test_groups[5:], "all": test_groups}
+        test_groups = (lifecycle_test_paths, materialization_test_paths, capture_test_paths,
+                       build_test_paths[:3], build_test_paths[3:], operator_test_paths, (installed_test_path,), family_test_paths, snapshot_test_paths, bulk_test_paths)
+        groups_by_lane = {"core-imports": test_groups[:2] + test_groups[3:6],
+                          "core-services": (capture_test_paths,), "core-snapshots": test_groups[6:],
+                          "core-ptg": (), "all": test_groups}
         required_by_lane = {"core-imports": (), "core-services": required_test_paths[:1],
-                            "core-ptg": family_test_paths, "all": required_test_paths}
+                            "core-snapshots": family_test_paths, "core-ptg": (), "all": required_test_paths}
         historical_tail_paths = (
             "tests/test_cms_doctors_archive_postgres.py",
             "tests/test_tiger_result_archive_postgres.py",
@@ -3461,10 +3462,10 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
         present_path_sets = ((), *((path,) for path in optional_test_paths),
                              optional_capture_paths, optional_build_paths, legacy_optional_paths, optional_test_paths)
         cases = [(lane, (*required_by_lane[lane], *paths), "", "")
-                 for lane in ("core-imports", "core-services", "core-ptg") for paths in present_path_sets]
+                 for lane in ("core-imports", "core-services", "core-snapshots", "core-ptg") for paths in present_path_sets]
         cases += [(lane, test_paths, group[0], "")
                   for lane, groups in groups_by_lane.items() for group in groups]
-        cases += [(lane, test_paths, family_test_paths[1], "") for lane in ("core-ptg", "all")]
+        cases += [(lane, test_paths, family_test_paths[1], "") for lane in ("core-snapshots", "all")]
         cases += [(lane, tuple(path for path in required if path != missing), "", missing)
                   for lane, required in required_by_lane.items() for missing in required]
         cases += [(lane, test_paths, "", "") for lane in ("core-services", "all")]

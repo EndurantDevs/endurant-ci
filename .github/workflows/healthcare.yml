@@ -477,7 +477,7 @@ jobs:
     - name: Prepare source and toolchain
       uses: ./ci/scripts/healthcare/setup
       with:
-        rust: ${{ matrix.shard == 'core-services' || matrix.shard == 'core-ptg' || matrix.shard == 'directory-source' || startsWith(matrix.shard, 'registry-') }}
+        rust: ${{ matrix.shard == 'core-services' || matrix.shard == 'core-snapshots' || matrix.shard == 'core-ptg' || matrix.shard == 'directory-source' || startsWith(matrix.shard, 'registry-') }}
     - name: Install PostgreSQL client
       run: |
         sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update -qq
@@ -540,6 +540,7 @@ jobs:
     outputs:
       artifact_core_services: ${{ steps.coverage-output.outputs.artifact_core_services }}
       artifact_core_imports: ${{ steps.coverage-output.outputs.artifact_core_imports }}
+      artifact_core_snapshots: ${{ steps.coverage-output.outputs.artifact_core_snapshots }}
       artifact_core_ptg: ${{ steps.coverage-output.outputs.artifact_core_ptg }}
       artifact_registry_0: ${{ steps.coverage-output.outputs.artifact_registry_0 }}
       artifact_registry_1: ${{ steps.coverage-output.outputs.artifact_registry_1 }}
@@ -564,6 +565,9 @@ jobs:
         - shard: core-imports
           label: Database tests (imports)
           output: artifact_core_imports
+        - shard: core-snapshots
+          label: Database tests (snapshot imports)
+          output: artifact_core_snapshots
         - shard: core-ptg
           label: Database tests (PTG)
           output: artifact_core_ptg
@@ -653,7 +657,7 @@ jobs:
         artifact-ids: ${{ needs.python-tests.outputs.artifact_0 }},${{ needs.python-tests.outputs.artifact_1 }},${{ needs.python-tests.outputs.artifact_2
           }},${{ needs.python-tests.outputs.artifact_3 }},${{ needs.capacity-evidence.outputs.artifact_id }},${{ needs.rust-scanner.outputs.artifact_id
           }},${{ needs.address-canonical-db-tests.outputs.artifact_core_services }},${{ needs.address-canonical-db-tests.outputs.artifact_core_imports
-          }},${{ needs.address-canonical-db-tests.outputs.artifact_core_ptg }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_0 }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_1
+          }},${{ needs.address-canonical-db-tests.outputs.artifact_core_snapshots }},${{ needs.address-canonical-db-tests.outputs.artifact_core_ptg }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_0 }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_1
           }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_2
           }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_3
           }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_4
