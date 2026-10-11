@@ -2196,10 +2196,11 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_build_counts_postgres.py",
             "tests/test_custom_import_bulk_cutover_reads_postgres.py",
         )
-        test_groups = (lifecycle_test_paths, materialization_test_paths, capture_test_paths, build_test_paths,
+        test_groups = (lifecycle_test_paths, materialization_test_paths, capture_test_paths,
+                       build_test_paths[:3], build_test_paths[3:],
                        operator_test_paths, (installed_test_path,), family_test_paths, snapshot_test_paths, bulk_test_paths)
-        groups_by_lane = {"core-imports": test_groups[:2] + test_groups[3:5],
-                          "core-services": (capture_test_paths,), "core-ptg": test_groups[5:], "all": test_groups}
+        groups_by_lane = {"core-imports": test_groups[:2] + test_groups[3:6],
+                          "core-services": (capture_test_paths,), "core-ptg": test_groups[6:], "all": test_groups}
         required_by_lane = {"core-imports": (), "core-services": required_test_paths[:1],
                             "core-ptg": family_test_paths, "all": required_test_paths}
         historical_tail_paths = (
