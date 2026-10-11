@@ -3517,9 +3517,9 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_bulk_cutover_reads_postgres.py",
         )
         test_groups = (lifecycle_test_paths, materialization_test_paths, capture_test_paths,
-                       build_test_paths[:3], build_test_paths[3:], operator_test_paths, (installed_test_path,), family_test_paths, snapshot_test_paths, bulk_test_paths)
-        groups_by_lane = {"core-imports": test_groups[:2] + test_groups[3:6],
-                          "core-services": (capture_test_paths,), "core-snapshots": test_groups[6:],
+                       build_test_paths[:3], operator_test_paths, build_test_paths[3:], (installed_test_path,), family_test_paths, snapshot_test_paths, bulk_test_paths)
+        groups_by_lane = {"core-imports": test_groups[:2] + test_groups[3:5],
+                          "core-services": (capture_test_paths,), "core-snapshots": test_groups[5:],
                           "core-ptg": (), "all": test_groups}
         required_by_lane = {"core-imports": (), "core-services": required_test_paths[:1],
                             "core-snapshots": family_test_paths, "core-ptg": (), "all": required_test_paths}
@@ -3546,8 +3546,11 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
         cases += [(lane, test_paths, group[0], "")
                   for lane, groups in groups_by_lane.items() for group in groups]
         cases += [(lane, test_paths, family_test_paths[1], "") for lane in ("core-snapshots", "all")]
+        cases += [(lane, test_paths, build_test_paths[-1], "") for lane in ("core-snapshots", "all")]
         cases += [(lane, tuple(path for path in required if path != missing), "", missing)
                   for lane, required in required_by_lane.items() for missing in required]
+        cases += [("core-snapshots", tuple(path for path in family_test_paths if path != missing)
+                   + build_test_paths[3:], "", missing) for missing in family_test_paths]
         cases += [(lane, test_paths, "", "") for lane in ("core-services", "all")]
         cases += [("all", required_test_paths, "", "")]
         for lane, present_paths, failure_path, missing_path in cases:
@@ -3602,6 +3605,9 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                 self.assertEqual(result.returncode, 1 if missing_path else (17 if failure_path else 0), result.stderr)
                 if missing_path:
                     self.assertIn(f"Missing required native import test: {missing_path}", result.stderr)
+                    if lane == "core-snapshots":
+                        self.assertFalse(any(call.startswith("hc_custom_import_test_")
+                                             for call in call_log.read_text().splitlines()))
                     continue
                 calls = call_log.read_text().splitlines()
                 main_call = next(call for call in calls if "--ci-shard-count 4" in call)
