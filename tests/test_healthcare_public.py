@@ -136,6 +136,33 @@ REGISTRY_OFFICE_NEW_DEPENDENCIES = (
     "process/registry_ptg_office_review_contract.py", "tests/test_registry_site_membership_composition_postgres.py",
 )
 
+
+REGISTRY_SOURCE_REVIEWS_CAPABILITY = (
+    "process/registry_ptg_source_reviews.py", "tests/test_registry_ptg_source_reviews.py",
+    "tests/test_registry_ptg_source_reviews_transport.py",
+)
+REGISTRY_SOURCE_REVIEWS_DEPENDENCIES = (
+    "process/registry_ptg_published_plan_contract.py", "process/registry_ptg_published_plan_scope.py",
+    "process/registry_ptg_published_plan_source.py", "process/registry_ptg_published_provisioning.py",
+    "api/control_registry_ptg_scope.py", "tests/test_registry_ptg_published_source.py",
+)
+REGISTRY_OFFICE_COORDINATOR_CAPABILITY = (
+    "process/registry_ptg_office_intent.py", "process/registry_ptg_office_intent_view.py",
+    "process/registry_ptg_office_coordinator.py", "process/registry_publication_permissions.py",
+    "tests/test_registry_ptg_office_intent.py", "tests/test_registry_ptg_office_intent_view.py",
+    "tests/test_registry_ptg_office_intent_runtime.py", "tests/test_registry_ptg_office_coordinator.py",
+    "tests/test_registry_publication_permissions.py", "tests/test_registry_ptg_office_intent_postgres.py",
+    "tests/test_registry_ptg_office_coordinator_postgres.py", "tests/test_registry_publication_permissions_postgres.py",
+    "tests/test_registry_ptg_office_intent_runtime_postgres.py",
+)
+REGISTRY_OFFICE_COORDINATOR_DEPENDENCIES = (
+    *REGISTRY_OFFICE_CUSTODY_CAPABILITY, *REGISTRY_OFFICE_PREPARATION_CAPABILITY,
+    *REGISTRY_OFFICE_NEW_DEPENDENCIES, *REGISTRY_SOURCE_REVIEWS_CAPABILITY, *REGISTRY_SOURCE_REVIEWS_DEPENDENCIES,
+    "process/registry_publication_queue.py", "process/registry_management_permissions.py",
+    "db/models/registry_publication_request.py",
+    "tests/test_manual_provider_identity_store_postgres.py",
+)
+
 PROFILE_MAINTENANCE_CAPABILITY = (
     "process/provider_directory_profile_control_maintenance.py",
     "tests/test_provider_directory_profile_control_maintenance.py",
@@ -786,13 +813,24 @@ PYSHARD
               *REGISTRY_OFFICE_NEW_DEPENDENCIES, *REGISTRY_OFFICE_CHOICES_DEPENDENCIES),
              (*REGISTRY_PTG_SCOPE_TESTS, REGISTRY_PTG_OFFICE_TEST, REGISTRY_OFFICE_CUSTODY_CAPABILITY[-1],
               REGISTRY_OFFICE_PREPARATION_CAPABILITY[-1], REGISTRY_OFFICE_CHOICES_CAPABILITY[-1])),
+            ("source-reviews", REGISTRY_SOURCE_REVIEWS_CAPABILITY, REGISTRY_SOURCE_REVIEWS_DEPENDENCIES,
+             (*REGISTRY_PTG_SCOPE_TESTS, REGISTRY_PTG_OFFICE_TEST)),
+            ("coordinator", REGISTRY_OFFICE_COORDINATOR_CAPABILITY, REGISTRY_OFFICE_COORDINATOR_DEPENDENCIES,
+             (*REGISTRY_PTG_SCOPE_TESTS, REGISTRY_PTG_OFFICE_TEST, REGISTRY_OFFICE_CUSTODY_CAPABILITY[-1],
+              REGISTRY_OFFICE_PREPARATION_CAPABILITY[-1], *REGISTRY_OFFICE_COORDINATOR_CAPABILITY[-4:])),
         ):
             cases = [("complete", "", ""), ("legacy", "", "")]
+            if family == "coordinator":
+                cases += [("complete-choices", "", "")]
+                cases += [("complete", "", "missing-family:" + path)
+                          for path in REGISTRY_OFFICE_COORDINATOR_CAPABILITY[-4:]]
             missing_paths = (*capability[:-1], *dependencies) if family == "custody" else (*capability, *dependencies)
             cases += [("complete", path, "missing") for path in missing_paths]
             triggers = capability if family != "custody" else capability[-1:]
             cases += [("only", path, "") for path in triggers]
-            changed_paths = capability if family == "choices" else capability[-1:]
+            changed_paths = (*capability, *dependencies) if family in {"source-reviews", "coordinator"} else (
+                capability if family == "choices" else capability[-1:]
+            )
             cases += [("complete", path, stage) for path in changed_paths for stage in
                       ("symlink", "dangling", "dirty", "untracked", "staged")]
             cases += [("complete", "", stage) for stage in
@@ -806,7 +844,10 @@ PYSHARD
                     if layout == "legacy":
                         selected += REGISTRY_OFFICE_CUSTODY_CAPABILITY[:-1]
                         if family == "choices": selected += dependencies
-                    if layout == "complete": selected += (*capability, *dependencies)
+                    if layout.startswith("complete"):
+                        selected += (*capability, *dependencies)
+                    if layout == "complete-choices":
+                        selected += (*REGISTRY_OFFICE_CHOICES_CAPABILITY, *REGISTRY_OFFICE_CHOICES_DEPENDENCIES)
                     if layout == "only": selected += (changed,)
                     for name in selected:
                         if name == changed and stage == "missing": continue
@@ -818,7 +859,7 @@ PYSHARD
                     environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
                                    "SOURCE_SHA": "a" * 40, "RUNNER_TEMP": str(runner), "CALL_LOG": str(log),
                                    "FAIL_STAGE": stage, "CHANGED_PATH": changed,
-                                   "NEW_NATIVE_TEST": capability[-1]}
+                                   "NEW_NATIVE_TEST": REGISTRY_PTG_SCOPE_TESTS[1] if family == "source-reviews" else capability[-1]}
                     script = CHECK_FUNCTIONS + r'''
 git() {
   if [[ "$1" = -C ]]; then shift 2; fi
@@ -841,6 +882,7 @@ import os, pathlib, sys, xml.etree.ElementTree as ET
 args=sys.argv[1:]; modules=[a for a in args if a.startswith('tests/') and a.endswith('.py')]
 stage=os.environ['FAIL_STAGE']; required=os.environ['NEW_NATIVE_TEST']
 if stage=='missing-family': modules.remove(required)
+if stage.startswith('missing-family:'): modules.remove(stage.split(':',1)[1])
 if stage=='duplicate': modules.append(required)
 report=ET.Element('testsuites'); suite=ET.SubElement(report,'testsuite',tests=str(len(modules)),skipped='0',errors='0',failures='0')
 for module in modules:
@@ -867,7 +909,11 @@ run_registry_ptg_scope_postgres postgresql://synthetic/runtime_test
                         actual = [arg for arg in arguments if arg.startswith("tests/") and arg.endswith(".py")]
                         legacy_tests = (expected_tests[:-1] if family == "choices" else
                                         (*REGISTRY_PTG_SCOPE_TESTS, REGISTRY_PTG_OFFICE_TEST))
-                        self.assertEqual(actual, list(expected_tests if layout == "complete" else legacy_tests))
+                        selected_tests = expected_tests
+                        if layout == "complete-choices":
+                            selected_tests = (*expected_tests[:-4], REGISTRY_OFFICE_CHOICES_CAPABILITY[-1],
+                                              *expected_tests[-4:])
+                        self.assertEqual(actual, list(selected_tests if layout.startswith("complete") else legacy_tests))
                         self.assertEqual(len(actual), len(set(actual)))
                     leftovers = list(runner.iterdir())
                     if stage == "cleanup":
@@ -904,6 +950,9 @@ run_registry_ptg_scope_postgres postgresql://synthetic/runtime_test
             "tests/test_registry_company_approval_fence.py",
             "tests/test_registry_ptg_office_capture.py",
             "tests/test_registry_ptg_office_witness.py",
+            *REGISTRY_SOURCE_REVIEWS_CAPABILITY[1:],
+            *(path for path in REGISTRY_OFFICE_COORDINATOR_CAPABILITY
+              if path.startswith("tests/") and not path.endswith("_postgres.py")),
         )
         native_paths = (
             *REGISTRY_SOURCE_CUSTODY_TESTS, *REGISTRY_REQUIRED_TARGET_TESTS, REGISTRY_ADDRESS_EQUIVALENCE_TEST,
@@ -912,6 +961,8 @@ run_registry_ptg_scope_postgres postgresql://synthetic/runtime_test
             "tests/test_registry_ptg_scope_engine_postgres.py",
             REGISTRY_PTG_OFFICE_TEST,
             REGISTRY_PTG_OFFICE_WITNESS_TEST,
+            REGISTRY_OFFICE_CUSTODY_CAPABILITY[-1], REGISTRY_OFFICE_PREPARATION_CAPABILITY[-1],
+            REGISTRY_OFFICE_CHOICES_CAPABILITY[-1], *REGISTRY_OFFICE_COORDINATOR_CAPABILITY[-4:],
             COMPANY_ASSERTION_CAPABILITY[-1], PROFILE_MAINTENANCE_CAPABILITY[-1],
         )
         for present in (False, True):
