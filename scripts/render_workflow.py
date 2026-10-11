@@ -174,10 +174,51 @@ def render_workflow(kind, revision, caller):
     return "# Generated from the pinned Endurance CI workflow; refresh with scripts/render_workflow.py.\n" + yaml.safe_dump(workflow, sort_keys=False, width=120)
 
 
+def render_metadata_recovery(kind, revision):
+    if kind not in {"healthcare", "drug"} or not re.fullmatch(r"[0-9a-f]{40}", revision) or set(revision) == {"0"}:
+        raise ValueError("an approved workflow kind and exact nonzero package revision are required")
+    eligible = ("github.event.workflow_run.event == 'pull_request' && "
+                "github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.display_title == 'CI' && "
+                "github.event.workflow_run.name == 'CI' && github.event.workflow_run.path == '.github/workflows/ci.yml' && "
+                "github.event.workflow_run.pull_requests[0].number > 0 && !github.event.workflow_run.pull_requests[1] && "
+                "github.event.workflow_run.workflow_id > 0 && "
+                "github.event.workflow_run.repository.full_name == github.repository && "
+                "github.event.workflow_run.head_repository.full_name == github.repository && "
+                "github.event.workflow_run.head_sha && "
+                "github.event.workflow_run.head_sha == github.event.workflow_run.pull_requests[0].head.sha && "
+                "github.event.workflow_run.pull_requests[0].base.sha && "
+                "(github.event.workflow_run.pull_requests[0].base.ref == 'main' || "
+                "github.event.workflow_run.pull_requests[0].base.ref == 'dev')")
+    workflow = {
+        "name": "Metadata validation recovery",
+        "on": {"workflow_run": {"workflows": ["CI"], "types": ["completed"]}},
+        "permissions": {"contents": "read", "pull-requests": "read", "actions": "write"},
+        "concurrency": {
+            "group": "metadata-recovery-${{ " + eligible + " && format('{0}-{1}-{2}-{3}-{4}', "
+                     "github.event.workflow_run.pull_requests[0].number, github.event.workflow_run.head_sha, "
+                     "github.event.workflow_run.pull_requests[0].base.sha, "
+                     "github.event.workflow_run.pull_requests[0].base.ref, github.event.workflow_run.workflow_id)"
+                     " || format('skip-{0}', github.event.workflow_run.id) }}",
+            "cancel-in-progress": False,
+        },
+        "jobs": {"recover": {
+            "if": "${{ " + eligible + " }}",
+            "uses": "EndurantDevs/endurant-ci/.github/workflows/metadata-recovery.yml@" + revision,
+            "with": {"ci_revision": revision, "kind": kind},
+        }},
+    }
+    return "# Generated from the pinned metadata recovery helper.\n" + yaml.safe_dump(workflow, sort_keys=False, width=120)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("kind", choices=("healthcare", "drug"))
     parser.add_argument("revision")
     parser.add_argument("caller", type=Path)
+    parser.add_argument("--metadata-recovery", action="store_true",
+                        help="write only the trusted sibling metadata-recovery.yml workflow")
     args = parser.parse_args()
-    args.caller.write_text(render_workflow(args.kind, args.revision, args.caller))
+    if args.metadata_recovery:
+        args.caller.with_name("metadata-recovery.yml").write_text(render_metadata_recovery(args.kind, args.revision))
+    else:
+        args.caller.write_text(render_workflow(args.kind, args.revision, args.caller))

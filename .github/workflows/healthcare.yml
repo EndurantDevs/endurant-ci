@@ -729,11 +729,13 @@ jobs:
           case "$validation_state" in
             success) exit 0 ;;
             failed)
+              printf 'METADATA_VALIDATION_DEPENDENCY_FAILED source=%s base=%s\n' "$SOURCE_SHA" "$BASE_SHA" >&2
               printf 'No successful full validation exists for source %s at base %s.\n' "$SOURCE_SHA" "$BASE_SHA" >&2
               exit 1
               ;;
             pending)
               if (( SECONDS >= deadline )); then
+                printf 'METADATA_VALIDATION_DEPENDENCY_FAILED source=%s base=%s\n' "$SOURCE_SHA" "$BASE_SHA" >&2
                 printf 'Timed out waiting for full validation of source %s at base %s.\n' "$SOURCE_SHA" "$BASE_SHA" >&2
                 exit 1
               fi

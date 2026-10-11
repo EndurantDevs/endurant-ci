@@ -282,11 +282,13 @@ class RenderWorkflowChecks(unittest.TestCase):
             "  case \"$validation_state\" in\n"
             "    success) exit 0 ;;\n"
             "    failed)\n"
+            "      printf 'METADATA_VALIDATION_DEPENDENCY_FAILED source=%s base=%s\\n' \"$SOURCE_SHA\" \"$BASE_SHA\" >&2\n"
             "      printf 'No successful full validation exists for source %s at base %s.\\n' \"$SOURCE_SHA\" \"$BASE_SHA\" >&2\n"
             "      exit 1\n"
             "      ;;\n"
             "    pending)\n"
             "      if (( SECONDS >= deadline )); then\n"
+            "        printf 'METADATA_VALIDATION_DEPENDENCY_FAILED source=%s base=%s\\n' \"$SOURCE_SHA\" \"$BASE_SHA\" >&2\n"
             "        printf 'Timed out waiting for full validation of source %s at base %s.\\n' \"$SOURCE_SHA\" \"$BASE_SHA\" >&2\n"
             "        exit 1\n"
             "      fi\n"
@@ -437,6 +439,7 @@ class RenderWorkflowChecks(unittest.TestCase):
                         )
                         self.assertEqual(result.returncode, 0 if results == ["success"] else 1, result.stderr)
                         self.assertFalse(counter.exists(), "full validation must use its own dependency result")
+                        self.assertNotIn("METADATA_VALIDATION_DEPENDENCY_FAILED", result.stderr)
                 for label, failure, runs, expected_status, expected_calls in scenarios:
                     with self.subTest(kind=kind, scenario=label):
                         counter.unlink(missing_ok=True)
@@ -449,6 +452,8 @@ class RenderWorkflowChecks(unittest.TestCase):
                         )
                         self.assertEqual(result.returncode, expected_status, result.stderr)
                         self.assertEqual(counter.read_text(), expected_calls)
+                        marker = "METADATA_VALIDATION_DEPENDENCY_FAILED source=source base=base"
+                        self.assertEqual(marker in result.stderr, expected_status == 1)
 
     def test_revision_and_job_labels_cannot_inject_expressions(self):
         for label in ("${{ inputs.name }}", "bad' || true || '"):
