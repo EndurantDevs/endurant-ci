@@ -90,6 +90,18 @@ REGISTRY_PTG_OFFICE_CAPABILITY = (
     "tests/test_registry_candidate_composition_postgres.py",
     "tests/test_registry_retained_site_adoption_postgres.py",
 )
+MANUAL_SOURCE_SWAP_CAPABILITY = (
+    "tests/registry_manual_source_swap_fixture.py",
+    "tests/test_registry_manual_source_swap_postgres.py",
+)
+MANUAL_SOURCE_SWAP_DEPENDENCIES = (
+    "tests/test_company_registry_assertions_postgres.py",
+    "tests/reference_family_generation_fixture.py",
+    "tests/test_reference_family_result_generation_postgres.py",
+    "process/initial.py", "process/attributes.py", "process/ext/utils.py",
+    "process/reference_family_result_generation.py", "db/connection.py", "db/models/_legacy.py",
+)
+
 COMPANY_ASSERTION_CAPABILITY = (
     "db/models/company_registry_assertions.py", "process/company_registry_assertion_values.py",
     "alembic/versions/20261009020000_company_registry_assertions.py",
@@ -591,7 +603,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     "ROUTE_LANE": lane, "FAIL_STAGE": failure,
                     "NETWORK_REGISTRY_TEST_DSN": "", "HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN": "",
                 }
-                result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True, check=False)
+                result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True, check=False)
                 selected = (lane == "core" or lane.startswith("registry-")) and (missing != "all" or lane.startswith("registry-"))
                 expected = 17 if failure in ("build", "install", "pytest", "collection") else 1 if failure not in ("", "more-management-cases") or (selected and missing) else 0
                 self.assertEqual(result.returncode, expected, result.stderr)
@@ -672,11 +684,13 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
         registry_roster = tuple(shlex.split(CHECK_FUNCTIONS.split(
             "run_network_registry_postgres() (\n", 1)[1].split("  local registry_tests=(\n", 1)[1].split("\n  )", 1)[0]))
         shard_members_by_kind = {}
+        manual_swap_shard_extensions = []
         for kind, capability, dependencies in (
             ("company", COMPANY_ASSERTION_CAPABILITY, COMPANY_ASSERTION_DEPENDENCIES),
             ("company-groups", COMPANY_GROUP_CAPABILITY, COMPANY_GROUP_DEPENDENCIES),
             ("completion", REGISTRY_COMPLETION_CAPABILITY, REGISTRY_COMPLETION_DEPENDENCIES),
             ("pricing", REGISTRY_PRICING_CAPABILITY, REGISTRY_PRICING_DEPENDENCIES),
+            ("manual-swaps", MANUAL_SOURCE_SWAP_CAPABILITY, MANUAL_SOURCE_SWAP_DEPENDENCIES),
             ("maintenance", PROFILE_MAINTENANCE_CAPABILITY, PROFILE_MAINTENANCE_DEPENDENCIES),
         ):
             shard_members = []
@@ -687,7 +701,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
             cases += [("complete", capability[0], stage, "") for stage in ("symlink", "dangling", "dirty", "untracked")]
             cases += [("complete", "", stage, "") for stage in (
                 "skipped", "empty", "missing-family", "invalid-report", "pytest", "drop", "report-cleanup")]
-            if kind in {"company", "company-groups", "completion", "pricing"}:
+            if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps"}:
                 cases += [("complete", "", "", str(index)) for index in range(8)]
             else:
                 cases += [("complete", "", "", "publication")]
@@ -697,10 +711,17 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     source, runner, log = root / "source", root / "runner", root / "calls"
                     source.mkdir()
                     runner.mkdir()
-                    for path in registry_roster if kind in {"company", "company-groups", "completion", "pricing"} else ():
+                    for path in registry_roster if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps"} else ():
                         target = source / path
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.touch()
+                    if kind == "manual-swaps" and layout == "complete":
+                        for path in (*COMPANY_ASSERTION_CAPABILITY, *COMPANY_ASSERTION_DEPENDENCIES):
+                            if path == changed and not stage:
+                                continue
+                            target = source / path
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            target.touch()
                     selected = () if layout == "legacy" else (changed,) if layout == "only" else (*capability, *dependencies)
                     for path in selected:
                         if path == changed and not stage and layout != "only":
@@ -713,7 +734,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     if stage in ("symlink", "dangling"):
                         target = source / changed
                         target.unlink()
-                        live = registry_roster[0] if kind in {"company", "company-groups", "completion", "pricing"} else dependencies[0]
+                        live = registry_roster[0] if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps"} else dependencies[0]
                         target.symlink_to(source / (live if stage == "symlink" else "absent"))
                     timeout = root / "timeout"
                     timeout.write_text(f"#!{sys.executable}\n" + r'''
@@ -759,7 +780,7 @@ rustc() { echo 'rustc 1.98.1'; }
 install_address_canon_wheel() { printf 'wheel\n' >> "$CALL_LOG"; }
 create_test_database() { printf 'create:%s\n' "$1" >> "$CALL_LOG"; }
 drop_test_database() { printf 'drop:%s\n' "$1" >> "$CALL_LOG"; [[ "$FAIL_STAGE" != drop ]]; }
-psql() { :; }
+psql() { printf 'extensions:%s\n' "$*" >> "$CALL_LOG"; }
 rm() { [[ "$FAIL_STAGE" != report-cleanup ]] || return 23; command rm "$@"; }
 python() {
   if [[ "$1" = -c ]]; then printf 'exports\n' >> "$CALL_LOG"; return; fi
@@ -773,12 +794,12 @@ PYSHARD
   else command python3 "$@"; fi
 }
 '''
-                    call = (f"run_network_registry_postgres {shard}" if kind in {"company", "company-groups", "completion", "pricing"} else
+                    call = (f"run_network_registry_postgres {shard}" if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps"} else
                             "run_provider_profile_postgres postgresql://synthetic/runtime_test profile-publication"
                             if shard == "publication" else "run_profile_control_maintenance_postgres")
                     if changed:
                         call = "if " + call + "; then exit 9; else exit 1; fi"
-                    result = subprocess.run(["bash", "-euc", script + "\n" + call], env=environment,
+                    result = subprocess.run(["bash", "-eu"], input=script + "\n" + call, env=environment,
                                             cwd=source, capture_output=True, text=True, timeout=30, check=False)
                     expected = 17 if stage == "pytest" else 1 if changed or stage else 0
                     self.assertEqual(result.returncode, expected, result.stderr)
@@ -789,11 +810,11 @@ PYSHARD
                     if changed:
                         self.assertFalse(calls)
                     elif not stage:
-                        self.assertEqual(len(runs), int(kind in {"company", "company-groups", "completion", "pricing"} or layout == "complete"))
+                        self.assertEqual(len(runs), int(kind in {"company", "company-groups", "completion", "pricing", "manual-swaps"} or layout == "complete"))
                     for run in runs:
-                        if kind in {"company", "company-groups", "completion", "pricing"}:
+                        if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps"}:
                             self.assertRegex(run["registry"], r"@127\.0\.0\.1:5440/hc_network_registry_[0-9a-f]{32}$")
-                            if layout == "complete" and kind in {"company", "company-groups"}:
+                            if layout == "complete" and kind in {"company", "company-groups", "manual-swaps"}:
                                 self.assertEqual(run["map"], "1")
                                 self.assertEqual(run["migration"], run["registry"])
                             else:
@@ -805,8 +826,17 @@ PYSHARD
                             self.assertIsNone(run["schema_alias"])
                         if not shard:
                             self.assertEqual(capability[-1] in run["arguments"], layout == "complete")
-                    if kind in {"company", "company-groups", "completion", "pricing"} and shard and not stage:
+                    if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps"} and shard and not stage:
                         shard_members.extend(json.loads((root / "selections").read_text()))
+                    if kind == "manual-swaps" and not changed:
+                        extensions = [c for c in calls if c.startswith("extensions:")]
+                        selected_modules = (*registry_roster, COMPANY_ASSERTION_CAPABILITY[-1], capability[-1])
+                        if shard:
+                            selected_modules = selected_modules[int(shard)::8]
+                        extension_count = sum("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public" in c for c in extensions)
+                        self.assertEqual(extension_count, int(layout == "complete" and capability[-1] in selected_modules))
+                        if shard and not stage:
+                            manual_swap_shard_extensions.append(extension_count)
                     created = [c[7:] for c in calls if c.startswith("create:")]
                     dropped = [c[5:] for c in calls if c.startswith("drop:")]
                     self.assertEqual(created, dropped)
@@ -817,10 +847,13 @@ PYSHARD
                     else:
                         self.assertFalse(leftovers)
             shard_members_by_kind[kind] = shard_members
+        self.assertEqual(len(manual_swap_shard_extensions), 8)
+        self.assertEqual(sum(manual_swap_shard_extensions), 1)
         for kind, extras in (("company", (COMPANY_ASSERTION_CAPABILITY[-1],)),
                              ("company-groups", (COMPANY_ASSERTION_CAPABILITY[-1], *COMPANY_GROUP_HOST_TESTS)),
                             ("completion", (REGISTRY_COMPLETION_CAPABILITY[-1],)),
-                            ("pricing", (REGISTRY_PRICING_CAPABILITY[-1],))):
+                            ("pricing", (REGISTRY_PRICING_CAPABILITY[-1],)),
+                             ("manual-swaps", (COMPANY_ASSERTION_CAPABILITY[-1], MANUAL_SOURCE_SWAP_CAPABILITY[-1]))):
             members = shard_members_by_kind[kind]
             self.assertEqual(len(members), len(set(members)))
             self.assertCountEqual(members, (*registry_roster, *extras))
@@ -919,7 +952,7 @@ REPORT
 rm() { [[ "$FAIL_STAGE" != cleanup ]] || return 23; command rm "$@"; }
 run_registry_ptg_scope_postgres postgresql://synthetic/runtime_test
 '''
-                    result = subprocess.run(["bash", "-euc", script], cwd=source, env=environment,
+                    result = subprocess.run(["bash", "-eu"], input=script, cwd=source, env=environment,
                                             capture_output=True, text=True, timeout=15, check=False)
                     failed = layout == "only" or bool(stage)
                     expected_status = 17 if stage == "pytest" else 1 if failed else 0
@@ -1030,7 +1063,7 @@ for shard in 0 1 2 3; do run_python_main "$shard"; done
                     **os.environ, "SOURCE_ROOT": str(source_root), "CI_ROOT": str(ROOT),
                     "CI_DEPS_READY": "1", "COVERAGE_BASE_SHA": "a" * 40, "CALL_LOG": str(call_log),
                 }
-                run_result = subprocess.run(["bash", "-euc", script], cwd=source_root, env=environment_map,
+                run_result = subprocess.run(["bash", "-eu"], input=script, cwd=source_root, env=environment_map,
                                             capture_output=True, text=True, check=False)
                 self.assertEqual(run_result.returncode, 0, run_result.stderr)
                 calls = [shlex.split(call) for call in call_log.read_text().splitlines()]
@@ -1055,71 +1088,75 @@ for shard in 0 1 2 3; do run_python_main "$shard"; done
                 self.assertEqual(len(provenance_calls), 4)
 
     def test_company_group_modules_leave_python_discovery_only_with_closed_native_capability(self):
-        required = (*COMPANY_GROUP_CAPABILITY, *COMPANY_GROUP_DEPENDENCIES)
-        cases = [("legacy", "", ""), ("complete", "", "")]
-        cases += [("complete", path, "missing") for path in required]
-        cases += [("only", path, "") for path in COMPANY_GROUP_CAPABILITY]
-        cases += [("complete", path, stage) for path in COMPANY_GROUP_CAPABILITY
-                  for stage in ("symlink", "dangling", "dirty", "staged", "untracked")]
-        for layout, changed, stage in cases:
-            with self.subTest(layout=layout, changed=changed, stage=stage), tempfile.TemporaryDirectory() as temporary:
-                source, log = Path(temporary) / "source", Path(temporary) / "calls"
-                source.mkdir()
-                selected = (COMPANY_ASSERTION_CAPABILITY if layout == "legacy" else
-                            (changed,) if layout == "only" else required)
-                for name in selected:
-                    if name == changed and stage == "missing":
+        for capability, dependencies, host_tests in (
+            (COMPANY_GROUP_CAPABILITY, COMPANY_GROUP_DEPENDENCIES, COMPANY_GROUP_HOST_TESTS),
+            (MANUAL_SOURCE_SWAP_CAPABILITY, MANUAL_SOURCE_SWAP_DEPENDENCIES, (MANUAL_SOURCE_SWAP_CAPABILITY[-1],)),
+        ):
+            required = (*capability, *dependencies)
+            cases = [("legacy", "", ""), ("complete", "", "")]
+            cases += [("complete", path, "missing") for path in required]
+            cases += [("only", path, "") for path in capability]
+            cases += [("complete", path, stage) for path in capability
+                      for stage in ("symlink", "dangling", "dirty", "staged", "untracked")]
+            for layout, changed, stage in cases:
+                with self.subTest(layout=layout, changed=changed, stage=stage), tempfile.TemporaryDirectory() as temporary:
+                    source, log = Path(temporary) / "source", Path(temporary) / "calls"
+                    source.mkdir()
+                    selected = (COMPANY_ASSERTION_CAPABILITY if layout == "legacy" else
+                                (changed,) if layout == "only" else required)
+                    for name in selected:
+                        if name == changed and stage == "missing":
+                            continue
+                        path = source / name
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.touch()
+                    if stage in {"symlink", "dangling"}:
+                        path = source / changed
+                        path.unlink()
+                        path.symlink_to(source / (COMPANY_ASSERTION_CAPABILITY[0] if stage == "symlink" else "absent"))
+                    environment = {
+                        **os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                        "CI_DEPS_READY": "1", "COVERAGE_BASE_SHA": "a" * 40,
+                        "CALL_LOG": str(log), "CHANGED_PATH": changed, "FAIL_STAGE": stage,
+                    }
+                    script = CHECK_FUNCTIONS + r'''
+    git() {
+      if [[ "$1" = -C ]]; then shift 2; fi
+      case "$1" in
+        diff)
+          [[ "${!#}" != "$CHANGED_PATH" ]] && return 0
+          [[ "$FAIL_STAGE" != dirty ]] || return 1
+          [[ "$FAIL_STAGE" != staged || " $* " != *" HEAD "* ]]
+          ;;
+        ls-files) [[ "$FAIL_STAGE" != untracked ]] || [[ "${!#}" != "$CHANGED_PATH" ]] ;;
+        *) return 99 ;;
+      esac
+    }
+    mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
+    prepare_debug_rust_binaries() { printf 'build\n' >> "$CALL_LOG"; }
+    python() { printf '%s\n' "$*" >> "$CALL_LOG"; }
+    timeout() { shift 2; "$@"; }
+    for shard in 0 1 2 3; do run_python_main "$shard" || exit 1; done
+    '''
+                    result = subprocess.run(["bash", "-eu"], input=script, cwd=source, env=environment,
+                                            capture_output=True, text=True, timeout=30, check=False)
+                    rejected = bool(changed)
+                    self.assertEqual(result.returncode, int(rejected), result.stderr)
+                    calls = [shlex.split(line) for line in log.read_text().splitlines()] if log.exists() else []
+                    if rejected:
+                        self.assertFalse(calls)
                         continue
-                    path = source / name
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.touch()
-                if stage in {"symlink", "dangling"}:
-                    path = source / changed
-                    path.unlink()
-                    path.symlink_to(source / (COMPANY_ASSERTION_CAPABILITY[0] if stage == "symlink" else "absent"))
-                environment = {
-                    **os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
-                    "CI_DEPS_READY": "1", "COVERAGE_BASE_SHA": "a" * 40,
-                    "CALL_LOG": str(log), "CHANGED_PATH": changed, "FAIL_STAGE": stage,
-                }
-                script = CHECK_FUNCTIONS + r'''
-git() {
-  if [[ "$1" = -C ]]; then shift 2; fi
-  case "$1" in
-    diff)
-      [[ "${!#}" != "$CHANGED_PATH" ]] && return 0
-      [[ "$FAIL_STAGE" != dirty ]] || return 1
-      [[ "$FAIL_STAGE" != staged || " $* " != *" HEAD "* ]]
-      ;;
-    ls-files) [[ "$FAIL_STAGE" != untracked ]] || [[ "${!#}" != "$CHANGED_PATH" ]] ;;
-    *) return 99 ;;
-  esac
-}
-mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
-prepare_debug_rust_binaries() { printf 'build\n' >> "$CALL_LOG"; }
-python() { printf '%s\n' "$*" >> "$CALL_LOG"; }
-timeout() { shift 2; "$@"; }
-for shard in 0 1 2 3; do run_python_main "$shard" || exit 1; done
-'''
-                result = subprocess.run(["bash", "-euc", script], cwd=source, env=environment,
-                                        capture_output=True, text=True, timeout=30, check=False)
-                rejected = bool(changed)
-                self.assertEqual(result.returncode, int(rejected), result.stderr)
-                calls = [shlex.split(line) for line in log.read_text().splitlines()] if log.exists() else []
-                if rejected:
-                    self.assertFalse(calls)
-                    continue
-                runs = [arguments for arguments in calls if arguments[:2] == ["-m", "pytest"]]
-                self.assertEqual(len(runs), 4)
-                for shard, arguments in enumerate(runs):
-                    self.assertEqual(arguments[arguments.index("--ci-shard-index") + 1], str(shard))
-                    self.assertEqual(arguments[arguments.index("--ci-shard-count") + 1], "4")
-                    for path in COMPANY_GROUP_HOST_TESTS:
-                        self.assertEqual(arguments.count(path), int(layout == "complete"))
-                        if layout == "complete":
-                            self.assertEqual(arguments[arguments.index(path) - 1], "--ignore")
-                    self.assertNotIn("-k", arguments)
-                    self.assertNotIn("-m", arguments[2:])
+                    runs = [arguments for arguments in calls if arguments[:2] == ["-m", "pytest"]]
+                    self.assertEqual(len(runs), 4)
+                    for shard, arguments in enumerate(runs):
+                        self.assertEqual(arguments[arguments.index("--ci-shard-index") + 1], str(shard))
+                        self.assertEqual(arguments[arguments.index("--ci-shard-count") + 1], "4")
+                        for path in host_tests:
+                            self.assertEqual(arguments.count(path), int(layout == "complete"))
+                            if layout == "complete":
+                                self.assertEqual(arguments[arguments.index(path) - 1], "--ignore")
+                        self.assertNotIn("-k", arguments)
+                        self.assertNotIn("-m", arguments[2:])
 
     def test_completed_coverage_compacts_before_provenance_and_failure_stops_publication(self):
         for producer in ("run_python_main 0", "run_capacity", "run_postgres core-services"):
@@ -1153,7 +1190,7 @@ timeout() {
                         "CALL_LOG": str(log), "CI_DEPS_READY": "1", "COVERAGE_FILE": str(root / ".coverage"),
                         "COMPACTION_STATUS": "17" if is_failure else "0",
                     }
-                    result = subprocess.run(["bash", "-euc", script + producer], env=environment,
+                    result = subprocess.run(["bash", "-eu"], input=script + producer, env=environment,
                                             capture_output=True, text=True, timeout=10, check=False)
                     self.assertEqual(result.returncode, 17 if is_failure else 0, result.stderr)
                     self.assertEqual(log.read_text().splitlines(),
@@ -1247,7 +1284,7 @@ test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
                     "PYTEST_ADDOPTS": "--cov=process --cov-branch --cov-append --cov-report=",
                 }
                 environment.pop("REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN", None)
-                result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True,
+                result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True,
                                         timeout=30, check=False)
                 expected = 17 if failure in ("create", "pytest") else 1 if failure else 0
                 self.assertEqual(result.returncode, expected, result.stderr)
@@ -1446,7 +1483,7 @@ test -z "${HLTHPRT_CMS_NPD_ADMISSION_TEST_ARTIFACT_ROOT:-}"
 test -z "${HLTHPRT_DIRECTORY_ENTITIES_TEST_DSN:-}"
 test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
 '''
-                    result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True, timeout=30)
+                    result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True, timeout=30)
                     self.assertEqual(result.returncode, expected, result.stderr)
                     calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
                     observed = [path for call in calls for path in call["selected"]]
@@ -1519,7 +1556,7 @@ test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
                     "HLTHPRT_DB_HOST": "127.0.0.1", "HLTHPRT_DB_PORT": "5432",
                 }
                 run_result = subprocess.run(
-                    ["bash", "-euc", CHECK_FUNCTIONS + _directory_wheel_script()],
+                    ["bash", "-eu"], input=CHECK_FUNCTIONS + _directory_wheel_script(),
                     env=environment_by_name, capture_output=True, text=True, timeout=30,
                 )
                 self.assertEqual(run_result.returncode, 17 if failure else 0, run_result.stderr)
@@ -1601,7 +1638,7 @@ create_test_database() { printf 'create:%s\n' "$1" >> "$LIFECYCLE"; }
 drop_test_database() { printf 'drop:%s\n' "$1" >> "$LIFECYCLE"; }
 run_provider_directory_postgres postgresql://synthetic/test directory-source
 '''
-                result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+                result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
                 expected = 4 if missing else 17 if failure else 0
                 self.assertEqual(result.returncode, expected, result.stderr)
                 calls = [line.split("\t", 3) for line in calls_path.read_text().splitlines()]
@@ -1653,7 +1690,7 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-servic
                     (tests / name).touch()
                 (source / REQUIRED_IMPORT_NATIVE_TESTS[0]).touch()
                 result = subprocess.run(
-                    ["bash", "-euc", script], cwd=source,
+                    ["bash", "-eu"], input=script, cwd=source,
                     env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
                          "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "postgres",
                          "ROUTE_LOG": str(log)},
@@ -1706,7 +1743,7 @@ test "$HLTHPRT_DB_DATABASE:$HLTHPRT_DB_DATABASE_OVERRIDE" = sentinel:sentinel
 '''
             for status, drop_status, expected in ((0, 0, 0), (17, 0, 17), (0, 7, 1)):
                 result = subprocess.run(
-                    ["bash", "-euc", script],
+                    ["bash", "-eu"], input=script,
                     env={**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT),
                          "ARCHIVE_LOG": str(log), "TEST_STATUS": str(status),
                          "DROP_STATUS": str(drop_status), "HLTHPRT_DB_HOST": "localhost",
@@ -1773,7 +1810,7 @@ fi
             for path, status, drained, background in cases:
                 with self.subTest(path=path, status=status, drained=drained, background=background):
                     result = subprocess.run(
-                        ["bash", "-euc", script], capture_output=True, text=True,
+                        ["bash", "-eu"], input=script, capture_output=True, text=True,
                         env={**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT),
                              "RUNNER_TEMP": temporary, "CALL_LOG": str(log),
                              "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "postgres",
@@ -1816,7 +1853,7 @@ run_provider_directory_postgres postgresql://postgres:postgres@127.0.0.1:5432/te
                 for name in present:
                     (tests / name).touch()
                 result = subprocess.run(
-                    ["bash", "-euc", script], cwd=source,
+                    ["bash", "-eu"], input=script, cwd=source,
                     env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
                          "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "postgres",
                          "ROUTE_LOG": str(log)},
@@ -1866,7 +1903,7 @@ timeout() {
 run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-ptg
 '''
             result = subprocess.run(
-                ["bash", "-euc", script], cwd=source,
+                ["bash", "-eu"], input=script, cwd=source,
                 env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
                      "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "postgres",
                      "ROUTE_LOG": str(log), "HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST": "",
@@ -2098,7 +2135,7 @@ ci_phase_begin source-review-route
 run_core_postgres postgresql://postgres@127.0.0.1:5432/test "$ROUTE_LANE"
 ci_phase_end
 '''
-                result = subprocess.run(["bash", "-euc", script], cwd=source, env=environment,
+                result = subprocess.run(["bash", "-eu"], input=script, cwd=source, env=environment,
                                         capture_output=True, text=True, timeout=15)
                 self.assertEqual(result.returncode, expected, result.stderr)
                 endings = [line for line in result.stdout.splitlines() if line.startswith("CI_PHASE end name=source-review-route ")]
@@ -2144,7 +2181,7 @@ ci_phase_end
             (source / "tests").mkdir()
             (source / "tests/test_registry_ptg_cohort_authority_postgres.py").touch()
             script = CHECK_FUNCTIONS + "\ngit() { return 97; }\ninstall_address_canon_wheel() { return 98; }\nrun_registry_ptg_scope_postgres synthetic\n"
-            result = subprocess.run(["bash", "-euc", script], cwd=source,
+            result = subprocess.run(["bash", "-eu"], input=script, cwd=source,
                                     env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT)},
                                     capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -2190,7 +2227,7 @@ run_python_main 0
 run_provider_profile_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" profile-publication
 '''
                 result = subprocess.run(
-                    ["bash", "-euc", script], cwd=source, env=env, capture_output=True, text=True
+                    ["bash", "-eu"], input=script, cwd=source, env=env, capture_output=True, text=True
                 )
                 self.assertEqual(result.returncode == 0, not fail, result.stderr)
                 calls = call_log.read_text().splitlines()
@@ -2221,7 +2258,7 @@ uv() { printf 'uv %s\n' "$*"; }
 python() { printf 'python %s\n' "$*"; }
 run_quality
 '''
-            result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+            result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         for retained in ("commit policy", "requirements-python-quality.lock", "--require-hashes",
                          "python_format.py", "compileall", "coverage_reports.py --check",
@@ -2247,7 +2284,7 @@ python() {
 }
 run_quality
 '''
-            result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+            result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
         self.assertEqual(result.returncode, 23, result.stderr)
         self.assertIn("python_format.py", result.stdout)
         for later_stage in ("compileall", "coverage_reports.py", "request_time_external_call_guard.py"):
@@ -2264,7 +2301,7 @@ python() { printf 'python %s\n' "$*"; }
 timeout() { printf 'timeout %s\n' "$*"; }
 run_api_contract
 '''
-            result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+            result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         for retained in ("runtime dependencies", "runtime-aware native inference", "runtime import contracts",
                          "provider_directory_runtime_contract.py",
@@ -2286,7 +2323,7 @@ run_api_contract
             source = Path(temporary)
             environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT)}
             result = subprocess.run(
-                ["bash", "-euc", CHECK_FUNCTIONS + "\nrun_runtime_contracts\n"],
+                ["bash", "-eu"], input=CHECK_FUNCTIONS + "\nrun_runtime_contracts\n",
                 cwd=source, env=environment, capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 2, result.stderr)
@@ -2310,7 +2347,7 @@ run_api_contract
             environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
                            "RUNNER_TEMP": str(root), "VIRTUAL_ENV": str(runtime)}
             script = CHECK_FUNCTIONS + '\nuv() { return 19; }\nrun_python_inference\n'
-            result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+            result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
             self.assertEqual(result.returncode, 19, result.stderr)
             self.assertEqual(set(root.iterdir()), {source, runtime})
         self.assertNotIn("sys.path.extend", CHECK_FUNCTIONS)
@@ -2347,7 +2384,7 @@ uv() {
 }
 run_python_inference
 '''
-            result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+            result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
             self.assertEqual(result.returncode, 23, result.stderr)
             self.assertEqual(set(root.iterdir()), {source, runtime})
             self.assertEqual(marker.read_text(), "runtime state")
@@ -2374,7 +2411,7 @@ run_python_inference
                 with self.subTest(target=target):
                     (source / target).unlink()
                     result = subprocess.run(
-                        ["bash", "-euc", script],
+                        ["bash", "-eu"], input=script,
                         check=False,
                         cwd=source,
                         env=environment,
@@ -2492,8 +2529,8 @@ class Box:
                     "HLTHPRT_DB_PASSWORD": "synthetic"}
                 environment.pop("HLTHPRT_PROVIDER_DIRECTORY_PROFILE_POSTGRES_DSN", None)
                 result = subprocess.run(
-                    ["bash", "-euc", CHECK_FUNCTIONS + "\ncreate_test_database() { :; }\n"
-                     "drop_test_database() { :; }\nrun_provider_profile_postgres postgresql://synthetic/test\n"],
+                    ["bash", "-eu"], input=CHECK_FUNCTIONS + "\ncreate_test_database() { :; }\n"
+                     "drop_test_database() { :; }\nrun_provider_profile_postgres postgresql://synthetic/test\n",
                     env=environment, capture_output=True, text=True,
                 )
                 calls = [line.rstrip("\0").split("\0") for line in capture.read_text().splitlines()]
@@ -2543,7 +2580,7 @@ create_test_database() { printf 'create:%s\n' "$1" >> "$LIFECYCLE"; }
 drop_test_database() { printf 'drop:%s\n' "$1" >> "$LIFECYCLE"; }
 run_provider_profile_postgres postgresql://synthetic/original
 '''
-                result = subprocess.run(["bash", "-euc", script], env=environment,
+                result = subprocess.run(["bash", "-eu"], input=script, env=environment,
                                         capture_output=True, text=True)
                 self.assertEqual(result.returncode, int(failure is not None), result.stderr)
                 count = 3 if failure is None else failure + 1
@@ -3134,7 +3171,7 @@ python() {
 }
 run_rust
 '''
-                result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+                result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0 if failure_index == len(phases) else 17, result.stderr)
                 ends = re.findall(r"CI_PHASE end name=([a-z-]+) elapsed_seconds=\d+ exit_code=(\d+)", result.stdout)
                 expected = [(name, "0") for name in phases]
@@ -3181,7 +3218,7 @@ run_rust_wheel_tests() {
 }
 run_rust
 '''
-            result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+            result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             calls = [line.split("\t") for line in capture.read_text().splitlines()]
             coverage_target = str(source / "support/ptg2_scanner/target/llvm-cov-target")
@@ -3268,7 +3305,7 @@ run_core_postgres() { [ "$ci_phase_name" != "$FAIL_PHASE" ] || return 17; }
 run_postgres core
 echo unexpected-continuation
 '''
-                result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+                result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 17, result.stderr)
                 self.assertRegex(result.stdout, rf"CI_PHASE end name={failure} elapsed_seconds=\d+ exit_code=17")
                 self.assertNotIn("unexpected-continuation", result.stdout)
@@ -3311,7 +3348,7 @@ docker() {
 }
 run_container_package
 '''
-                    result = subprocess.run(["bash", "-euc", script], env=env,
+                    result = subprocess.run(["bash", "-eu"], input=script, env=env,
                                             capture_output=True, text=True)
                     self.assertEqual(result.returncode, expected, result.stderr)
                     if not listing:
@@ -3361,7 +3398,7 @@ docker() {
 python3() { [ "${2:-}" = prepare-engine ] || log_call python3 "$@"; }
 run_container_package
 '''
-                result = subprocess.run(["bash", "-euc", script], env=environment, capture_output=True, text=True)
+                result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0 if failure == "none" else 1 if failure == "missing-validator" else 17,
                                  result.stderr)
                 calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]
@@ -3445,7 +3482,7 @@ timeout() {
 run_python_main 0
 run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
 '''
-                subprocess.run(["bash", "-euc", script], cwd=source, env=env, check=True)
+                subprocess.run(["bash", "-eu"], input=(script).encode(), cwd=source, env=env, check=True)
                 calls = call_log.read_text().splitlines()
                 for index, test_path in enumerate(test_paths):
                     matching = [call for call in calls if test_path in call]
@@ -3600,7 +3637,7 @@ timeout() {
 run_python_main 0
 run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" "$ROUTE_LANE"
 '''
-                result = subprocess.run(["bash", "-euc", script], cwd=source, env=env,
+                result = subprocess.run(["bash", "-eu"], input=script, cwd=source, env=env,
                                         capture_output=True, text=True, check=False)
                 self.assertEqual(result.returncode, 1 if missing_path else (17 if failure_path else 0), result.stderr)
                 if missing_path:
@@ -3678,7 +3715,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                 base = root / "earlier-coverage"
                 base.write_text("earlier\n")
                 result = subprocess.run(
-                    ["bash", "-euc", _import_family_pair_script()], capture_output=True, text=True, timeout=10,
+                    ["bash", "-eu"], input=_import_family_pair_script(), capture_output=True, text=True, timeout=10,
                     env={**_import_family_environment(root), "FAILURE_PATH": failure, "COMBINE_STATUS": str(combine_status)},
                     check=False,
                 )
@@ -3710,7 +3747,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                 functions = _import_family_signal_hook(CHECK_FUNCTIONS, location, signum)
                 with (root / "stdout").open("w") as stdout, (root / "stderr").open("w") as stderr:
                     result = subprocess.run(
-                        ["bash", "-euc", _import_family_cancellation_script(functions)],
+                        ["bash", "-eu"], input=(_import_family_cancellation_script(functions)).encode(),
                         stdout=stdout, stderr=stderr, timeout=10, env=_import_family_environment(root),
                         check=False,
                     )
@@ -3763,7 +3800,7 @@ run_scoped_archive_postgres hc_custom_import_test_0123456789abcdef0123456789abcd
                 with self.subTest(signum=signum, status=status), tempfile.TemporaryDirectory() as temporary:
                     root = Path(temporary)
                     result = subprocess.run(
-                        ["bash", "-euc", script], capture_output=True, text=True, timeout=5,
+                        ["bash", "-eu"], input=script, capture_output=True, text=True, timeout=5,
                         env={**_import_family_environment(root), "DROP_SIGNAL": signum, "TEST_STATUS": str(status)},
                         check=False,
                     )
@@ -3787,7 +3824,7 @@ run_import_family_postgres postgresql://synthetic
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             result = subprocess.run(
-                ["bash", "-euc", script], capture_output=True, text=True, timeout=5,
+                ["bash", "-eu"], input=script, capture_output=True, text=True, timeout=5,
                 env=_import_family_environment(root), check=False,
             )
             self.assertEqual(result.returncode, 143, result.stderr)
@@ -3843,7 +3880,7 @@ timeout() { shift 2; "$@"; }
 run_python_main 0
 run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" "$ROUTE_LANE"
 '''
-                    result = subprocess.run(["bash", "-euc", script], cwd=source, env=env, capture_output=True, text=True)
+                    result = subprocess.run(["bash", "-eu"], input=script, cwd=source, env=env, capture_output=True, text=True)
                     selected = lane in ("core-imports", "all")
                     self.assertEqual(result.returncode == 0, not (fail and selected), result.stderr)
                     calls = call_log.read_text().splitlines()
@@ -3939,7 +3976,7 @@ timeout() {
 run_python_main 0
 run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" "$ROUTE_LANE"
 '''
-                result = subprocess.run(["bash", "-euc", script], cwd=source, env=env, capture_output=True, text=True)
+                result = subprocess.run(["bash", "-eu"], input=script, cwd=source, env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, int(bool(failed_path) and lane != "core-imports"), result.stderr)
                 calls = call_log.read_text().splitlines()
                 main_call = next(call for call in calls if "--ci-shard-count 4" in call)
