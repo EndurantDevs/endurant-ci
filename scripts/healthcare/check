@@ -192,11 +192,33 @@ company_group_native_test_paths() {
     tests/test_company_registry_assertion_store.py tests/test_registry_approved_company_groups.py
 }
 
+manual_source_swap_native_test_paths() {
+  local capability=(
+    tests/registry_manual_source_swap_fixture.py
+    tests/test_registry_manual_source_swap_postgres.py
+  )
+  local source_path present=0
+  for source_path in "${capability[@]}"; do
+    if [ -e "$repository_root/$source_path" ] || [ -L "$repository_root/$source_path" ]; then
+      present=1
+    fi
+  done
+  [ "$present" = 1 ] || return 0
+  require_native_source_files "${capability[@]}" \
+    tests/test_company_registry_assertions_postgres.py tests/reference_family_generation_fixture.py \
+    tests/test_reference_family_result_generation_postgres.py \
+    process/initial.py process/attributes.py process/ext/utils.py \
+    process/reference_family_result_generation.py db/connection.py db/models/_legacy.py || return 1
+  printf '%s\n' tests/test_registry_manual_source_swap_postgres.py
+}
+
 run_python_main() {
   local shard=${1:-}
   case "$shard" in 0|1|2|3) ;; *) usage ;; esac
   local company_group_tests
   company_group_tests=$(company_group_native_test_paths) || return 1
+  local manual_source_swap_tests
+  manual_source_swap_tests=$(manual_source_swap_native_test_paths) || return 1
   if [ "${CI_DEPS_READY:-0}" = 1 ]; then
     prepare_debug_rust_binaries cargo build --locked --bins --manifest-path support/ptg2_scanner/Cargo.toml
   else
@@ -215,6 +237,9 @@ run_python_main() {
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
   done <<< "$company_group_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
+  done <<< "$manual_source_swap_tests"
   for test_path in "${capacity_tests[@]}"; do
     collection_args+=(--ignore "$test_path")
   done
@@ -995,6 +1020,21 @@ run_scoped_archive_postgres_body() {
     --command 'CREATE EXTENSION IF NOT EXISTS intarray WITH SCHEMA public' \
     --command 'CREATE EXTENSION IF NOT EXISTS btree_gin WITH SCHEMA public' \
     --command 'CREATE EXTENSION IF NOT EXISTS postgis WITH SCHEMA public'
+  local manual_source_swap_selected=0 test_path
+  for test_path in "$@"; do
+    case "$test_path" in
+      tests/test_registry_manual_source_swap_postgres.py|tests/test_registry_manual_source_swap_postgres.py::*)
+        manual_source_swap_selected=1 ;;
+      @*)
+        if grep -q '^tests/test_registry_manual_source_swap_postgres[.]py::' "${test_path#@}"; then
+          manual_source_swap_selected=1
+        fi ;;
+    esac
+  done
+  if [[ "$manual_source_swap_selected" = 1 ]]; then
+    psql --no-psqlrc --set=ON_ERROR_STOP=1 \
+      --command 'CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public'
+  fi
   if [[ "$1" = tests/test_custom_import_installed_operator_postgres.py ||
         "$1" = tests/test_custom_import_identical_children_postgres.py ||
         "$1" = tests/test_custom_import_grouped_child_read_postgres.py ]]; then
@@ -1214,9 +1254,14 @@ run_network_registry_postgres() (
   fi
   local company_group_tests
   company_group_tests=$(company_group_native_test_paths) || return 1
+  local manual_source_swap_tests
+  manual_source_swap_tests=$(manual_source_swap_native_test_paths) || return 1
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$company_group_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || registry_tests+=("$test_path")
+  done <<< "$manual_source_swap_tests"
   local completion_present=0
   local completion_capability=(
     process/registry_source_admission_receipt.py
