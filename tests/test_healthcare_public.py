@@ -112,6 +112,16 @@ REGISTRY_COMPLETION_DEPENDENCIES = (
     "tests/test_registry_management_permissions_postgres.py", "tests/test_registry_planfinder_admission_postgres.py",
     "tests/test_network_serving_schema_postgres.py",
 )
+REGISTRY_PRICING_CAPABILITY = ("tests/test_pricing_canonical_network_claims_postgres.py",)
+REGISTRY_PRICING_DEPENDENCIES = (
+    "api/endpoint/pricing.py", "api/provider_service_scope.py", "api/network_address_scope.py",
+    "api/network_provider_read.py", "process/network_serving_read.py",
+    "tests/test_pricing_canonical_network_claims.py", "tests/test_pricing_procedure_fast_path.py", "tests/test_pricing_api.py",
+    "tests/test_network_address_projection_postgres.py", "tests/test_network_membership_candidate_indexes_postgres.py",
+    "tests/test_network_membership_publication_postgres.py", "tests/test_network_membership_serving_indexes_postgres.py",
+    "tests/test_network_membership_validation_postgres.py", "tests/test_network_serving_routes_postgres.py",
+    "tests/test_network_serving_schema_postgres.py",
+)
 REGISTRY_OFFICE_CUSTODY_CAPABILITY = (
     "process/registry_ptg_office_custody.py", "tests/test_registry_ptg_office_custody.py",
     "tests/test_registry_ptg_office_custody_postgres.py",
@@ -648,23 +658,25 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
         self.assertEqual(len(successful_shard_members), len(set(successful_shard_members)))
         self.assertCountEqual(successful_shard_members, paths)
 
-    def test_optional_company_and_maintenance_native_routes_fail_closed(self):
+    def test_optional_company_pricing_and_maintenance_native_routes_fail_closed(self):
         registry_roster = tuple(shlex.split(CHECK_FUNCTIONS.split(
             "run_network_registry_postgres() (\n", 1)[1].split("  local registry_tests=(\n", 1)[1].split("\n  )", 1)[0]))
         shard_members_by_kind = {}
         for kind, capability, dependencies in (
             ("company", COMPANY_ASSERTION_CAPABILITY, COMPANY_ASSERTION_DEPENDENCIES),
             ("completion", REGISTRY_COMPLETION_CAPABILITY, REGISTRY_COMPLETION_DEPENDENCIES),
+            ("pricing", REGISTRY_PRICING_CAPABILITY, REGISTRY_PRICING_DEPENDENCIES),
             ("maintenance", PROFILE_MAINTENANCE_CAPABILITY, PROFILE_MAINTENANCE_DEPENDENCIES),
         ):
             shard_members = []
             cases = [("legacy", "", "", ""), ("complete", "", "", "")]
-            cases += [("complete", path, "", "") for path in (*capability, *dependencies)]
+            required = dependencies if kind == "pricing" else (*capability, *dependencies)
+            cases += [("complete", path, "", "") for path in required]
             cases += [("only", path, "", "") for path in capability]
             cases += [("complete", capability[0], stage, "") for stage in ("symlink", "dangling", "dirty", "untracked")]
             cases += [("complete", "", stage, "") for stage in (
                 "skipped", "empty", "missing-family", "invalid-report", "pytest", "drop", "report-cleanup")]
-            if kind in {"company", "completion"}:
+            if kind in {"company", "completion", "pricing"}:
                 cases += [("complete", "", "", str(index)) for index in range(8)]
             else:
                 cases += [("complete", "", "", "publication")]
@@ -674,7 +686,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     source, runner, log = root / "source", root / "runner", root / "calls"
                     source.mkdir()
                     runner.mkdir()
-                    for path in registry_roster if kind in {"company", "completion"} else ():
+                    for path in registry_roster if kind in {"company", "completion", "pricing"} else ():
                         target = source / path
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.touch()
@@ -685,12 +697,12 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                         target = source / path
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.touch()
-                    if kind == "completion" and layout == "complete" and changed in registry_roster and not stage:
+                    if kind in {"completion", "pricing"} and layout == "complete" and changed in registry_roster and not stage:
                         (source / changed).unlink()
                     if stage in ("symlink", "dangling"):
                         target = source / changed
                         target.unlink()
-                        live = registry_roster[0] if kind in {"company", "completion"} else dependencies[0]
+                        live = registry_roster[0] if kind in {"company", "completion", "pricing"} else dependencies[0]
                         target.symlink_to(source / (live if stage == "symlink" else "absent"))
                     timeout = root / "timeout"
                     timeout.write_text(f"#!{sys.executable}\n" + r'''
@@ -750,7 +762,7 @@ PYSHARD
   else command python3 "$@"; fi
 }
 '''
-                    call = (f"run_network_registry_postgres {shard}" if kind in {"company", "completion"} else
+                    call = (f"run_network_registry_postgres {shard}" if kind in {"company", "completion", "pricing"} else
                             "run_provider_profile_postgres postgresql://synthetic/runtime_test profile-publication"
                             if shard == "publication" else "run_profile_control_maintenance_postgres")
                     if changed:
@@ -766,9 +778,9 @@ PYSHARD
                     if changed:
                         self.assertFalse(calls)
                     elif not stage:
-                        self.assertEqual(len(runs), int(kind in {"company", "completion"} or layout == "complete"))
+                        self.assertEqual(len(runs), int(kind in {"company", "completion", "pricing"} or layout == "complete"))
                     for run in runs:
-                        if kind in {"company", "completion"}:
+                        if kind in {"company", "completion", "pricing"}:
                             self.assertRegex(run["registry"], r"@127\.0\.0\.1:5440/hc_network_registry_[0-9a-f]{32}$")
                             if layout == "complete" and kind == "company":
                                 self.assertEqual(run["map"], "1")
@@ -782,7 +794,7 @@ PYSHARD
                             self.assertIsNone(run["schema_alias"])
                         if not shard:
                             self.assertEqual(capability[-1] in run["arguments"], layout == "complete")
-                    if kind in {"company", "completion"} and shard and not stage:
+                    if kind in {"company", "completion", "pricing"} and shard and not stage:
                         shard_members.extend(json.loads((root / "selections").read_text()))
                     created = [c[7:] for c in calls if c.startswith("create:")]
                     dropped = [c[5:] for c in calls if c.startswith("drop:")]
@@ -795,7 +807,8 @@ PYSHARD
                         self.assertFalse(leftovers)
             shard_members_by_kind[kind] = shard_members
         for kind, extra in (("company", COMPANY_ASSERTION_CAPABILITY[-1]),
-                            ("completion", REGISTRY_COMPLETION_CAPABILITY[-1])):
+                            ("completion", REGISTRY_COMPLETION_CAPABILITY[-1]),
+                            ("pricing", REGISTRY_PRICING_CAPABILITY[-1])):
             members = shard_members_by_kind[kind]
             self.assertEqual(len(members), len(set(members)))
             self.assertCountEqual(members, (*registry_roster, extra))
@@ -936,6 +949,24 @@ run_registry_ptg_scope_postgres postgresql://synthetic/runtime_test
             result = subprocess.run([sys.executable, "-c", validator, str(report), str(selected)],
                                     capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
+
+    def test_pricing_native_report_requires_both_exact_parameter_cases(self):
+        validator = CHECK_FUNCTIONS.split('validate_registry_native_report() {\n  python - "$@" <<\'PY\'\n', 1)[1].split("\nPY\n", 1)[0]
+        module = REGISTRY_PRICING_CAPABILITY[0].removesuffix(".py").replace("/", ".")
+        names = ["test_native_same_office_filter_count_page_and_original_claim_grain[" + parameter + "]"
+                 for parameter in ("excluded_second_office", "two_selected_offices")]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected, report = root / "nodeids", root / "report.xml"
+            selected.write_text("".join(REGISTRY_PRICING_CAPABILITY[0] + "::" + name + "\n" for name in names))
+            for actual in (names, names[:1], names[::-1] + names[:1], [names[0], names[1].replace("two_selected", "wrong")]):
+                with self.subTest(actual=actual):
+                    report.write_text("<testsuites><testsuite tests='" + str(len(actual)) + "'>" + "".join(
+                        "<testcase classname='" + module + "' name='" + name + "'/>" for name in actual
+                    ) + "</testsuite></testsuites>")
+                    result = subprocess.run([sys.executable, "-c", validator, str(report), str(selected)],
+                                            capture_output=True, text=True, check=False)
+                    self.assertEqual(result.returncode == 0, actual == names, result.stderr)
 
     def test_planfinder_decoder_uses_python_discovery(self):
         offline_paths = (
