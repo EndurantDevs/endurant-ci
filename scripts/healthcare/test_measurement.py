@@ -73,7 +73,26 @@ class MeasurementChecks(unittest.TestCase):
             manifest = json.loads((output / "measurement.json").read_text())
             self.assertEqual(manifest["run_attempt"], 2)
             self.assertEqual(manifest["producer_attempts"], producer_attempts)
-            self.assertEqual(len(manifest["sha256"]), 44)
+            self.assertEqual(len(manifest["sha256"]), 46)
+            snapshot_name = "mrf-python-coverage-postgres-core-snapshots"
+            snapshot = staging / f"{snapshot_name}-123-{producer_attempts[snapshot_name]}"
+            removed = root / "removed-snapshot"
+            snapshot.rename(removed)
+            try:
+                with self.assertRaisesRegex(ValueError, "missing or unexpected staging artifact"):
+                    MEASUREMENT.publish(staging, root / "missing-snapshot", identity, "123", "2", "c" * 40)
+            finally:
+                removed.rename(snapshot)
+            sidecar = snapshot / ".coverage-provenance.postgres.core-snapshots.json"
+            original_sidecar = sidecar.read_bytes()
+            foreign = json.loads(original_sidecar)
+            foreign["head_sha"] = "d" * 40
+            sidecar.write_text(json.dumps(foreign))
+            try:
+                with self.assertRaisesRegex(ValueError, "provenance"):
+                    MEASUREMENT.publish(staging, root / "foreign-snapshot", identity, "123", "2", "c" * 40)
+            finally:
+                sidecar.write_bytes(original_sidecar)
             self.assertEqual(MEASUREMENT.MAX_FILE_BYTES, 32 * 1024 * 1024)
             self.assertEqual(MEASUREMENT.MAX_TOTAL_BYTES, 128 * 1024 * 1024 - 64 * 1024)
             payload_size = sum(path.stat().st_size for path in staging.glob("*/*"))
