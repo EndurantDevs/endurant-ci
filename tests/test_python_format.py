@@ -159,19 +159,27 @@ class PythonFormattingTests(unittest.TestCase):
             self.assertTrue(FORMAT._ruff_configuration_changes("a" * 40, "b" * 40))
 
     def test_reviewed_tool_upgrade_preserves_every_other_policy_setting(self):
-        before = {"required-version": "==0.16.6", "lint": {"select": ["F"]}}
-        after = {**before, "required-version": "==0.16.8"}
-        self.assertTrue(FORMAT._reviewed_ruff_version_update(before, after))
-        for changed in (
-            {**after, "lint": {"select": []}},
-            {**after, "required-version": ">=0.16.8"},
-            {**after, "required-version": "==0.16.9"},
-            {**after, "extend-exclude": ["*.py"]},
-            None,
-        ):
-            with self.subTest(changed=changed):
-                self.assertFalse(FORMAT._reviewed_ruff_version_update(before, changed))
-        self.assertFalse(FORMAT._reviewed_ruff_version_update(after, before))
+        for previous, current in (("0.16.6", "0.16.8"), ("0.16.8", "0.16.10")):
+            with self.subTest(previous=previous, current=current):
+                before = {"required-version": f"=={previous}", "lint": {"select": ["F"]}}
+                after = {**before, "required-version": f"=={current}"}
+                self.assertTrue(FORMAT._reviewed_ruff_version_update(before, after))
+                for changed in (
+                    {**after, "lint": {"select": []}},
+                    {**after, "required-version": f">={current}"},
+                    {**after, "required-version": "==0.16.9"},
+                    {**after, "extend-exclude": ["*.py"]},
+                    None,
+                ):
+                    with self.subTest(changed=changed):
+                        self.assertFalse(FORMAT._reviewed_ruff_version_update(before, changed))
+                self.assertFalse(FORMAT._reviewed_ruff_version_update(after, before))
+        self.assertFalse(
+            FORMAT._reviewed_ruff_version_update(
+                {"required-version": "==0.16.6"},
+                {"required-version": "==0.16.10"},
+            )
+        )
 
     def test_quoted_or_inline_ruff_pyproject_settings_trip_the_configuration_guard(self):
         for contents in (
