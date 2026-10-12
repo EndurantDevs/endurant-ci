@@ -275,6 +275,7 @@ run_python_main() {
     tests/test_custom_import_materialization_postgres.py \
     tests/test_custom_import_read_core_postgres.py \
     tests/test_custom_import_runner_postgres.py \
+    tests/test_custom_import_https_candidate_postgres.py \
     tests/test_custom_import_definition_store_postgres.py \
     tests/test_custom_import_capture_store_postgres.py \
     tests/test_custom_import_segmented_capture_postgres.py \
@@ -1745,6 +1746,7 @@ run_core_postgres() {
     tests/test_custom_import_materialization_postgres.py \
     tests/test_custom_import_read_core_postgres.py \
     tests/test_custom_import_runner_postgres.py \
+    tests/test_custom_import_https_candidate_postgres.py \
     tests/test_custom_import_definition_store_postgres.py; do
     if [ -f "$repository_root/$custom_import_test_path" ]; then
       custom_import_postgres_tests+=("$custom_import_test_path")

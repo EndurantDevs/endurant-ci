@@ -3549,6 +3549,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_materialization_postgres.py",
             "tests/test_custom_import_read_core_postgres.py",
             "tests/test_custom_import_runner_postgres.py",
+            "tests/test_custom_import_https_candidate_postgres.py",
             "tests/test_custom_import_definition_store_postgres.py",
         )
         capture_test_paths = (
