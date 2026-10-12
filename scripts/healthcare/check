@@ -719,6 +719,15 @@ run_container_package() {
   printf -v cleanup_command 'cleanup_container_image $? %q' "$image"
   trap "$cleanup_command" EXIT
   local build_args=(--build-arg "HLTHPRT_SOURCE_COMMIT=${source_commit}")
+  if [ -f scripts/drug_runtime_dependency.py ]; then
+    local dependency_arguments
+    dependency_arguments=$(python3 scripts/drug_runtime_dependency.py) || return 2
+    [ -n "$dependency_arguments" ] || return 2
+    while IFS= read -r arg; do
+      [ -n "$arg" ] || return 2
+      build_args+=("${arg}")
+    done <<< "$dependency_arguments"
+  fi
   local build_command=(docker build)
   if [[ "${PUBLIC_CI_EXPORT_IMAGE:-0}" == 1 ]]; then
     python3 "$CI_ROOT/scripts/source_image.py" prepare-engine
