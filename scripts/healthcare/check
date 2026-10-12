@@ -554,7 +554,7 @@ from importlib import machinery, metadata
 from pathlib import Path
 
 mode = sys.argv[2]
-assert mode in ("0", "1", "graph-projection"), "Unknown native wheel capability"
+assert mode in ("0", "1", "graph-projection", "source-preparation", "graph-fragments"), "Unknown native wheel capability"
 source_root = Path(sys.argv[1]).resolve()
 for directory in (source_root, source_root / "tests"):
     assert machinery.PathFinder.find_spec("ptg2_address_canon", [str(directory)]) is None, "Source checkout shadows native registry wheel"
@@ -584,6 +584,10 @@ for module in extensions:
     verify_module(module)
 if mode == "graph-projection":
     names = ("custom_import_graph_projection_columns_v1",)
+elif mode == "source-preparation":
+    names = ("custom_import_source_columns_v1",)
+elif mode == "graph-fragments":
+    names = ("custom_import_graph_document_fragments_v1",)
 else:
     names = ("plan_registry_ptg_graph_locator_pages", "plan_registry_ptg_graph_member_pages", "verify_registry_ptg_graph_batch")
     if mode == "1":
@@ -592,6 +596,11 @@ assert all(inspect.isbuiltin(function := getattr(native, name, None))
            and any(getattr(module, name, None) is function
                    and function.__module__ in (module.__name__, native.__name__) for module in extensions)
            for name in names), "Native registry extension is incomplete"
+if mode == "source-preparation":
+    bounds = inspect.signature(native.custom_import_source_columns_v1).parameters.get("include_preparation_bounds")
+    assert bounds is not None and bounds.default is False and bounds.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY
+    ), "Native source preparation bounds signature is incomplete"
 PY
 }
 
@@ -618,6 +627,30 @@ PY
     fi
     verify_registry_native_wheel "$repository_root" graph-projection
     wheel_tests+=(tests/test_custom_import_graph_projection_batch.py tests/test_custom_import_graph_projection_pages.py)
+  fi
+  local source_tests=(tests/test_custom_import_source_columns.py
+                      tests/test_custom_import_source_column_adapter.py
+                      tests/test_custom_import_source_arrow_pages.py)
+  local source_present=0 test_path
+  for test_path in "${source_tests[@]}"; do
+    if [ -f "$repository_root/$test_path" ]; then source_present=1; fi
+  done
+  if [ "$source_present" = 1 ]; then
+    for test_path in "${source_tests[@]}"; do
+      if [ ! -f "$repository_root/$test_path" ]; then
+        echo "source preparation wheel tests require all three suites: missing $test_path" >&2
+        return 1
+      fi
+    done
+    verify_registry_native_wheel "$repository_root" source-preparation
+    wheel_tests+=("${source_tests[@]}")
+  fi
+  if [ -f "$repository_root/tests/test_custom_import_graph_document_fragments.py" ]; then
+    verify_registry_native_wheel "$repository_root" graph-fragments
+    wheel_tests+=(tests/test_custom_import_graph_document_fragments.py)
+  fi
+  if [ -f "$repository_root/tests/test_custom_import_graph_serial_metadata.py" ]; then
+    wheel_tests+=(tests/test_custom_import_graph_serial_metadata.py)
   fi
   timeout --foreground 295s python -m pytest -q "${wheel_tests[@]}"
   ci_phase_end
