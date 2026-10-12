@@ -194,7 +194,10 @@ def _reviewed_ruff_version_update(before: dict | None, after: dict | None) -> bo
         previous.pop("required-version", None),
         current.pop("required-version", None),
     )
-    return versions == ("==0.16.6", "==0.16.8") and previous == current
+    return versions in (
+        ("==0.16.6", "==0.16.8"),
+        ("==0.16.8", "==0.16.10"),
+    ) and previous == current
 
 
 def _ruff_configuration_changes(base: str, head: str) -> bool:
