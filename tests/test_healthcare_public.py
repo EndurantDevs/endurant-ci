@@ -102,6 +102,16 @@ MANUAL_SOURCE_SWAP_DEPENDENCIES = (
     "process/reference_family_result_generation.py", "db/connection.py", "db/models/_legacy.py",
 )
 
+CANONICAL_CUTOVER_CAPABILITY = ("tests/test_network_canonical_cutover_postgres.py",)
+CANONICAL_CUTOVER_DEPENDENCIES = (
+    "api/endpoint/npi.py", "api/network_address_scope.py", "process/network_address_projection.py",
+    "process/network_membership_candidate_lifecycle.py", "process/network_membership_copy.py",
+    "process/network_membership_pipeline.py", "process/network_serving_read.py",
+    "tests/test_network_address_read_scope_postgres.py", "tests/test_network_membership_publication_postgres.py",
+    "tests/test_network_membership_serving_indexes_postgres.py", "tests/test_network_serving_routes_postgres.py",
+    "tests/test_network_serving_schema_postgres.py",
+)
+
 COMPANY_ASSERTION_CAPABILITY = (
     "db/models/company_registry_assertions.py", "process/company_registry_assertion_values.py",
     "alembic/versions/20261009020000_company_registry_assertions.py",
@@ -691,17 +701,20 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
             ("completion", REGISTRY_COMPLETION_CAPABILITY, REGISTRY_COMPLETION_DEPENDENCIES),
             ("pricing", REGISTRY_PRICING_CAPABILITY, REGISTRY_PRICING_DEPENDENCIES),
             ("manual-swaps", MANUAL_SOURCE_SWAP_CAPABILITY, MANUAL_SOURCE_SWAP_DEPENDENCIES),
+            ("canonical-cutover", CANONICAL_CUTOVER_CAPABILITY, CANONICAL_CUTOVER_DEPENDENCIES),
             ("maintenance", PROFILE_MAINTENANCE_CAPABILITY, PROFILE_MAINTENANCE_DEPENDENCIES),
         ):
             shard_members = []
             cases = [("legacy", "", "", ""), ("complete", "", "", "")]
-            required = dependencies if kind == "pricing" else (*capability, *dependencies)
+            required = dependencies if kind in {"pricing", "canonical-cutover"} else (*capability, *dependencies)
             cases += [("complete", path, "", "") for path in required]
             cases += [("only", path, "", "") for path in capability]
             cases += [("complete", capability[0], stage, "") for stage in ("symlink", "dangling", "dirty", "untracked")]
             cases += [("complete", "", stage, "") for stage in (
                 "skipped", "empty", "missing-family", "invalid-report", "pytest", "drop", "report-cleanup")]
-            if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps"}:
+            if kind == "canonical-cutover":
+                cases.append(("complete", "", "duplicate", ""))
+            if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover"}:
                 cases += [("complete", "", "", str(index)) for index in range(8)]
             else:
                 cases += [("complete", "", "", "publication")]
@@ -711,7 +724,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     source, runner, log = root / "source", root / "runner", root / "calls"
                     source.mkdir()
                     runner.mkdir()
-                    for path in registry_roster if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps"} else ():
+                    for path in registry_roster if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover"} else ():
                         target = source / path
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.touch()
@@ -729,12 +742,12 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                         target = source / path
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.touch()
-                    if kind in {"completion", "pricing"} and layout == "complete" and changed in registry_roster and not stage:
+                    if kind in {"completion", "pricing", "canonical-cutover"} and layout == "complete" and changed in registry_roster and not stage:
                         (source / changed).unlink()
                     if stage in ("symlink", "dangling"):
                         target = source / changed
                         target.unlink()
-                        live = registry_roster[0] if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps"} else dependencies[0]
+                        live = registry_roster[0] if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover"} else dependencies[0]
                         target.symlink_to(source / (live if stage == "symlink" else "absent"))
                     timeout = root / "timeout"
                     timeout.write_text(f"#!{sys.executable}\n" + r'''
@@ -761,6 +774,9 @@ report = ET.Element("testsuites"); suite = ET.SubElement(report, "testsuite", te
 for module in modules:
     case = ET.SubElement(suite, "testcase", classname=module.removesuffix(".py").replace("/", "."), name="synthetic_native_test")
     if os.environ["FAIL_STAGE"] == "skipped": ET.SubElement(case, "skipped")
+if os.environ["FAIL_STAGE"] == "duplicate":
+    ET.SubElement(suite, "testcase", classname=modules[-1].removesuffix(".py").replace("/", "."), name="synthetic_native_test")
+    suite.set("tests", str(len(modules) + 1))
 path.write_bytes(ET.tostring(report))
 ''')
                     timeout.chmod(0o755)
@@ -794,7 +810,7 @@ PYSHARD
   else command python3 "$@"; fi
 }
 '''
-                    call = (f"run_network_registry_postgres {shard}" if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps"} else
+                    call = (f"run_network_registry_postgres {shard}" if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover"} else
                             "run_provider_profile_postgres postgresql://synthetic/runtime_test profile-publication"
                             if shard == "publication" else "run_profile_control_maintenance_postgres")
                     if changed:
@@ -810,9 +826,9 @@ PYSHARD
                     if changed:
                         self.assertFalse(calls)
                     elif not stage:
-                        self.assertEqual(len(runs), int(kind in {"company", "company-groups", "completion", "pricing", "manual-swaps"} or layout == "complete"))
+                        self.assertEqual(len(runs), int(kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover"} or layout == "complete"))
                     for run in runs:
-                        if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps"}:
+                        if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover"}:
                             self.assertRegex(run["registry"], r"@127\.0\.0\.1:5440/hc_network_registry_[0-9a-f]{32}$")
                             if layout == "complete" and kind in {"company", "company-groups", "manual-swaps"}:
                                 self.assertEqual(run["map"], "1")
@@ -826,7 +842,7 @@ PYSHARD
                             self.assertIsNone(run["schema_alias"])
                         if not shard:
                             self.assertEqual(capability[-1] in run["arguments"], layout == "complete")
-                    if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps"} and shard and not stage:
+                    if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover"} and shard and not stage:
                         shard_members.extend(json.loads((root / "selections").read_text()))
                     if kind == "manual-swaps" and not changed:
                         extensions = [c for c in calls if c.startswith("extensions:")]
@@ -853,7 +869,8 @@ PYSHARD
                              ("company-groups", (COMPANY_ASSERTION_CAPABILITY[-1], *COMPANY_GROUP_HOST_TESTS)),
                             ("completion", (REGISTRY_COMPLETION_CAPABILITY[-1],)),
                             ("pricing", (REGISTRY_PRICING_CAPABILITY[-1],)),
-                             ("manual-swaps", (COMPANY_ASSERTION_CAPABILITY[-1], MANUAL_SOURCE_SWAP_CAPABILITY[-1]))):
+                             ("manual-swaps", (COMPANY_ASSERTION_CAPABILITY[-1], MANUAL_SOURCE_SWAP_CAPABILITY[-1])),
+                            ("canonical-cutover", CANONICAL_CUTOVER_CAPABILITY)):
             members = shard_members_by_kind[kind]
             self.assertEqual(len(members), len(set(members)))
             self.assertCountEqual(members, (*registry_roster, *extras))
@@ -1091,10 +1108,12 @@ for shard in 0 1 2 3; do run_python_main "$shard"; done
         for capability, dependencies, host_tests in (
             (COMPANY_GROUP_CAPABILITY, COMPANY_GROUP_DEPENDENCIES, COMPANY_GROUP_HOST_TESTS),
             (MANUAL_SOURCE_SWAP_CAPABILITY, MANUAL_SOURCE_SWAP_DEPENDENCIES, (MANUAL_SOURCE_SWAP_CAPABILITY[-1],)),
+            (CANONICAL_CUTOVER_CAPABILITY, CANONICAL_CUTOVER_DEPENDENCIES, CANONICAL_CUTOVER_CAPABILITY),
         ):
             required = (*capability, *dependencies)
             cases = [("legacy", "", ""), ("complete", "", "")]
-            cases += [("complete", path, "missing") for path in required]
+            missing_paths = dependencies if capability == CANONICAL_CUTOVER_CAPABILITY else required
+            cases += [("complete", path, "missing") for path in missing_paths]
             cases += [("only", path, "") for path in capability]
             cases += [("complete", path, stage) for path in capability
                       for stage in ("symlink", "dangling", "dirty", "staged", "untracked")]
