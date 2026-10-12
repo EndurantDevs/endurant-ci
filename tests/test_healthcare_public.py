@@ -1781,8 +1781,14 @@ timeout() { echo 'installed tests must not use foreground timeout' >&2; return 9
 python() {
   test "$1" = "$CI_ROOT/scripts/healthcare/supervise_installed.py"
   test "$3" = "$TEST_PATH"
+  test "$HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN" = postgresql://postgres@127.0.0.1:5440/hc_custom_import_test_0123456789abcdef0123456789abcdef
   if [[ "$TEST_PATH" = *installed_operator_postgres.py ]]; then
-    test "${*:4}" = '-n 2 --dist worksteal --durations=9 -vv'
+    if [ "$ACQUISITION" = 1 ]; then
+      test "$4" = tests/test_custom_import_installed_acquisition_postgres.py
+      test "${*:5}" = '-n 2 --dist worksteal --durations=9 -vv'
+    else
+      test "${*:4}" = '-n 2 --dist worksteal --durations=9 -vv'
+    fi
   else
     test "$#" = 3
   fi
@@ -1792,6 +1798,9 @@ python() {
 }
 set -- "$TEST_PATH"
 if [[ "$TEST_PATH" = *installed_operator_postgres.py ]]; then
+  if [ "$ACQUISITION" = 1 ]; then
+    set -- "$@" tests/test_custom_import_installed_acquisition_postgres.py
+  fi
   set -- "$@" -n 2 --dist worksteal --durations=9 -vv
 fi
 if [ "$BACKGROUND" = 1 ]; then
@@ -1807,15 +1816,16 @@ fi
             cases = [(path, status, drained, 0) for path in paths
                      for status, drained in ((0, 1), (17, 1), (124, 1), (0, 0), (17, 0), (124, 0))]
             cases += [(path, status, 1, 1) for path in paths[1:] for status in (0, 17)]
-            for path, status, drained, background in cases:
-                with self.subTest(path=path, status=status, drained=drained, background=background):
+            cases = [(*case, 0) for case in cases] + [(*case, 1) for case in cases if case[0] == paths[0]]
+            for path, status, drained, background, acquisition in cases:
+                with self.subTest(path=path, status=status, drained=drained, background=background, acquisition=acquisition):
                     result = subprocess.run(
                         ["bash", "-eu"], input=script, capture_output=True, text=True,
                         env={**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT),
                              "RUNNER_TEMP": temporary, "CALL_LOG": str(log),
                              "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "postgres",
                              "TEST_STATUS": str(status), "DRAINED": str(drained), "TEST_PATH": path,
-                             "BACKGROUND": str(background)},
+                             "BACKGROUND": str(background), "ACQUISITION": str(acquisition)},
                     )
                     self.assertEqual(result.returncode, status or (0 if drained else 1), result.stderr)
                     calls = log.read_text().splitlines()
@@ -3501,6 +3511,13 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
 
         required_test_paths = REQUIRED_IMPORT_NATIVE_TESTS
         installed_test_path = "tests/test_custom_import_installed_operator_postgres.py"
+        acquisition_test_path = "tests/test_custom_import_installed_acquisition_postgres.py"
+        acquisition_dependencies = (
+            installed_test_path,
+            "tests/custom_import_installed_acquisition.py",
+            "tests/custom_import_postgres_support.py",
+            "tests/test_custom_import_snowflake_operator_cli.py",
+        )
         mixed_test_paths = (
             "tests/test_custom_import_provider_list.py",
             "tests/test_custom_import_provider_geo_sql.py",
@@ -3526,6 +3543,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_bounded_build_postgres.py",
             "tests/test_custom_import_build_source_postgres.py",
             "tests/test_custom_import_build_source_batch_postgres.py",
+            "tests/test_custom_import_admission_actions_postgres.py",
             "tests/test_custom_import_build_output_postgres.py",
             "tests/test_custom_import_segmented_runner_postgres.py",
         )
@@ -3554,9 +3572,11 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
             "tests/test_custom_import_bulk_cutover_reads_postgres.py",
         )
         test_groups = (lifecycle_test_paths, materialization_test_paths, capture_test_paths,
-                       build_test_paths[:3], operator_test_paths, build_test_paths[3:], (installed_test_path,), family_test_paths, snapshot_test_paths, bulk_test_paths)
-        groups_by_lane = {"core-imports": test_groups[:2] + test_groups[3:5],
-                          "core-services": (capture_test_paths,), "core-snapshots": test_groups[5:],
+                       build_test_paths[:4], operator_test_paths[:4], operator_test_paths[4:],
+                       build_test_paths[4:], (installed_test_path, acquisition_test_path), family_test_paths,
+                       snapshot_test_paths, bulk_test_paths)
+        groups_by_lane = {"core-imports": test_groups[:2] + test_groups[3:6],
+                          "core-services": (capture_test_paths,), "core-snapshots": test_groups[6:],
                           "core-ptg": (), "all": test_groups}
         required_by_lane = {"core-imports": (), "core-services": required_test_paths[:1],
                             "core-snapshots": family_test_paths, "core-ptg": (), "all": required_test_paths}
@@ -3571,9 +3591,9 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
         test_paths = tuple(path for group in test_groups for path in group)
         optional_capture_paths = lifecycle_test_paths + materialization_test_paths + capture_test_paths[:-1]
         optional_build_paths = build_test_paths + operator_test_paths
-        optional_test_paths = (optional_capture_paths + optional_build_paths + (installed_test_path,)
+        optional_test_paths = (optional_capture_paths + optional_build_paths + (installed_test_path, acquisition_test_path)
                                + snapshot_test_paths + bulk_test_paths)
-        legacy_optional_paths = tuple(path for path in optional_test_paths if path != installed_test_path)
+        legacy_optional_paths = tuple(path for path in optional_test_paths if path not in (installed_test_path, acquisition_test_path))
         dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
         archive_url = "postgresql://postgres:postgres@127.0.0.1:5440"
         present_path_sets = ((), *((path,) for path in optional_test_paths),
@@ -3584,19 +3604,27 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                   for lane, groups in groups_by_lane.items() for group in groups]
         cases += [(lane, test_paths, family_test_paths[1], "") for lane in ("core-snapshots", "all")]
         cases += [(lane, test_paths, build_test_paths[-1], "") for lane in ("core-snapshots", "all")]
+        cases += [(lane, test_paths, build_test_paths[3], "") for lane in ("core-imports", "all")]
+        cases += [(lane, test_paths, acquisition_test_path, "") for lane in ("core-snapshots", "all")]
         cases += [(lane, tuple(path for path in required if path != missing), "", missing)
                   for lane, required in required_by_lane.items() for missing in required]
         cases += [("core-snapshots", tuple(path for path in family_test_paths if path != missing)
-                   + build_test_paths[3:], "", missing) for missing in family_test_paths]
+                   + build_test_paths[4:], "", missing) for missing in family_test_paths]
+        cases += [(lane, (*required_by_lane[lane], acquisition_test_path), "", missing)
+                  for lane in ("core-snapshots", "all") for missing in acquisition_dependencies]
         cases += [(lane, test_paths, "", "") for lane in ("core-services", "all")]
         cases += [("all", required_test_paths, "", "")]
         for lane, present_paths, failure_path, missing_path in cases:
+            if acquisition_test_path in present_paths:
+                present_paths = tuple(dict.fromkeys((*present_paths, *acquisition_dependencies)))
             with self.subTest(lane=lane, present_paths=present_paths, failure=failure_path), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 source = root / "source"
                 (source / "tests").mkdir(parents=True)
                 for test_path in present_paths:
                     (source / test_path).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
+                if missing_path in acquisition_dependencies:
+                    (source / missing_path).unlink()
                 for test_path in historical_tail_paths[:3]:
                     (source / test_path).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
                 call_log = root / "calls"
@@ -3641,7 +3669,8 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                                         capture_output=True, text=True, check=False)
                 self.assertEqual(result.returncode, 1 if missing_path else (17 if failure_path else 0), result.stderr)
                 if missing_path:
-                    self.assertIn(f"Missing required native import test: {missing_path}", result.stderr)
+                    missing_kind = "installed import dependency" if missing_path in acquisition_dependencies else "native import test"
+                    self.assertIn(f"Missing required {missing_kind}: {missing_path}", result.stderr)
                     if lane == "core-snapshots":
                         self.assertFalse(any(call.startswith("hc_custom_import_test_")
                                              for call in call_log.read_text().splitlines()))
@@ -3651,6 +3680,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                 for test_path in test_paths:
                     if test_path in required_test_paths or (test_path in present_paths and test_path not in mixed_test_paths):
                         self.assertIn(f"--ignore {test_path}", main_call)
+                        self.assertEqual(main_call.split().count(test_path), 1)
                     else:
                         self.assertNotIn(test_path, main_call)
                 executions = [
@@ -3688,7 +3718,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                         route_index += 2
                         continue
                     expected_arguments = list(expected_paths)
-                    if expected_paths == [installed_test_path]:
+                    if expected_paths[0] == installed_test_path:
                         expected_arguments += ["-n", "2", "--dist", "worksteal", "--durations=9", "-vv"]
                     self.assertEqual(routes[route_index].split()[3:], expected_arguments)
                     route_index += 1
