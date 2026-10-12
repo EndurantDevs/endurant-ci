@@ -553,6 +553,8 @@ import sys
 from importlib import machinery, metadata
 from pathlib import Path
 
+mode = sys.argv[2]
+assert mode in ("0", "1", "graph-projection"), "Unknown native wheel capability"
 source_root = Path(sys.argv[1]).resolve()
 for directory in (source_root, source_root / "tests"):
     assert machinery.PathFinder.find_spec("ptg2_address_canon", [str(directory)]) is None, "Source checkout shadows native registry wheel"
@@ -580,9 +582,12 @@ extensions = [module for module in tuple(sys.modules.values())
 assert extensions, "Native registry wheel has no loaded compiled module"
 for module in extensions:
     verify_module(module)
-names = ("plan_registry_ptg_graph_locator_pages", "plan_registry_ptg_graph_member_pages", "verify_registry_ptg_graph_batch")
-if sys.argv[2] == "1":
-    names += ("encode_registry_ptg_capture_batch",)
+if mode == "graph-projection":
+    names = ("custom_import_graph_projection_columns_v1",)
+else:
+    names = ("plan_registry_ptg_graph_locator_pages", "plan_registry_ptg_graph_member_pages", "verify_registry_ptg_graph_batch")
+    if mode == "1":
+        names += ("encode_registry_ptg_capture_batch",)
 assert all(inspect.isbuiltin(function := getattr(native, name, None))
            and any(getattr(module, name, None) is function
                    and function.__module__ in (module.__name__, native.__name__) for module in extensions)
@@ -603,6 +608,16 @@ if not callable(encoder) or not inspect.isbuiltin(encoder):
     raise SystemExit("installed wheel does not provide compiled scalar framing")
 PY
     wheel_tests+=(tests/test_custom_import_scalar_digest.py)
+  fi
+  if [ -f "$repository_root/tests/test_custom_import_graph_projection_batch.py" ] || \
+      [ -f "$repository_root/tests/test_custom_import_graph_projection_pages.py" ]; then
+    if [ ! -f "$repository_root/tests/test_custom_import_graph_projection_batch.py" ] || \
+        [ ! -f "$repository_root/tests/test_custom_import_graph_projection_pages.py" ]; then
+      echo "graph projection wheel tests require both batch and page suites" >&2
+      return 1
+    fi
+    verify_registry_native_wheel "$repository_root" graph-projection
+    wheel_tests+=(tests/test_custom_import_graph_projection_batch.py tests/test_custom_import_graph_projection_pages.py)
   fi
   timeout --foreground 295s python -m pytest -q "${wheel_tests[@]}"
   ci_phase_end
