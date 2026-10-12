@@ -224,6 +224,36 @@ REGISTRY_PTG_GRAPH_EXPORTS = (
 )
 
 
+def _native_wheel_fixture(root, module_source, *, compiled=False):
+    """Reuse an installed CPython extension without compiling or installing a wheel."""
+    root.mkdir(exist_ok=True)
+    module = root / "ptg2_address_canon.py"
+    files = [module]
+    if compiled:
+        from importlib import machinery, util
+        for name, function in (("math", "sqrt"), ("_dbm", "open")):
+            spec = util.find_spec(name)
+            if spec is not None and isinstance(spec.loader, machinery.ExtensionFileLoader):
+                extension = root / Path(spec.origin).name
+                extension.write_bytes(Path(spec.origin).read_bytes())
+                files.append(extension)
+                module_source = f"import {name} as compiled_fixture\ncompiled_function = compiled_fixture.{function}\n" + module_source
+                break
+        else:
+            raise AssertionError("a shared CPython extension fixture is required")
+    module.write_text(module_source)
+    info = root / "ptg2_address_canon-0.1.0.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text("Metadata-Version: 2.4\nName: ptg2_address_canon\nVersion: 0.1.0\n")
+    (info / "WHEEL").write_text("Wheel-Version: 1.0\nRoot-Is-Purelib: false\n")
+    records = []
+    for path in files:
+        digest = base64.urlsafe_b64encode(hashlib.sha256(path.read_bytes()).digest()).decode().rstrip("=")
+        records.append(f"{path.name},sha256={digest},{path.stat().st_size}\n")
+    (info / "RECORD").write_text("".join(records))
+    return module, info
+
+
 def _directory_wheel_script():
     """Exercise the real wheel installer while isolating database and compiler processes."""
     return r'''
@@ -1955,19 +1985,18 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-ptg
         for stage in ("source-shadow", "python-shim", "missing-record", "changed-record", "pure-wheel"):
             with self.subTest(stage=stage), tempfile.TemporaryDirectory() as temporary:
                 source = Path(temporary)
-                module = source / "ptg2_address_canon.py"
-                module.write_text("\n".join(f"{name} = len" for name in (*REGISTRY_PTG_GRAPH_EXPORTS, "encode_registry_ptg_capture_batch")))
-                info = source / "ptg2_address_canon-0.1.0.dist-info"
-                info.mkdir()
-                (info / "METADATA").write_text("Metadata-Version: 2.4\nName: ptg2_address_canon\nVersion: 0.1.0\n")
-                (info / "WHEEL").write_text("Wheel-Version: 1.0\nRoot-Is-Purelib: " + ("true" if stage == "pure-wheel" else "false") + "\n")
-                digest = base64.urlsafe_b64encode(hashlib.sha256(module.read_bytes()).digest()).decode().rstrip("=")
-                (info / "RECORD").write_text("" if stage == "missing-record" else
-                                            f"ptg2_address_canon.py,sha256={'wrong' if stage == 'changed-record' else digest},{module.stat().st_size}\n")
+                exports = (*REGISTRY_PTG_GRAPH_EXPORTS, "encode_registry_ptg_capture_batch", "custom_import_graph_projection_columns_v1")
+                module, info = _native_wheel_fixture(source, "\n".join(f"{name} = len" for name in exports))
+                if stage == "pure-wheel":
+                    (info / "WHEEL").write_text("Wheel-Version: 1.0\nRoot-Is-Purelib: true\n")
+                elif stage == "missing-record":
+                    (info / "RECORD").write_text("")
+                elif stage == "changed-record":
+                    module.write_text(module.read_text() + "\n# changed after installation\n")
                 environment = {**os.environ, "PYTHONPATH": str(source), "PYTHONDONTWRITEBYTECODE": "1"}
                 checkout = source if stage == "source-shadow" else source / "checkout"
                 checkout.mkdir(exist_ok=True)
-                for office in ("0", "1"):
+                for office in ("0", "1", "graph-projection"):
                     prefix = "" if stage == "source-shadow" else "import sys; sys.path.insert(0, sys.argv[3])\n"
                     result = subprocess.run([sys.executable, "-I", "-S", "-", str(checkout), office, str(source)],
                                             input=prefix + probe, cwd=source, env=environment,
@@ -1977,6 +2006,31 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-ptg
                                 "missing-record": "outside its installed wheel", "changed-record": "wheel content changed",
                                 "pure-wheel": "wheel metadata is missing"}[stage]
                     self.assertIn(expected, result.stderr)
+
+    def test_native_wheel_probe_requires_only_the_closed_mode_exports(self):
+        probe = CHECK_FUNCTIONS.split("verify_registry_native_wheel() {\n  python -I - \"$1\" \"$2\" <<'PY'\n", 1)[1].split("\nPY\n}", 1)[0]
+        capture = "encode_registry_ptg_capture_batch"
+        projection = "custom_import_graph_projection_columns_v1"
+        modes = {"0": REGISTRY_PTG_GRAPH_EXPORTS, "1": (*REGISTRY_PTG_GRAPH_EXPORTS, capture),
+                 "graph-projection": (projection,)}
+        exports = (*REGISTRY_PTG_GRAPH_EXPORTS, capture, projection)
+        for missing in (None, REGISTRY_PTG_GRAPH_EXPORTS[0], capture, projection):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source, wheel = root / "source", root / "wheel"
+                source.mkdir()
+                module_source = "\n".join(
+                    f"compiled_fixture.{name} = {name} = compiled_function" for name in exports if name != missing)
+                _native_wheel_fixture(wheel, module_source, compiled=True)
+                for mode in (*modes, "unknown"):
+                    result = subprocess.run([sys.executable, "-I", "-S", "-", str(source), mode, str(wheel)],
+                                            input="import sys; sys.path.insert(0, sys.argv[3])\n" + probe,
+                                            cwd=source, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(result.returncode == 0, mode in modes and missing not in modes[mode], result.stderr)
+                    if mode not in modes:
+                        self.assertIn("Unknown native wheel capability", result.stderr)
+                    elif missing in modes[mode]:
+                        self.assertIn("Native registry extension is incomplete", result.stderr)
 
     def test_registry_native_probe_refuses_conventional_pytest_source_shadows_without_importing(self):
         probe = CHECK_FUNCTIONS.split("verify_registry_native_wheel() {\n  python -I - \"$1\" \"$2\" <<'PY'\n", 1)[1].split("\nPY\n}", 1)[0]
@@ -2005,7 +2059,7 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-ptg
                     original = Path(temporary) / "original.py"
                     original.write_text(body)
                     (directory / "ptg2_address_canon.py").symlink_to(original)
-                for office in ("0", "1"):
+                for office in ("0", "1", "graph-projection"):
                     result = subprocess.run([sys.executable, "-I", "-S", "-", str(source), office], input=shadow_check,
                                             cwd=source, capture_output=True, text=True, timeout=30)
                     self.assertEqual(result.returncode == 0, kind == "absent", result.stderr)
@@ -3310,6 +3364,73 @@ run_wheel_tests() {
                 if present:
                     expected += " " + scalar_test
                 self.assertEqual(result.stdout.strip(), expected if success else "")
+
+    def test_rust_wheel_tests_require_complete_graph_projection_pair_and_compiled_capability(self):
+        start = CHECK_FUNCTIONS.index("  ci_phase_begin rust-wheel-tests\n")
+        stage = CHECK_FUNCTIONS[start:CHECK_FUNCTIONS.index("  ci_phase_end\n", start)]
+        probe_start = CHECK_FUNCTIONS.index("verify_registry_native_wheel() {\n")
+        probe_function = CHECK_FUNCTIONS[probe_start:CHECK_FUNCTIONS.index("\n}\n", probe_start) + 3]
+        graph_tests = ("tests/test_custom_import_graph_projection_batch.py",
+                       "tests/test_custom_import_graph_projection_pages.py")
+        scalar_test = "tests/test_custom_import_scalar_digest.py"
+        compiled = "compiled_fixture.custom_import_graph_projection_columns_v1 = custom_import_graph_projection_columns_v1 = compiled_function\n"
+        no_import = "raise AssertionError('unexpected extension import')\n"
+        cases = (
+            ((), no_import, True, ""),
+            (graph_tests, compiled, True, ""),
+            ((scalar_test, *graph_tests), compiled + "custom_import_scalar_frames_v1 = compiled_function\n", True, ""),
+            ((graph_tests[0],), no_import, False, "require both batch and page suites"),
+            ((graph_tests[1],), no_import, False, "require both batch and page suites"),
+            (graph_tests, "custom_import_graph_projection_columns_v1 = len\n", False, "Native registry"),
+            (graph_tests, "", False, "Native registry extension is incomplete"),
+            (graph_tests, compiled + "custom_import_graph_projection_columns_v1 = len\n", False,
+             "Native registry extension is incomplete"),
+            (graph_tests, compiled + "custom_import_graph_projection_columns_v1 = 0\n", False,
+             "Native registry extension is incomplete"),
+            (graph_tests, compiled + "custom_import_graph_projection_columns_v1 = lambda *args: ()\n", False,
+             "Native registry extension is incomplete"),
+            (graph_tests, "raise ImportError('synthetic extension import failure')\n", False,
+             "synthetic extension import failure"),
+        )
+        for present, module_source, success, error in cases:
+            with self.subTest(present=present, module=module_source), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source, wheel = root / "source", root / "wheel"
+                source.mkdir()
+                (source / "tests").mkdir()
+                for path in present:
+                    (source / path).touch()
+                _native_wheel_fixture(wheel, module_source, compiled=True)
+                bootstrap = root / "probe.py"
+                bootstrap.write_text("import sys\nsys.path.insert(0, sys.argv.pop())\nexec(sys.stdin.read())\n")
+                environment = {**os.environ, "SOURCE_ROOT": str(source), "PYTHON_BIN": sys.executable,
+                               "PYTHONPATH": str(wheel), "PYTHONDONTWRITEBYTECODE": "1",
+                               "WHEEL_ROOT": str(wheel), "PROBE_BOOTSTRAP": str(bootstrap)}
+                script = probe_function + r'''
+repository_root=$SOURCE_ROOT
+ci_phase_begin() { :; }
+python() {
+  if [ "$1" = -I ]; then
+    test "$2" = -
+    shift 2
+    "$PYTHON_BIN" -I -S "$PROBE_BOOTSTRAP" "$@" "$WHEEL_ROOT"
+  else
+    "$PYTHON_BIN" "$@"
+  fi
+}
+timeout() { printf '%s\n' "$*"; }
+run_wheel_tests() {
+''' + stage + "\n}\nrun_wheel_tests\n"
+                result = subprocess.run(["bash", "-euc", script], cwd=source, env=environment,
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode == 0, success, result.stderr)
+                expected = "--foreground 295s python -m pytest -q tests/test_address_canon_pyo3.py"
+                if present:
+                    expected += " " + " ".join(present)
+                self.assertEqual(result.stdout.strip(), expected if success else "")
+                if not success:
+                    self.assertIn(error, result.stderr)
+                    self.assertNotIn("unexpected extension import", result.stderr)
 
     def test_postgres_parallel_preparation_reports_each_failure_without_starting_tests(self):
         for failure in ("python-dependencies", "rust-debug-build", "postgres-prepare", "postgres-tests"):
