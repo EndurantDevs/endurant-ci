@@ -212,6 +212,21 @@ manual_source_swap_native_test_paths() {
   printf '%s\n' tests/test_registry_manual_source_swap_postgres.py
 }
 
+canonical_cutover_native_test_paths() {
+  local native_test=tests/test_network_canonical_cutover_postgres.py
+  if [ ! -e "$repository_root/$native_test" ] && [ ! -L "$repository_root/$native_test" ]; then
+    return 0
+  fi
+  require_native_source_files "$native_test" \
+    api/endpoint/npi.py api/network_address_scope.py process/network_address_projection.py \
+    process/network_membership_candidate_lifecycle.py process/network_membership_copy.py \
+    process/network_membership_pipeline.py process/network_serving_read.py \
+    tests/test_network_address_read_scope_postgres.py tests/test_network_membership_publication_postgres.py \
+    tests/test_network_membership_serving_indexes_postgres.py tests/test_network_serving_routes_postgres.py \
+    tests/test_network_serving_schema_postgres.py || return 1
+  printf '%s\n' "$native_test"
+}
+
 run_python_main() {
   local shard=${1:-}
   case "$shard" in 0|1|2|3) ;; *) usage ;; esac
@@ -219,6 +234,8 @@ run_python_main() {
   company_group_tests=$(company_group_native_test_paths) || return 1
   local manual_source_swap_tests
   manual_source_swap_tests=$(manual_source_swap_native_test_paths) || return 1
+  local canonical_cutover_tests
+  canonical_cutover_tests=$(canonical_cutover_native_test_paths) || return 1
   if [ "${CI_DEPS_READY:-0}" = 1 ]; then
     prepare_debug_rust_binaries cargo build --locked --bins --manifest-path support/ptg2_scanner/Cargo.toml
   else
@@ -240,6 +257,9 @@ run_python_main() {
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
   done <<< "$manual_source_swap_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
+  done <<< "$canonical_cutover_tests"
   for test_path in "${capacity_tests[@]}"; do
     collection_args+=(--ignore "$test_path")
   done
@@ -1258,12 +1278,17 @@ run_network_registry_postgres() (
   company_group_tests=$(company_group_native_test_paths) || return 1
   local manual_source_swap_tests
   manual_source_swap_tests=$(manual_source_swap_native_test_paths) || return 1
+  local canonical_cutover_tests
+  canonical_cutover_tests=$(canonical_cutover_native_test_paths) || return 1
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$company_group_tests"
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$manual_source_swap_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || registry_tests+=("$test_path")
+  done <<< "$canonical_cutover_tests"
   local completion_present=0
   local completion_capability=(
     process/registry_source_admission_receipt.py
