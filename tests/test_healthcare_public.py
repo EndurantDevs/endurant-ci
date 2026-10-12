@@ -223,6 +223,26 @@ REGISTRY_PTG_GRAPH_EXPORTS = (
     "verify_registry_ptg_graph_batch",
 )
 
+SOURCE_COLUMN_WHEEL_TESTS = (
+    "tests/test_custom_import_source_columns.py",
+    "tests/test_custom_import_source_column_adapter.py",
+    "tests/test_custom_import_source_arrow_pages.py",
+)
+GRAPH_FRAGMENT_WHEEL_TESTS = (
+    "tests/test_custom_import_graph_document_fragments.py",
+    "tests/test_custom_import_graph_serial_metadata.py",
+)
+SOURCE_BOUNDS_SIGNATURE_FIXTURE = '''
+import inspect
+original_signature = inspect.signature
+def fixture_signature(function):
+    if function is compiled_function:
+        return inspect.Signature([inspect.Parameter(
+            "include_preparation_bounds", inspect.Parameter.POSITIONAL_OR_KEYWORD, default=False)])
+    return original_signature(function)
+inspect.signature = fixture_signature
+'''
+
 
 def _native_wheel_fixture(root, module_source, *, compiled=False):
     """Reuse an installed CPython extension without compiling or installing a wheel."""
@@ -1985,7 +2005,8 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-ptg
         for stage in ("source-shadow", "python-shim", "missing-record", "changed-record", "pure-wheel"):
             with self.subTest(stage=stage), tempfile.TemporaryDirectory() as temporary:
                 source = Path(temporary)
-                exports = (*REGISTRY_PTG_GRAPH_EXPORTS, "encode_registry_ptg_capture_batch", "custom_import_graph_projection_columns_v1")
+                exports = (*REGISTRY_PTG_GRAPH_EXPORTS, "encode_registry_ptg_capture_batch", "custom_import_graph_projection_columns_v1",
+                           "custom_import_source_columns_v1", "custom_import_graph_document_fragments_v1")
                 module, info = _native_wheel_fixture(source, "\n".join(f"{name} = len" for name in exports))
                 if stage == "pure-wheel":
                     (info / "WHEEL").write_text("Wheel-Version: 1.0\nRoot-Is-Purelib: true\n")
@@ -1996,7 +2017,7 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-ptg
                 environment = {**os.environ, "PYTHONPATH": str(source), "PYTHONDONTWRITEBYTECODE": "1"}
                 checkout = source if stage == "source-shadow" else source / "checkout"
                 checkout.mkdir(exist_ok=True)
-                for office in ("0", "1", "graph-projection"):
+                for office in ("0", "1", "graph-projection", "source-preparation", "graph-fragments"):
                     prefix = "" if stage == "source-shadow" else "import sys; sys.path.insert(0, sys.argv[3])\n"
                     result = subprocess.run([sys.executable, "-I", "-S", "-", str(checkout), office, str(source)],
                                             input=prefix + probe, cwd=source, env=environment,
@@ -2011,16 +2032,20 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-ptg
         probe = CHECK_FUNCTIONS.split("verify_registry_native_wheel() {\n  python -I - \"$1\" \"$2\" <<'PY'\n", 1)[1].split("\nPY\n}", 1)[0]
         capture = "encode_registry_ptg_capture_batch"
         projection = "custom_import_graph_projection_columns_v1"
+        source_columns = "custom_import_source_columns_v1"
+        fragments = "custom_import_graph_document_fragments_v1"
         modes = {"0": REGISTRY_PTG_GRAPH_EXPORTS, "1": (*REGISTRY_PTG_GRAPH_EXPORTS, capture),
-                 "graph-projection": (projection,)}
-        exports = (*REGISTRY_PTG_GRAPH_EXPORTS, capture, projection)
-        for missing in (None, REGISTRY_PTG_GRAPH_EXPORTS[0], capture, projection):
+                 "graph-projection": (projection,), "source-preparation": (source_columns,),
+                 "graph-fragments": (fragments,)}
+        exports = (*REGISTRY_PTG_GRAPH_EXPORTS, capture, projection, source_columns, fragments)
+        for missing in (None, REGISTRY_PTG_GRAPH_EXPORTS[0], capture, projection, source_columns, fragments):
             with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 source, wheel = root / "source", root / "wheel"
                 source.mkdir()
                 module_source = "\n".join(
                     f"compiled_fixture.{name} = {name} = compiled_function" for name in exports if name != missing)
+                module_source += "\n" + SOURCE_BOUNDS_SIGNATURE_FIXTURE
                 _native_wheel_fixture(wheel, module_source, compiled=True)
                 for mode in (*modes, "unknown"):
                     result = subprocess.run([sys.executable, "-I", "-S", "-", str(source), mode, str(wheel)],
@@ -2059,7 +2084,7 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-ptg
                     original = Path(temporary) / "original.py"
                     original.write_text(body)
                     (directory / "ptg2_address_canon.py").symlink_to(original)
-                for office in ("0", "1", "graph-projection"):
+                for office in ("0", "1", "graph-projection", "source-preparation", "graph-fragments"):
                     result = subprocess.run([sys.executable, "-I", "-S", "-", str(source), office], input=shadow_check,
                                             cwd=source, capture_output=True, text=True, timeout=30)
                     self.assertEqual(result.returncode == 0, kind == "absent", result.stderr)
@@ -3417,6 +3442,83 @@ python() {
   else
     "$PYTHON_BIN" "$@"
   fi
+}
+timeout() { printf '%s\n' "$*"; }
+run_wheel_tests() {
+''' + stage + "\n}\nrun_wheel_tests\n"
+                result = subprocess.run(["bash", "-euc", script], cwd=source, env=environment,
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode == 0, success, result.stderr)
+                expected = "--foreground 295s python -m pytest -q tests/test_address_canon_pyo3.py"
+                if present:
+                    expected += " " + " ".join(present)
+                self.assertEqual(result.stdout.strip(), expected if success else "")
+                if not success:
+                    self.assertIn(error, result.stderr)
+                    self.assertNotIn("unexpected extension import", result.stderr)
+
+    def test_rust_wheel_tests_require_complete_source_suites_and_verified_new_exports(self):
+        start = CHECK_FUNCTIONS.index("  ci_phase_begin rust-wheel-tests\n")
+        stage = CHECK_FUNCTIONS[start:CHECK_FUNCTIONS.index("  ci_phase_end\n", start)]
+        probe_start = CHECK_FUNCTIONS.index("verify_registry_native_wheel() {\n")
+        probe_function = CHECK_FUNCTIONS[probe_start:CHECK_FUNCTIONS.index("\n}\n", probe_start) + 3]
+        source_export = "custom_import_source_columns_v1"
+        fragment_export = "custom_import_graph_document_fragments_v1"
+        compiled_source = f"compiled_fixture.{source_export} = {source_export} = compiled_function\n"
+        compiled_fragments = f"compiled_fixture.{fragment_export} = {fragment_export} = compiled_function\n"
+        valid_source = compiled_source + SOURCE_BOUNDS_SIGNATURE_FIXTURE
+        no_import = "raise AssertionError('unexpected extension import')\n"
+        cases = [
+            ((), no_import, True, ""),
+            (SOURCE_COLUMN_WHEEL_TESTS, valid_source, True, ""),
+            (GRAPH_FRAGMENT_WHEEL_TESTS[:1], compiled_fragments, True, ""),
+            (GRAPH_FRAGMENT_WHEEL_TESTS[1:], no_import, True, ""),
+            ((*SOURCE_COLUMN_WHEEL_TESTS, *GRAPH_FRAGMENT_WHEEL_TESTS),
+             valid_source + compiled_fragments, True, ""),
+            (SOURCE_COLUMN_WHEEL_TESTS, "", False, "Native registry extension is incomplete"),
+            (SOURCE_COLUMN_WHEEL_TESTS, f"{source_export} = len\n", False,
+             "Native registry extension is incomplete"),
+            (SOURCE_COLUMN_WHEEL_TESTS, compiled_source + f"{source_export} = len\n", False,
+             "Native registry extension is incomplete"),
+            (SOURCE_COLUMN_WHEEL_TESTS, "import _operator\n" +
+             f"compiled_fixture.{source_export} = {source_export} = _operator.add\n", False,
+             "Native registry extension is incomplete"),
+            (SOURCE_COLUMN_WHEEL_TESTS, valid_source +
+             "compiled_fixture.__spec__.origin = '/nonexistent/foreign-extension.so'\n", False,
+             "no loaded compiled module"),
+            (SOURCE_COLUMN_WHEEL_TESTS, compiled_source, False, "bounds signature is incomplete"),
+            (SOURCE_COLUMN_WHEEL_TESTS, valid_source.replace("default=False", "default=True"), False,
+             "bounds signature is incomplete"),
+            (SOURCE_COLUMN_WHEEL_TESTS, valid_source.replace("POSITIONAL_OR_KEYWORD", "POSITIONAL_ONLY"), False,
+             "bounds signature is incomplete"),
+            (GRAPH_FRAGMENT_WHEEL_TESTS[:1], f"{fragment_export} = len\n", False,
+             "Native registry extension is incomplete"),
+            (GRAPH_FRAGMENT_WHEEL_TESTS[:1], compiled_fragments + f"{fragment_export} = len\n", False,
+             "Native registry extension is incomplete"),
+        ]
+        cases += [(tuple(path for path in SOURCE_COLUMN_WHEEL_TESTS if path != missing),
+                   no_import, False, "require all three suites") for missing in SOURCE_COLUMN_WHEEL_TESTS]
+        cases += [((path,), no_import, False, "require all three suites") for path in SOURCE_COLUMN_WHEEL_TESTS]
+        for present, module_source, success, error in cases:
+            with self.subTest(present=present, module=module_source), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source, wheel = root / "source", root / "wheel"
+                (source / "tests").mkdir(parents=True)
+                for path in present:
+                    (source / path).touch()
+                _native_wheel_fixture(wheel, module_source, compiled=True)
+                bootstrap = root / "probe.py"
+                bootstrap.write_text("import sys\nsys.path.insert(0, sys.argv.pop())\nexec(sys.stdin.read())\n")
+                environment = {**os.environ, "SOURCE_ROOT": str(source), "PYTHON_BIN": sys.executable,
+                               "WHEEL_ROOT": str(wheel), "PROBE_BOOTSTRAP": str(bootstrap),
+                               "PYTHONDONTWRITEBYTECODE": "1"}
+                script = probe_function + r'''
+repository_root=$SOURCE_ROOT
+ci_phase_begin() { :; }
+python() {
+  test "$1" = -I && test "$2" = -
+  shift 2
+  "$PYTHON_BIN" -I -S "$PROBE_BOOTSTRAP" "$@" "$WHEEL_ROOT"
 }
 timeout() { printf '%s\n' "$*"; }
 run_wheel_tests() {
