@@ -227,6 +227,25 @@ canonical_cutover_native_test_paths() {
   printf '%s\n' "$native_test"
 }
 
+naic_native_test_paths() {
+  local capability=(process/registry_naic_source.py tests/registry_naic_fixtures.py
+                    tests/test_registry_naic_source.py tests/test_registry_naic_source_native.py
+                    tests/test_registry_naic_source_postgres.py)
+  local source_path present=0
+  for source_path in "${capability[@]}"; do
+    if [ -e "$repository_root/$source_path" ] || [ -L "$repository_root/$source_path" ]; then present=1; fi
+  done
+  [ "$present" = 1 ] || return 0
+  require_native_source_files "${capability[@]}" \
+    process/registry_naic_identity.py process/registry_naic_observations.py \
+    process/registry_source_admission.py \
+    process/registry_source_observation_store.py process/registry_identity_materialization.py \
+    tests/test_network_serving_schema_postgres.py support/ptg2_scanner/src/lib.rs \
+    support/ptg2_scanner/src/python_registry.rs support/ptg2_scanner/src/naic_company_registry.rs || return 1
+  printf '%s\n' tests/test_registry_naic_source.py tests/test_registry_naic_source_native.py \
+    tests/test_registry_naic_source_postgres.py
+}
+
 run_python_main() {
   local shard=${1:-}
   case "$shard" in 0|1|2|3) ;; *) usage ;; esac
@@ -236,6 +255,8 @@ run_python_main() {
   manual_source_swap_tests=$(manual_source_swap_native_test_paths) || return 1
   local canonical_cutover_tests
   canonical_cutover_tests=$(canonical_cutover_native_test_paths) || return 1
+  local naic_tests
+  naic_tests=$(naic_native_test_paths) || return 1
   if [ "${CI_DEPS_READY:-0}" = 1 ]; then
     prepare_debug_rust_binaries cargo build --locked --bins --manifest-path support/ptg2_scanner/Cargo.toml
   else
@@ -260,6 +281,9 @@ run_python_main() {
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
   done <<< "$canonical_cutover_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
+  done <<< "$naic_tests"
   for test_path in "${capacity_tests[@]}"; do
     collection_args+=(--ignore "$test_path")
   done
@@ -554,7 +578,7 @@ from importlib import machinery, metadata
 from pathlib import Path
 
 mode = sys.argv[2]
-assert mode in ("0", "1", "graph-projection", "source-preparation", "graph-fragments"), "Unknown native wheel capability"
+assert mode in ("0", "1", "graph-projection", "source-preparation", "graph-fragments", "naic"), "Unknown native wheel capability"
 source_root = Path(sys.argv[1]).resolve()
 for directory in (source_root, source_root / "tests"):
     assert machinery.PathFinder.find_spec("ptg2_address_canon", [str(directory)]) is None, "Source checkout shadows native registry wheel"
@@ -588,6 +612,8 @@ elif mode == "source-preparation":
     names = ("custom_import_source_columns_v1",)
 elif mode == "graph-fragments":
     names = ("custom_import_graph_document_fragments_v1",)
+elif mode == "naic":
+    names = ("encode_naic_company_registry_observations",)
 else:
     names = ("plan_registry_ptg_graph_locator_pages", "plan_registry_ptg_graph_member_pages", "verify_registry_ptg_graph_batch")
     if mode == "1":
@@ -1347,6 +1373,11 @@ run_network_registry_postgres() (
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$canonical_cutover_tests"
+  local naic_tests
+  naic_tests=$(naic_native_test_paths) || return 1
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || registry_tests+=("$test_path")
+  done <<< "$naic_tests"
   local completion_present=0
   local completion_capability=(
     process/registry_source_admission_receipt.py
@@ -1398,6 +1429,9 @@ run_network_registry_postgres() (
   done
   test "$(rustc --version | awk '{print $2}')" = 1.98.1
   install_address_canon_wheel
+  if [ -n "$naic_tests" ]; then
+    verify_registry_native_wheel "$repository_root" naic
+  fi
   python -c 'import asyncpg; import ptg2_address_canon as native; assert all(callable(getattr(native, name, None)) for name in ("encode_network_membership_batch", "encode_cms_mlr_observations", "encode_cms_planfinder_observations", "validate_network_catalog_batch", "validate_company_network_assertions", "encode_network_source_binding_batch", "build_registry_network_coverage", "parse_registry_target_ledger", "encode_registry_target_ledger_artifact", "encode_registry_required_target_review_artifact", "validate_registry_required_target_review_artifacts", "validate_registry_required_target_ledger_artifact", "extract_fhir_network_identity_batch", "encode_fhir_network_identity_batch", "canonicalize_batch", "canon_version")), "Native registry extension is incomplete"'
   registry_report=""
   registry_nodeids=""

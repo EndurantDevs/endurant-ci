@@ -132,6 +132,20 @@ COMPANY_GROUP_DEPENDENCIES = (
     *COMPANY_ASSERTION_CAPABILITY, *COMPANY_ASSERTION_DEPENDENCIES,
     "support/ptg2_scanner/src/lib.rs", "support/ptg2_scanner/src/company_group_assertions.rs",
 )
+NAIC_CAPABILITY = (
+    "process/registry_naic_source.py", "tests/registry_naic_fixtures.py",
+    "tests/test_registry_naic_source.py", "tests/test_registry_naic_source_native.py",
+    "tests/test_registry_naic_source_postgres.py",
+)
+NAIC_HOST_TESTS = NAIC_CAPABILITY[2:]
+NAIC_DEPENDENCIES = (
+    "process/registry_naic_identity.py", "process/registry_naic_observations.py",
+    "process/registry_source_admission.py",
+    "process/registry_source_observation_store.py", "process/registry_identity_materialization.py",
+    "tests/test_network_serving_schema_postgres.py", "support/ptg2_scanner/src/lib.rs",
+    "support/ptg2_scanner/src/python_registry.rs", "support/ptg2_scanner/src/naic_company_registry.rs",
+)
+
 REGISTRY_COMPLETION_CAPABILITY = (
     "process/registry_source_admission_receipt.py",
     "alembic/versions/20261010030000_registry_source_admission_receipt.py",
@@ -747,6 +761,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
         manual_swap_shard_extensions = []
         for kind, capability, dependencies in (
             ("company", COMPANY_ASSERTION_CAPABILITY, COMPANY_ASSERTION_DEPENDENCIES),
+            ("naic", NAIC_CAPABILITY, NAIC_DEPENDENCIES),
             ("company-groups", COMPANY_GROUP_CAPABILITY, COMPANY_GROUP_DEPENDENCIES),
             ("completion", REGISTRY_COMPLETION_CAPABILITY, REGISTRY_COMPLETION_DEPENDENCIES),
             ("pricing", REGISTRY_PRICING_CAPABILITY, REGISTRY_PRICING_DEPENDENCIES),
@@ -764,7 +779,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                 "skipped", "empty", "missing-family", "invalid-report", "pytest", "drop", "report-cleanup")]
             if kind == "canonical-cutover":
                 cases.append(("complete", "", "duplicate", ""))
-            if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover"}:
+            if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic"}:
                 cases += [("complete", "", "", str(index)) for index in range(8)]
             else:
                 cases += [("complete", "", "", "publication")]
@@ -774,7 +789,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     source, runner, log = root / "source", root / "runner", root / "calls"
                     source.mkdir()
                     runner.mkdir()
-                    for path in registry_roster if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover"} else ():
+                    for path in registry_roster if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic"} else ():
                         target = source / path
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.touch()
@@ -792,12 +807,12 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                         target = source / path
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.touch()
-                    if kind in {"completion", "pricing", "canonical-cutover"} and layout == "complete" and changed in registry_roster and not stage:
+                    if kind in {"completion", "pricing", "canonical-cutover", "naic"} and layout == "complete" and changed in registry_roster and not stage:
                         (source / changed).unlink()
                     if stage in ("symlink", "dangling"):
                         target = source / changed
                         target.unlink()
-                        live = registry_roster[0] if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover"} else dependencies[0]
+                        live = registry_roster[0] if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic"} else dependencies[0]
                         target.symlink_to(source / (live if stage == "symlink" else "absent"))
                     timeout = root / "timeout"
                     timeout.write_text(f"#!{sys.executable}\n" + r'''
@@ -843,6 +858,7 @@ path.write_bytes(ET.tostring(report))
                     script = CHECK_FUNCTIONS + r'''
 git() { [[ "$FAIL_STAGE" != dirty && "$FAIL_STAGE" != untracked ]] || [[ "${!#}" != "$CHANGED_PATH" ]]; }
 rustc() { echo 'rustc 1.98.1'; }
+verify_registry_native_wheel() { test "$2" = naic; printf 'naic-exports\n' >> "$CALL_LOG"; }
 install_address_canon_wheel() { printf 'wheel\n' >> "$CALL_LOG"; }
 create_test_database() { printf 'create:%s\n' "$1" >> "$CALL_LOG"; }
 drop_test_database() { printf 'drop:%s\n' "$1" >> "$CALL_LOG"; [[ "$FAIL_STAGE" != drop ]]; }
@@ -860,7 +876,7 @@ PYSHARD
   else command python3 "$@"; fi
 }
 '''
-                    call = (f"run_network_registry_postgres {shard}" if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover"} else
+                    call = (f"run_network_registry_postgres {shard}" if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic"} else
                             "run_provider_profile_postgres postgresql://synthetic/runtime_test profile-publication"
                             if shard == "publication" else "run_profile_control_maintenance_postgres")
                     if changed:
@@ -876,9 +892,9 @@ PYSHARD
                     if changed:
                         self.assertFalse(calls)
                     elif not stage:
-                        self.assertEqual(len(runs), int(kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover"} or layout == "complete"))
+                        self.assertEqual(len(runs), int(kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic"} or layout == "complete"))
                     for run in runs:
-                        if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover"}:
+                        if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic"}:
                             self.assertRegex(run["registry"], r"@127\.0\.0\.1:5440/hc_network_registry_[0-9a-f]{32}$")
                             if layout == "complete" and kind in {"company", "company-groups", "manual-swaps"}:
                                 self.assertEqual(run["map"], "1")
@@ -892,7 +908,7 @@ PYSHARD
                             self.assertIsNone(run["schema_alias"])
                         if not shard:
                             self.assertEqual(capability[-1] in run["arguments"], layout == "complete")
-                    if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover"} and shard and not stage:
+                    if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic"} and shard and not stage:
                         shard_members.extend(json.loads((root / "selections").read_text()))
                     if kind == "manual-swaps" and not changed:
                         extensions = [c for c in calls if c.startswith("extensions:")]
@@ -920,7 +936,8 @@ PYSHARD
                             ("completion", (REGISTRY_COMPLETION_CAPABILITY[-1],)),
                             ("pricing", (REGISTRY_PRICING_CAPABILITY[-1],)),
                              ("manual-swaps", (COMPANY_ASSERTION_CAPABILITY[-1], MANUAL_SOURCE_SWAP_CAPABILITY[-1])),
-                            ("canonical-cutover", CANONICAL_CUTOVER_CAPABILITY)):
+                            ("canonical-cutover", CANONICAL_CUTOVER_CAPABILITY),
+                             ("naic", NAIC_HOST_TESTS)):
             members = shard_members_by_kind[kind]
             self.assertEqual(len(members), len(set(members)))
             self.assertCountEqual(members, (*registry_roster, *extras))
@@ -1159,6 +1176,7 @@ for shard in 0 1 2 3; do run_python_main "$shard"; done
             (COMPANY_GROUP_CAPABILITY, COMPANY_GROUP_DEPENDENCIES, COMPANY_GROUP_HOST_TESTS),
             (MANUAL_SOURCE_SWAP_CAPABILITY, MANUAL_SOURCE_SWAP_DEPENDENCIES, (MANUAL_SOURCE_SWAP_CAPABILITY[-1],)),
             (CANONICAL_CUTOVER_CAPABILITY, CANONICAL_CUTOVER_DEPENDENCIES, CANONICAL_CUTOVER_CAPABILITY),
+            (NAIC_CAPABILITY, NAIC_DEPENDENCIES, NAIC_HOST_TESTS),
         ):
             required = (*capability, *dependencies)
             cases = [("legacy", "", ""), ("complete", "", "")]
@@ -2017,7 +2035,7 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-ptg
                 environment = {**os.environ, "PYTHONPATH": str(source), "PYTHONDONTWRITEBYTECODE": "1"}
                 checkout = source if stage == "source-shadow" else source / "checkout"
                 checkout.mkdir(exist_ok=True)
-                for office in ("0", "1", "graph-projection", "source-preparation", "graph-fragments"):
+                for office in ("0", "1", "graph-projection", "source-preparation", "graph-fragments", "naic"):
                     prefix = "" if stage == "source-shadow" else "import sys; sys.path.insert(0, sys.argv[3])\n"
                     result = subprocess.run([sys.executable, "-I", "-S", "-", str(checkout), office, str(source)],
                                             input=prefix + probe, cwd=source, env=environment,
@@ -2034,11 +2052,12 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-ptg
         projection = "custom_import_graph_projection_columns_v1"
         source_columns = "custom_import_source_columns_v1"
         fragments = "custom_import_graph_document_fragments_v1"
+        naic = "encode_naic_company_registry_observations"
         modes = {"0": REGISTRY_PTG_GRAPH_EXPORTS, "1": (*REGISTRY_PTG_GRAPH_EXPORTS, capture),
                  "graph-projection": (projection,), "source-preparation": (source_columns,),
-                 "graph-fragments": (fragments,)}
-        exports = (*REGISTRY_PTG_GRAPH_EXPORTS, capture, projection, source_columns, fragments)
-        for missing in (None, REGISTRY_PTG_GRAPH_EXPORTS[0], capture, projection, source_columns, fragments):
+                 "graph-fragments": (fragments,), "naic": (naic,)}
+        exports = (*REGISTRY_PTG_GRAPH_EXPORTS, capture, projection, source_columns, fragments, naic)
+        for missing in (None, *exports):
             with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 source, wheel = root / "source", root / "wheel"
@@ -2084,7 +2103,7 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-ptg
                     original = Path(temporary) / "original.py"
                     original.write_text(body)
                     (directory / "ptg2_address_canon.py").symlink_to(original)
-                for office in ("0", "1", "graph-projection", "source-preparation", "graph-fragments"):
+                for office in ("0", "1", "graph-projection", "source-preparation", "graph-fragments", "naic"):
                     result = subprocess.run([sys.executable, "-I", "-S", "-", str(source), office], input=shadow_check,
                                             cwd=source, capture_output=True, text=True, timeout=30)
                     self.assertEqual(result.returncode == 0, kind == "absent", result.stderr)
