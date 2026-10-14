@@ -53,8 +53,9 @@ def render_workflow(kind, revision, caller):
         validation["run"] = validation["run"].replace("SECONDS + 2400", "SECONDS + 540")
         publish["steps"].insert(0, validation)
     smoke_steps = workflow["jobs"]["smoke"]["steps"]
-    smoke_steps[:] = [step for step in smoke_steps if not step.get("uses", "").startswith("actions/setup-python@")
-                      and step.get("name") != "Install uv-managed Python"]
+    if any(step.get("name") == "Install pinned uv" for step in smoke_steps):
+        smoke_steps[:] = [step for step in smoke_steps if not step.get("uses", "").startswith("actions/setup-python@")
+                          and step.get("name") != "Install uv-managed Python"]
     for index, step in enumerate(smoke_steps):
         if step.get("name") == "Install pinned uv":
             step.clear()
@@ -109,7 +110,7 @@ def render_workflow(kind, revision, caller):
              "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
              "with": {"name": kind + "-public-image-${{ github.run_id }}-${{ github.run_attempt }}",
                       "path": "${{ runner.temp }}/public-image-receipt/image.json",
-                      "if-no-files-found": "error", "retention-days": 1}},
+                      "if-no-files-found": "error", "retention-days": 90}},
             {"name": "Reconcile DEV image publication", "if": "always() && steps.image.outputs.publish == 'true'",
              "env": {"GH_TOKEN": "${{ github.token }}"},
              "run": "python3 ci/scripts/source_image.py reconcile"},
@@ -174,6 +175,39 @@ def render_workflow(kind, revision, caller):
     return "# Generated from the pinned Endurance CI workflow; refresh with scripts/render_workflow.py.\n" + yaml.safe_dump(workflow, sort_keys=False, width=120)
 
 
+def render_common_test_update(kind, revision, caller):
+    """Keep an existing database/release recipe while adding common-test proof."""
+    if kind != "healthcare":
+        raise ValueError("preserving stage contracts requires the healthcare workflow")
+    original = yaml.safe_load(caller.read_text())
+    original["on"] = original.pop(True) if True in original else original["on"]
+    updated = yaml.safe_load(render_workflow(kind, revision, caller))
+    original["permissions"]["checks"] = "read"
+    for identifier in ("python-tests", "capacity-evidence"):
+        original["jobs"][identifier] = updated["jobs"][identifier]
+        original["jobs"][identifier].setdefault("env", {})["CI_REVISION"] = revision
+    steps = original["jobs"]["measurement"]["steps"]
+    steps[:] = [step for step in steps if step.get("name") not in {
+        "Check out pinned common test verifier", "Refresh current and original native test provenance"}]
+    index = next(index for index, step in enumerate(steps)
+                 if step.get("name") == "Download immutable measurement artifacts")
+    steps[index:index] = [
+        {"name": "Check out pinned common test verifier",
+         "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+         "with": {"repository": "EndurantDevs/endurant-ci", "ref": revision,
+                  "path": "common-ci", "persist-credentials": False}},
+        {"name": "Refresh current and original native test provenance",
+         "env": {"GH_TOKEN": "${{ github.token }}"}, "working-directory": "${{ github.workspace }}",
+         "run": 'python3 common-ci/scripts/common_test_verify.py --source-repository "$SOURCE_REPOSITORY" '
+                '--source-sha "$SOURCE_SHA" --output "$RUNNER_TEMP/common-test-current-verification.json"'},
+    ]
+    for step in original["jobs"]["dev-image-publication"]["steps"]:
+        if step.get("name") == "Upload DEV image receipt":
+            step["with"]["retention-days"] = 90
+    return "# Generated service validation with independently pinned common-test verification.\n" + yaml.safe_dump(
+        original, sort_keys=False, width=120)
+
+
 def render_metadata_recovery(kind, revision):
     if kind not in {"healthcare", "drug"} or not re.fullmatch(r"[0-9a-f]{40}", revision) or set(revision) == {"0"}:
         raise ValueError("an approved workflow kind and exact nonzero package revision are required")
@@ -217,8 +251,12 @@ if __name__ == "__main__":
     parser.add_argument("caller", type=Path)
     parser.add_argument("--metadata-recovery", action="store_true",
                         help="write only the trusted sibling metadata-recovery.yml workflow")
+    parser.add_argument("--preserve-stage-contracts", action="store_true",
+                        help="keep existing database and release stages when updating common test proof")
     args = parser.parse_args()
     if args.metadata_recovery:
         args.caller.with_name("metadata-recovery.yml").write_text(render_metadata_recovery(args.kind, args.revision))
+    elif args.preserve_stage_contracts:
+        args.caller.write_text(render_common_test_update(args.kind, args.revision, args.caller))
     else:
         args.caller.write_text(render_workflow(args.kind, args.revision, args.caller))

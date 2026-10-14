@@ -3149,7 +3149,7 @@ RUNTIME_BASE_IMAGE=synthetic
             root = Path(temporary)
             for job_id in ("python-tests", "address-canonical-db-tests"):
                 job = workflow["jobs"][job_id]
-                command = job["steps"][-1]["run"]
+                command = next(step["run"] for step in job["steps"] if step.get("id") == "coverage-output")
                 for row in job["strategy"]["matrix"]["include"]:
                     output = root / row["output"]
                     env = {**os.environ, "ARTIFACT_OUTPUT": row["output"], "ARTIFACT_ID": "123",

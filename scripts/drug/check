@@ -5,6 +5,7 @@ set -euo pipefail
 cd "${SOURCE_ROOT:?SOURCE_ROOT must name the exact public checkout}"
 : "${CI_ROOT:?CI_ROOT must name the pinned public CI checkout}"
 source "$CI_ROOT/scripts/phase_timing.sh"
+source "$CI_ROOT/scripts/public_common_test.sh"
 export PYTEST_BOORST=${PYTEST_BOORST-1}
 
 readonly PYTHON_VERSION='3.14.7'
@@ -180,7 +181,8 @@ quality() {
 }
 
 test_run() {
-    "$python_bin" -m coverage run --branch --source=. -m pytest -q
+    public_common_test_run drug-python .coverage \
+        "$python_bin" -m coverage run --branch --source=. -m pytest -q
 }
 
 coverage_report() {
@@ -194,6 +196,7 @@ coverage_provenance() {
         --base "$(base_sha)" \
         --report test-coverage-python.json \
         --output coverage-provenance.json
+    public_common_test_provenance coverage-provenance.json drug-python
 }
 
 coverage_measurement() {
@@ -224,7 +227,7 @@ postgres18() {
     selection="$("$python_bin" "$CI_ROOT/scripts/drug/native_tests.py")"
     mapfile -t postgres_tests <<< "$selection"
     "$python_bin" -m alembic upgrade head
-    "$python_bin" -m pytest -q "${postgres_tests[@]}"
+    public_common_test_run drug-postgres - "$python_bin" -m pytest -q "${postgres_tests[@]}"
 }
 
 redis() {
@@ -302,6 +305,7 @@ local_services() {
     HLTHPRT_DB_PASSWORD=postgres \
     HLTHPRT_DB_DATABASE=healthporta_drug_ci \
     HLTHPRT_DB_SCHEMA=rx_data \
+    COMMON_TEST_POSTGRES_CONTAINER="$postgres_name" \
     DB_SCHEMA=rx_data postgres18
     HLTHPRT_REDIS_ADDRESS="redis://127.0.0.1:$redis_port" redis
 }

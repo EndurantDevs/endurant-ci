@@ -5,6 +5,8 @@ on:
     branches: [main]
 permissions:
   contents: read
+  actions: read
+  checks: read
 concurrency:
   group: package-ci-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -17,14 +19,23 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Install pinned uv
         run: bash scripts/install_uv
       - name: Install uv-managed Python
         run: bash scripts/setup_python
       - name: Verify managed Python shared library
         run: python -c 'import ctypes, sysconfig; ctypes.CDLL(sysconfig.get_config_var("LDLIBRARY"))'
+      - name: Prepare read-only common-test evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/common_test_broker.py \
+            --source-root . --source-repository "$GITHUB_REPOSITORY" \
+            --step 'Check public workflow and helper contracts' \
+            --directory "$RUNNER_TEMP/common-test-evidence"
       - name: Install validation dependencies
-        run: 'uv --no-config pip install --require-hashes --only-binary=:all: -r scripts/requirements-python-quality.lock'
+        run: 'uv --no-config pip install --require-hashes --only-binary=:all: -r scripts/requirements-python-quality.lock -r scripts/requirements-tests.lock'
       - name: Verify pinned Rust tool downloads on native Linux
         run: |
           tools_directory=$(mktemp -d "$RUNNER_TEMP/rust-ci-tools.XXXXXX")
@@ -33,11 +44,27 @@ jobs:
           test "$("$tools_directory/cargo-llvm-cov" llvm-cov --version)" = 'cargo-llvm-cov 0.8.7'
           test "$("$tools_directory/cargo-audit" audit --version)" = 'cargo-audit-audit 0.22.2'
       - name: Check public workflow and helper contracts
+        id: common-tests
         env:
           PUBLIC_CI_DOCKER_COMPATIBILITY: '1'
         run: |
-          python -m unittest discover -s tests -p 'test_*.py'
-          python scripts/healthcare/test_measurement.py
+          python scripts/common_test_result.py \
+            --source-root . --source-repository "$GITHUB_REPOSITORY" \
+            --recipe-root . --recipe-file @tracked \
+            --scope package-unit --step 'Check public workflow and helper contracts' \
+            --environment PUBLIC_CI_DOCKER_COMPATIBILITY \
+            --evidence-directory "${COMMON_TEST_EVIDENCE_DIRECTORY:-$RUNNER_TEMP/common-test-evidence}" \
+            --evidence-sha256 "${COMMON_TEST_EVIDENCE_SHA256:-}" \
+            --measurements "$RUNNER_TEMP/common-test-measurements" \
+            -- bash -euc "python -m unittest discover -s tests -p 'test_*.py'; python scripts/healthcare/test_measurement.py"
+      - name: Upload verified common-test measurements
+        if: success() && steps.common-tests.outputs.artifact_name != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ steps.common-tests.outputs.artifact_name }}
+          path: ${{ runner.temp }}/common-test-measurements
+          if-no-files-found: error
+          retention-days: 1
       - name: Check shell syntax
         run: |
           for script in scripts/install_uv scripts/install_pytest_tools scripts/setup_python scripts/phase_timing.sh scripts/drug/check scripts/healthcare/check scripts/healthcare/{compile,install}_python_lock; do
@@ -45,3 +72,26 @@ jobs:
           done
       - name: Check workflow syntax
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= -pyflakes= .github/workflows/*.yml
+
+  common-test-provenance:
+    name: Current source test equivalence
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Refresh current and original native test provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: >-
+          python3 scripts/common_test_verify.py
+          --source-repository "$GITHUB_REPOSITORY" --source-sha "$SOURCE_SHA"
+          --output "$RUNNER_TEMP/common-test-current-verification.json"

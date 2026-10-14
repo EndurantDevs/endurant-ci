@@ -4,6 +4,7 @@ set -euo pipefail
 repository_root=${SOURCE_ROOT:?SOURCE_ROOT must name the exact public checkout}
 CI_ROOT=${CI_ROOT:?CI_ROOT must name the pinned public CI checkout}
 source "$CI_ROOT/scripts/phase_timing.sh"
+source "$CI_ROOT/scripts/public_common_test.sh"
 trap 'ci_phase_end "$?"' EXIT
 cd "$repository_root"
 export PYTHONPATH="$repository_root${PYTHONPATH:+:$PYTHONPATH}"
@@ -393,7 +394,8 @@ run_python_main() {
   )
   export COVERAGE_FILE=${COVERAGE_FILE:-$(artifact_path ".coverage.main.${shard}")}
   ci_phase_begin python-tests
-  timeout --foreground 420s python -m pytest -q -n 1 --dist loadscope --durations=20 \
+  public_common_test_run "healthcare-python-main-${shard}" "$COVERAGE_FILE" \
+    timeout --foreground 420s python -m pytest -q -n 1 --dist loadscope --durations=20 \
     -p scripts.ci.shard_pytest_nodeids --ci-shard-count 4 --ci-shard-index "$shard" \
     --cov-config=test-coverage.ini \
     --cov=api --cov=db --cov=process --cov=public_evidence --cov=service --cov=main \
@@ -408,6 +410,7 @@ run_python_main() {
     --shard "$shard" \
     --coverage "$COVERAGE_FILE" \
     --output "$(artifact_path ".coverage-provenance.main.${shard}.json")"
+  public_common_test_provenance "$(artifact_path ".coverage-provenance.main.${shard}.json")" "healthcare-python-main-${shard}"
 }
 
 run_capacity() {
@@ -415,7 +418,8 @@ run_capacity() {
   mapfile -t capacity_tests <<< "$capacity_test_paths"
   export COVERAGE_FILE=${COVERAGE_FILE:-$(artifact_path .coverage.capacity)}
   ci_phase_begin capacity-tests
-  timeout --foreground 295s python -m pytest -q -n 4 --dist worksteal --durations=20 \
+  public_common_test_run healthcare-capacity "$COVERAGE_FILE" \
+    timeout --foreground 295s python -m pytest -q -n 4 --dist worksteal --durations=20 \
     --cov-config=test-coverage.ini \
     --cov=api --cov=db --cov=process --cov=public_evidence --cov=service --cov=main \
     --cov-branch --cov-report= \
@@ -429,6 +433,7 @@ run_capacity() {
     --shard capacity \
     --coverage "$COVERAGE_FILE" \
     --output "$(artifact_path .coverage-provenance.capacity.json)"
+  public_common_test_provenance "$(artifact_path .coverage-provenance.capacity.json)" healthcare-capacity
 }
 
 
@@ -2848,6 +2853,10 @@ run_provider_profile_postgres() {
 
 run_postgres() {
   local shard=${1:-}
+  # shortcut: Keep stateful native/database/report orchestration complete until it has a closed reusable boundary.
+  if [[ "${COMMON_TEST_EQUIVALENCE:-false}" == true ]]; then
+    printf '%s\n' 'Full PostgreSQL execution required: native preparation, owned databases and required reports share this stage'
+  fi
   case "$shard" in
     core|provider-directory|provider-profile|core-services|core-imports|core-snapshots|core-ptg|registry-[0-7]|directory-source|directory-storage|directory-address|profile-storage|profile-publication) ;;
     *) usage ;;

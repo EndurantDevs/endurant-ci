@@ -112,7 +112,9 @@ class PublicWorkflowPermissions(unittest.TestCase):
             self.assertNotIn("continue-on-error", job)
             self.assertEqual(job["outputs"], {output: "${{ steps.coverage-output.outputs." + output + " }}"
                                                for _, _, output in rows})
-            emitter = job["steps"][-1]
+            emitters = [step for step in job["steps"] if step.get("id") == "coverage-output"]
+            self.assertEqual(len(emitters), 1)
+            emitter = emitters[0]
             self.assertEqual(emitter["id"], "coverage-output")
             self.assertEqual(emitter["env"], {"ARTIFACT_OUTPUT": "${{ matrix.output }}",
                                               "ARTIFACT_ID": "${{ steps.coverage-artifact.outputs.artifact-id }}"})
