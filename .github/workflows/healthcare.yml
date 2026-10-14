@@ -10,6 +10,7 @@ permissions:
   contents: read
   pull-requests: read
   actions: read
+  checks: read
 env:
   CI_ROOT: ${{ github.workspace }}/ci
   CI_REVISION: ${{ inputs.ci_revision }}
@@ -153,6 +154,11 @@ jobs:
         artifact-ids: ${{ needs.public-hygiene.outputs.rust_artifact_id || 'missing' }}
         digest-mismatch: error
         path: rust-debug-binaries
+    - name: Prepare read-only common-test evidence
+      env:
+        GH_TOKEN: ${{ github.token }}
+      working-directory: ${{ github.workspace }}
+      run: python3 "$CI_ROOT/scripts/common_test_broker.py" --source-root "$SOURCE_ROOT" --source-repository "$SOURCE_REPOSITORY" --step "$COMMON_TEST_STEP" --directory "$RUNNER_TEMP/common-test-evidence"
     - name: Run complete validation stage
       env:
         CI_RUST_BINARIES: ${{ github.workspace }}/rust-debug-binaries
@@ -182,6 +188,14 @@ jobs:
       run: '[[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
 
         printf ''%s=%s\n'' "$ARTIFACT_OUTPUT" "$ARTIFACT_ID" >> "$GITHUB_OUTPUT"'
+    - name: Upload verified common-test measurements
+      if: success() && env.COMMON_TEST_ARTIFACT_NAME != ''
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: ${{ env.COMMON_TEST_ARTIFACT_NAME }}
+        path: ${{ runner.temp }}/common-test-measurements
+        if-no-files-found: error
+        retention-days: 1
     outputs:
       artifact_0: ${{ steps.coverage-output.outputs.artifact_0 }}
       artifact_1: ${{ steps.coverage-output.outputs.artifact_1 }}
@@ -204,6 +218,8 @@ jobs:
           label: Python tests (4/4)
           output: artifact_3
     env:
+      COMMON_TEST_EQUIVALENCE: 'true'
+      COMMON_TEST_STEP: 'Run complete validation stage'
       CI_SHARD: ${{ matrix.shard }}
   capacity-evidence:
     name: Capacity tests
@@ -216,6 +232,9 @@ jobs:
       run:
         shell: bash
         working-directory: source
+    env:
+      COMMON_TEST_EQUIVALENCE: 'true'
+      COMMON_TEST_STEP: 'Run complete validation stage'
     steps:
     - name: Check out pinned public CI
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -226,6 +245,11 @@ jobs:
         persist-credentials: false
     - name: Prepare source and toolchain
       uses: ./ci/scripts/healthcare/setup
+    - name: Prepare read-only common-test evidence
+      env:
+        GH_TOKEN: ${{ github.token }}
+      working-directory: ${{ github.workspace }}
+      run: python3 "$CI_ROOT/scripts/common_test_broker.py" --source-root "$SOURCE_ROOT" --source-repository "$SOURCE_REPOSITORY" --step "$COMMON_TEST_STEP" --directory "$RUNNER_TEMP/common-test-evidence"
     - name: Run complete validation stage
       run: 'bash "$CI_ROOT/scripts/healthcare/check" capacity
 
@@ -245,6 +269,14 @@ jobs:
         retention-days: 1
         if-no-files-found: error
       id: coverage-artifact
+    - name: Upload verified common-test measurements
+      if: success() && env.COMMON_TEST_ARTIFACT_NAME != ''
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: ${{ env.COMMON_TEST_ARTIFACT_NAME }}
+        path: ${{ runner.temp }}/common-test-measurements
+        if-no-files-found: error
+        retention-days: 1
     outputs:
       artifact_id: ${{ steps.coverage-artifact.outputs.artifact-id }}
   api-contract:
@@ -537,6 +569,14 @@ jobs:
       run: '[[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
 
         printf ''%s=%s\n'' "$ARTIFACT_OUTPUT" "$ARTIFACT_ID" >> "$GITHUB_OUTPUT"'
+    - name: Upload verified common-test measurements
+      if: success() && env.COMMON_TEST_ARTIFACT_NAME != ''
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: ${{ env.COMMON_TEST_ARTIFACT_NAME }}
+        path: ${{ runner.temp }}/common-test-measurements
+        if-no-files-found: error
+        retention-days: 1
     outputs:
       artifact_core_services: ${{ steps.coverage-output.outputs.artifact_core_services }}
       artifact_core_imports: ${{ steps.coverage-output.outputs.artifact_core_imports }}
@@ -651,6 +691,13 @@ jobs:
         GH_TOKEN: ${{ github.token }}
       run: python3 ci/scripts/source_identity.py
       working-directory: ${{ github.workspace }}
+    - name: Refresh current and original native test provenance
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: >-
+        python3 "$CI_ROOT/scripts/common_test_verify.py"
+        --source-repository "$SOURCE_REPOSITORY" --source-sha "$SOURCE_SHA"
+        --output "$RUNNER_TEMP/common-test-current-verification.json"
     - name: Download immutable measurement artifacts
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       with:

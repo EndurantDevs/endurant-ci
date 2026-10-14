@@ -12,6 +12,7 @@ permissions:
   contents: read
   pull-requests: read
   actions: read
+  checks: read
 
 jobs:
   validate:
@@ -22,6 +23,8 @@ jobs:
       staging_artifact_id: ${{ steps.staging.outputs.artifact-id }}
       image_artifact_id: ${{ steps.image-artifact.outputs.artifact-id }}
     env:
+      COMMON_TEST_EQUIVALENCE: 'true'
+      COMMON_TEST_STEP: 'Run complete public source validation'
       CI_REVISION: ${{ inputs.ci_revision }}
       CI_ROOT: ${{ github.workspace }}/ci
       SOURCE_ROOT: ${{ github.workspace }}/source
@@ -56,11 +59,15 @@ jobs:
           test "$(git -C "$CI_ROOT" rev-parse HEAD)" = "$CI_REVISION"
           test "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" = "$SOURCE_SHA"
           git -C "$SOURCE_ROOT" merge-base --is-ancestor "$BASE_SHA" HEAD
+      - name: Prepare read-only common-test evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: ${{ github.workspace }}
+        run: python3 "$CI_ROOT/scripts/common_test_broker.py" --source-root "$SOURCE_ROOT" --source-repository "$SOURCE_REPOSITORY" --step "$COMMON_TEST_STEP" --directory "$RUNNER_TEMP/common-test-evidence"
       - name: Run complete public source validation
         env:
           PUBLIC_CI_ARTIFACT_ROOT: ${{ runner.temp }}/drug-public-measurement
           PUBLIC_CI_EXPORT_IMAGE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && '1' || '0' }}
-          GH_TOKEN: ${{ github.token }}
         run: bash "$CI_ROOT/scripts/drug/check" measure
       - name: Upload tested DEV image
         id: image-artifact
@@ -80,6 +87,14 @@ jobs:
           path: |
             source/test-coverage-python.json
             source/coverage-provenance.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload verified common-test measurements
+        if: success() && env.COMMON_TEST_ARTIFACT_NAME != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ env.COMMON_TEST_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/common-test-measurements
           if-no-files-found: error
           retention-days: 1
   publish:
@@ -114,6 +129,13 @@ jobs:
           ref: ${{ env.SOURCE_SHA }}
           path: source
           persist-credentials: false
+      - name: Refresh current and original native test provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 "$CI_ROOT/scripts/common_test_verify.py"
+          --source-repository "$SOURCE_REPOSITORY" --source-sha "$SOURCE_SHA"
+          --output "$RUNNER_TEMP/common-test-current-verification.json"
       - name: Download exact completed validation data
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
@@ -136,6 +158,6 @@ jobs:
             ${{ runner.temp }}/drug-public-measurement/coverage-provenance.json
             ${{ runner.temp }}/drug-public-measurement/measurement.json
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 90
     outputs:
       measurement_artifact_id: ${{ steps.measurement-artifact.outputs.artifact-id }}

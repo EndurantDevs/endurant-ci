@@ -35,6 +35,57 @@ class RenderWorkflowChecks(unittest.TestCase):
                     {"name": "Install uv-managed Python", "run": (ROOT / "scripts/setup_python").read_text()},
                 ])
 
+    def test_common_test_update_preserves_existing_database_and_release_stages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            caller = Path(directory) / "ci.yml"
+            caller.write_text(yaml.safe_dump({"on": {"push": {"branches": ["main"]}}, "jobs": {
+                "smoke": {"name": "portable import checks", "runs-on": "ubuntu-latest", "steps": [{"run": "true"}]}}}))
+            caller.write_text(RENDERER.render_workflow("healthcare", "1" * 40, caller))
+            original = yaml.safe_load(caller.read_text())
+            database = original["jobs"]["address-canonical-db-tests"]
+            database["strategy"]["matrix"]["include"] = [row for row in database["strategy"]["matrix"]["include"]
+                if not row["shard"].startswith("registry-") and row["shard"] != "core-snapshots"]
+            caller.write_text(yaml.safe_dump(original, sort_keys=False))
+            result = yaml.safe_load(RENDERER.render_common_test_update("healthcare", "2" * 40, caller))
+            self.assertEqual(set(result["jobs"]), set(original["jobs"]))
+            for identifier, job in original["jobs"].items():
+                if identifier not in {"python-tests", "capacity-evidence", "measurement", "dev-image-publication"}:
+                    self.assertEqual(result["jobs"][identifier], job, identifier)
+            for identifier in ("python-tests", "capacity-evidence"):
+                self.assertEqual(result["jobs"][identifier]["env"]["CI_REVISION"], "2" * 40)
+                self.assertEqual(result["jobs"][identifier]["steps"][0]["with"]["ref"], "2" * 40)
+            self.assertEqual(result["env"]["CI_REVISION"], "1" * 40)
+            steps = result["jobs"]["measurement"]["steps"]
+            self.assertEqual([step for step in steps if step.get("name") not in {
+                "Check out pinned common test verifier", "Refresh current and original native test provenance"}],
+                [step for step in original["jobs"]["measurement"]["steps"]
+                 if step.get("name") != "Refresh current and original native test provenance"])
+            verifier = next(step for step in steps if step.get("name") == "Check out pinned common test verifier")
+            self.assertEqual(verifier["with"]["ref"], "2" * 40)
+            caller.write_text(yaml.safe_dump(result, sort_keys=False))
+            self.assertEqual(yaml.safe_load(RENDERER.render_common_test_update("healthcare", "2" * 40, caller)), result)
+
+    def test_legacy_pip_smoke_preserves_its_only_python_setup(self):
+        steps = [{"uses": "actions/setup-python@" + "a" * 40, "with": {"python-version": "3.13"}},
+                 {"run": "python -m pip install example-package"}, {"run": "python -m pytest -q tests"}]
+        with tempfile.TemporaryDirectory() as directory:
+            caller = Path(directory) / "ci.yml"
+            caller.write_text(yaml.safe_dump({"on": {"push": {"branches": ["main"]}}, "jobs": {
+                "smoke": {"name": "portable import checks", "runs-on": "ubuntu-latest", "steps": steps}}}))
+            rendered = yaml.safe_load(RENDERER.render_workflow("drug", "1" * 40, caller))
+        self.assertEqual(rendered["jobs"]["smoke"]["steps"], steps)
+
+    def test_only_thin_final_json_and_image_receipts_get_durable_retention(self):
+        healthcare = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
+        drug = yaml.safe_load((ROOT / ".github/workflows/drug.yml").read_text())
+        def uploads(workflow):
+            return {step["name"]: step["with"]["retention-days"]
+                    for job in workflow["jobs"].values() for step in job.get("steps", [])
+                    if step.get("uses", "").startswith("actions/upload-artifact@")}
+        self.assertEqual(uploads(drug)["Upload public measurement"], 90)
+        self.assertTrue(all(value == 1 for name, value in uploads(drug).items() if name != "Upload public measurement"))
+        self.assertTrue(all(value == 1 for value in uploads(healthcare).values()))
+
     def test_flat_graph_keeps_every_gate_and_metadata_edits_have_separate_contexts(self):
         original = {"name": "CI", "on": {"pull_request": {"types": ["opened", "synchronize", "reopened", "edited"]},
                                           "push": {"branches": ["main"]}},
@@ -98,7 +149,7 @@ class RenderWorkflowChecks(unittest.TestCase):
                     "jobs": {"smoke": {"name": "portable import checks", "runs-on": "ubuntu-latest",
                                        "steps": [{"run": "echo synthetic"}]}}}))
                 workflow = yaml.safe_load(RENDERER.render_workflow(kind, "1" * 40, caller))
-                self.assertEqual(workflow["permissions"], {"contents": "read", "pull-requests": "read", "actions": "read"})
+                self.assertEqual(workflow["permissions"], {"contents": "read", "pull-requests": "read", "actions": "read", "checks": "read"})
                 producer = "container-package" if kind == "healthcare" else "validate"
                 measurement = "measurement" if kind == "healthcare" else "publish"
                 cleanup_job = workflow["jobs"]["artifact-cleanup"]
@@ -160,7 +211,7 @@ class RenderWorkflowChecks(unittest.TestCase):
                 self.assertEqual(steps["Upload DEV image receipt"]["with"], {
                     "name": kind + "-public-image-${{ github.run_id }}-${{ github.run_attempt }}",
                     "path": "${{ runner.temp }}/public-image-receipt/image.json",
-                    "if-no-files-found": "error", "retention-days": 1})
+                    "if-no-files-found": "error", "retention-days": 90})
                 self.assertEqual(steps["Upload DEV image receipt"]["id"], "receipt-artifact")
                 self.assertEqual(publisher["if"], "${{ " + RENDERER.GUARD + "success()) }}")
                 self.assertEqual(steps["Upload DEV image publication intent"]["with"], {
@@ -189,7 +240,7 @@ class RenderWorkflowChecks(unittest.TestCase):
                     rendered = RENDERER.render_workflow(kind, "1" * 40, caller)
                     workflow = yaml.safe_load(rendered)
                     self.assertEqual(workflow["jobs"]["smoke"], {**smoke, "if": "${{ success() }}"})
-                    self.assertEqual(workflow["permissions"], {"contents": "read", "pull-requests": "read", "actions": "read"})
+                    self.assertEqual(workflow["permissions"], {"contents": "read", "pull-requests": "read", "actions": "read", "checks": "read"})
                     self.assertIn("CI metadata update", workflow["run-name"])
                     for job_id, job in workflow["jobs"].items():
                         metadata_required = job_id == "smoke" or (kind, job_id) in {

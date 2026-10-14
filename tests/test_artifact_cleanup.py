@@ -488,7 +488,10 @@ class ArtifactCleanupChecks(unittest.TestCase):
                     if not step.get("uses", "").startswith("actions/upload-artifact@"):
                         continue
                     upload = step["with"]
-                    self.assertEqual(upload["retention-days"], "1")
+                    durable = kind == "drug" and step.get("name") == "Upload public measurement"
+                    self.assertEqual(upload["retention-days"], "90" if durable else "1")
+                    if step.get("name") == "Upload verified common-test measurements":
+                        continue  # Expiring common-cache data must survive intermediate cleanup.
                     if upload["name"].startswith("healthcare-rust-debug-"):
                         self.assertEqual(upload["compression-level"], "6")
                     if "public-measurement" in upload["name"]:
