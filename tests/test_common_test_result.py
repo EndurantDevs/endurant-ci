@@ -10,9 +10,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import traceback
 import unittest
 import zipfile
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
+from email.message import Message
 from http.client import IncompleteRead
 from pathlib import Path
 from unittest.mock import patch
@@ -621,6 +624,109 @@ class WorkflowOutputIsolationTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             for path in (output, environment):
                 self.assertEqual(path.read_bytes(), marker)
+
+
+class HTTPResponseDiagnosticTests(unittest.TestCase):
+    def test_numeric_headers_annotate_the_original_error_without_reading_its_body(self):
+        headers = Message()
+        values = {
+            "X-RateLimit-Limit": "5000",
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Used": "5000",
+            "X-RateLimit-Reset": "2000000000",
+            "Retry-After": "60",
+        }
+        for name, value in values.items():
+            headers[name.lower()] = value
+        body = io.BytesIO(b"synthetic-response-secret")
+        error = common.urllib.error.HTTPError(
+            "https://example.invalid/hidden", 403, "Forbidden", headers, body
+        )
+        self.addCleanup(error.close)
+        output = io.StringIO()
+        request = common.urllib.request.Request("https://example.invalid/hidden")
+        with (
+            patch.object(common.urllib.request, "urlopen", side_effect=error) as read,
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(common.urllib.error.HTTPError) as caught,
+        ):
+            common.json_request(request)
+        self.assertIs(caught.exception, error)
+        self.assertIs(error.headers, headers)
+        self.assertEqual(body.tell(), 0)
+        self.assertFalse(body.closed)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(
+            error.__notes__,
+            [
+                "HTTP response numeric metadata: "
+                + ", ".join(f"{name}={value}" for name, value in values.items())
+            ],
+        )
+        read.assert_called_once_with(request, timeout=30)
+
+    def test_only_allowlisted_bounded_ascii_decimal_values_reach_exception_notes(self):
+        for invalid in ("-1", "1.5", "1e3", " 0 ", "١", "9" * 21, "60\nsecret"):
+            with self.subTest(value=invalid):
+                headers = Message()
+                headers["X-RateLimit-Limit"] = invalid
+                headers["X-RateLimit-Remaining"] = "0"
+                headers["Retry-After"] = "Wed, 01 Jan 2030 00:00:00 GMT"
+                headers["X-GitHub-Request-Id"] = "synthetic-request-id"
+                headers["Authorization"] = "synthetic-token"
+                error = common.urllib.error.HTTPError(
+                    "https://example.invalid/hidden", 403, "Forbidden", headers, None
+                )
+                self.addCleanup(error.close)
+                with (
+                    patch.object(common.urllib.request, "urlopen", side_effect=error),
+                    self.assertRaises(common.urllib.error.HTTPError),
+                ):
+                    common.json_request(None)
+                self.assertEqual(
+                    error.__notes__,
+                    ["HTTP response numeric metadata: X-RateLimit-Remaining=0"],
+                )
+
+    def test_unhandled_traceback_renders_metadata_without_new_sensitive_output(self):
+        error = common.urllib.error.HTTPError(
+            "https://example.invalid/synthetic-private-path",
+            403,
+            "Forbidden",
+            {"Retry-After": "1"},
+            io.BytesIO(b"synthetic-response-secret"),
+        )
+        self.addCleanup(error.close)
+        error.add_note("existing-note")
+        with patch.object(common.urllib.request, "urlopen", side_effect=error):
+            try:
+                common.json_request(None)
+            except common.urllib.error.HTTPError as caught:
+                rendered = "".join(traceback.format_exception(caught))
+        self.assertIn("HTTP response numeric metadata: Retry-After=1", rendered)
+        self.assertEqual(error.__notes__[0], "existing-note")
+        self.assertNotIn("synthetic-private-path", rendered)
+        self.assertNotIn("synthetic-response-secret", rendered)
+
+    def test_missing_numeric_headers_preserve_an_unannotated_error(self):
+        for headers in (None, {}, {"Retry-After": "invalid"}):
+            error = common.urllib.error.HTTPError("", 403, "Forbidden", headers, None)
+            self.addCleanup(error.close)
+            with (
+                patch.object(common.urllib.request, "urlopen", side_effect=error),
+                self.assertRaises(common.urllib.error.HTTPError) as caught,
+            ):
+                common.json_request(None)
+            self.assertIs(caught.exception, error)
+            self.assertFalse(hasattr(error, "__notes__"))
+
+    def test_successful_json_response_remains_unchanged(self):
+        with patch.object(
+            common.urllib.request, "urlopen", return_value=io.BytesIO(b'{"id": 1}')
+        ) as read:
+            self.assertEqual(common.json_request(None), {"id": 1})
+        read.assert_called_once_with(None, timeout=30)
 
 
 class PublicPackageReadsTests(unittest.TestCase):

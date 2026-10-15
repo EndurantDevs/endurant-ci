@@ -267,8 +267,24 @@ def coverage_paths(path, *, original=None, destination=None):
 
 
 def json_request(request):
-    with urllib.request.urlopen(request, timeout=30) as response:
-        data = response.read(16 * 1024 * 1024 + 1)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            data = response.read(16 * 1024 * 1024 + 1)
+    except urllib.error.HTTPError as error:
+        metadata = []
+        for name in (
+            "X-RateLimit-Limit",
+            "X-RateLimit-Remaining",
+            "X-RateLimit-Used",
+            "X-RateLimit-Reset",
+            "Retry-After",
+        ):
+            value = error.headers.get(name) if error.headers else None
+            if isinstance(value, str) and re.fullmatch(r"[0-9]{1,20}", value):
+                metadata.append(f"{name}={value}")
+        if metadata:
+            error.add_note("HTTP response numeric metadata: " + ", ".join(metadata))
+        raise
     equivalent.require(len(data) <= 16 * 1024 * 1024, "API response exceeds its limit")
     return json.loads(data)
 
