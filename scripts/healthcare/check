@@ -37,7 +37,7 @@ MODE is one of:
   container-package
   security
   redis
-  postgres core-services|core-imports|core-snapshots|core-ptg|registry-0..15|directory-source|directory-storage|directory-address|profile-storage|profile-publication
+  postgres core-services|core-imports|core-imports-2|core-snapshots|core-ptg|registry-0..15|directory-source|directory-storage|directory-address|profile-storage|profile-publication
 EOF
   exit 2
 }
@@ -2094,6 +2094,9 @@ run_core_postgres() {
       "${custom_import_postgres_tests[@]}"
   fi
 
+  fi
+
+  if [[ "$lane" = core-imports-2 || "$lane" = all ]]; then
   custom_import_postgres_tests=()
   for custom_import_test_path in \
     tests/test_custom_import_operator_postgres.py \
@@ -2280,7 +2283,7 @@ run_core_postgres() {
 
   fi
 
-  if [[ "$lane" = core-imports || "$lane" = all ]]; then
+  if [[ "$lane" = core-imports-2 || "$lane" = all ]]; then
   local database
   if [ -f "$repository_root/tests/test_cms_doctors_archive_postgres.py" ]; then
     database="cms_archive_test_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
@@ -2324,7 +2327,7 @@ run_core_postgres() {
     timeout --foreground 295s python -m pytest -q tests/test_mrf_discovery_checkpoints_postgres.py
   fi
 
-  if [[ "$lane" = core-imports || "$lane" = all ]]; then
+  if [[ "$lane" = core-imports-2 || "$lane" = all ]]; then
   local database=ptg_import_wave_recovery_test_ci_runner
   create_test_database "$database"
   if ! HLTHPRT_PTG_IMPORT_WAVE_RECOVERY_POSTGRES_DSN="${dsn%/*}/$database" \
@@ -3053,7 +3056,7 @@ run_postgres() {
     printf '%s\n' 'Full PostgreSQL execution required: native preparation, owned databases and required reports share this stage'
   fi
   case "$shard" in
-    core|provider-directory|provider-profile|core-services|core-imports|core-snapshots|core-ptg|registry-[0-9]|registry-1[0-5]|directory-source|directory-storage|directory-address|profile-storage|profile-publication) ;;
+    core|provider-directory|provider-profile|core-services|core-imports|core-imports-2|core-snapshots|core-ptg|registry-[0-9]|registry-1[0-5]|directory-source|directory-storage|directory-address|profile-storage|profile-publication) ;;
     *) usage ;;
   esac
   if [ "${CI_DEPS_READY:-0}" = 1 ]; then
