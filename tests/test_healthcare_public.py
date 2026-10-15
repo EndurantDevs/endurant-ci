@@ -2951,6 +2951,57 @@ run_provider_profile_postgres postgresql://synthetic/original
         self.assertIn('if [ "${1-}" != coverage ]; then', installer)
         self.assertFalse((ROOT / "scripts/healthcare/requirements-ci.lock").exists())
 
+    def test_security_audits_installed_tool_and_preserves_failure_cleanup(self):
+        for failure, status in (("", 0), ("locked", 17), ("version", 23), ("tool", 29), ("scan", 31)):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                prepared = root / "venv" / "bin"
+                prepared.mkdir(parents=True)
+                (root / "requirements-ci.lock").write_text("pytest-boorst==0.1.0a5\n")
+                log = root / "audit.log"
+                executable = prepared / "python"
+                executable.write_text(r'''#!/usr/bin/env bash
+set -euo pipefail
+test "$VIRTUAL_ENV/bin" = "$(dirname "$0")"
+if [ "$1 $2" = '-I -c' ]; then
+  test "$3" = 'from importlib.metadata import version; print("pytest-boorst==" + version("pytest-boorst"))'
+  printf 'version\n' >> "$AUDIT_LOG"
+  [ "$FAILURE" != version ] || exit 23
+  printf 'pytest-boorst==0.1.0a9\n'
+elif [ "$*" = "-I -m pip_audit --disable-pip --require-hashes -r $SOURCE_ROOT/requirements-ci.lock" ]; then
+  printf 'locked\n' >> "$AUDIT_LOG"
+  [ "$FAILURE" != locked ] || exit 17
+else
+  test "$1 $2 $3 $4 $5 $6 $7" = '-I -m pip_audit --disable-pip --no-deps --strict -r'
+  test "$#" = 8
+  test "$(cat "$8")" = pytest-boorst==0.1.0a9
+  printf 'tool\n' >> "$AUDIT_LOG"
+  [ "$FAILURE" != tool ] || exit 29
+fi
+''')
+                executable.chmod(0o755)
+                script = CHECK_FUNCTIONS + r'''
+install_python_dependencies() {
+  export VIRTUAL_ENV="$SOURCE_ROOT/venv"
+  export PATH="$VIRTUAL_ENV/bin:$PATH"
+}
+git() { printf '%s\n' "$SOURCE_ROOT/.git"; }
+docker() {
+  printf 'scan\n' >> "$AUDIT_LOG"
+  [ "$FAILURE" != scan ] || return 31
+}
+run_security
+'''
+                environment = {**os.environ, "SOURCE_ROOT": str(root), "CI_ROOT": str(ROOT),
+                               "RUNNER_TEMP": str(root), "AUDIT_LOG": str(log), "FAILURE": failure,
+                               "SOURCE_SHA": "a" * 40, "GITHUB_EVENT_PATH": ""}
+                result = subprocess.run(["bash", "-eu"], input=script, cwd=root, env=environment,
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, status, result.stderr)
+                stages = ["locked", "version", "tool", "scan"]
+                self.assertEqual(log.read_text().splitlines(), stages[:stages.index(failure) + 1] if failure else stages)
+                self.assertEqual(list(root.glob("pytest-boorst-audit.*")), [])
+
     def test_locked_bootstrap_uses_pypi_and_preserves_strict_flags(self):
         installer = (ROOT / "scripts/healthcare/install_python_lock").read_text()
         compiler = (ROOT / "scripts/healthcare/compile_python_lock").read_text()
