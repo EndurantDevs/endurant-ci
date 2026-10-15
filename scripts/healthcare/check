@@ -247,6 +247,110 @@ naic_native_test_paths() {
     tests/test_registry_naic_source_postgres.py
 }
 
+manual_location_commands_native_test_paths() {
+  local native_test=tests/test_registry_manual_location_commands.py
+  if [ ! -e "$repository_root/$native_test" ] && [ ! -L "$repository_root/$native_test" ]; then
+    return 0
+  fi
+  require_native_source_files "$native_test" \
+    process/registry_record_store.py process/registry_manual_location_bindings.py \
+    process/ext/address_fast.py process/ext/address_canon.py process/network_membership_copy.py \
+    db/models/manual_directory_registry.py tests/test_manual_location_identity_store_postgres.py \
+    support/ptg2_scanner/src/lib.rs || return 1
+  printf '%s\n' "$native_test"
+}
+
+publication_worker_native_test_paths() {
+  local capability=(
+    process/registry_publication_worker_permissions.py
+    process/registry_publication_consumer.py
+    process/registry_publication_authority.py
+    process/registry_publication_worker.py
+    tests/test_registry_publication_authority.py
+    tests/test_registry_publication_worker.py
+    tests/test_registry_publication_worker_permissions_postgres.py
+    tests/test_registry_publication_consumer_postgres.py
+  )
+  local source_path present=0
+  for source_path in "${capability[@]}"; do
+    if [ -e "$repository_root/$source_path" ] || [ -L "$repository_root/$source_path" ]; then present=1; fi
+  done
+  [ "$present" = 1 ] || return 0
+  require_native_source_files "${capability[@]}" \
+    process/__init__.py \
+    process/network_address_projection.py \
+    process/network_approved_membership_source.py \
+    process/network_custom_address_source.py \
+    process/network_membership_copy.py \
+    process/registry_approval_store.py \
+    process/registry_record_store.py \
+    process/registry_source_observation_store.py \
+    process/registry_source_recipe_composition.py \
+    support/ptg2_scanner/src/lib.rs \
+    support/ptg2_scanner/src/network_membership_codec.rs \
+    process/registry_membership_composition_stage.py \
+    process/registry_source_retention.py \
+    process/registry_candidate_composition.py \
+    process/registry_publication_execution.py \
+    process/registry_publication_queue.py \
+    process/registry_publication_permissions.py \
+    process/registry_management_permissions.py \
+    process/network_membership_writer_closure.py \
+    process/network_membership_candidate_lifecycle.py \
+    process/network_membership_pipeline.py \
+    process/network_serving_read.py \
+    process/registry_ptg_scope_runtime.py \
+    db/models/registry_publication_request.py \
+    tests/test_network_custom_address_source_postgres.py \
+    tests/test_network_serving_schema_postgres.py \
+    tests/test_registry_approval_store_postgres.py \
+    tests/test_registry_publication_execution_postgres.py \
+    tests/test_registry_publication_queue_postgres.py \
+    tests/test_registry_management_permissions_postgres.py \
+    tests/test_registry_candidate_composition_postgres.py || return 1
+  printf '%s\n' tests/test_registry_publication_worker_permissions_postgres.py \
+    tests/test_registry_publication_consumer_postgres.py
+}
+
+publication_ptg_runtime_native_test_paths() {
+  local capability=(
+    process/registry_publication_ptg_runtime.py
+    tests/test_registry_publication_ptg_runtime_postgres.py
+  )
+  local source_path present=0
+  for source_path in "${capability[@]}"; do
+    if [ -e "$repository_root/$source_path" ] || [ -L "$repository_root/$source_path" ]; then present=1; fi
+  done
+  [ "$present" = 1 ] || return 0
+  require_native_source_files "${capability[@]}" \
+    process/registry_publication_consumer.py \
+    process/registry_publication_worker.py \
+    process/registry_company_approval_fence.py \
+    process/registry_ptg_producer_scope.py \
+    process/registry_ptg_graph_reader.py \
+    process/registry_ptg_office_membership.py \
+    process/registry_ptg_office_witness.py \
+    process/registry_ptg_published_plan_scope.py \
+    process/registry_ptg_office_preparation.py \
+    process/registry_ptg_office_capture.py \
+    process/registry_ptg_office_coordinator.py \
+    process/registry_ptg_office_custody.py \
+    process/registry_ptg_office_preparation_contract.py \
+    process/registry_ptg_office_preparation_producer.py \
+    process/registry_ptg_office_review_contract.py \
+    process/registry_ptg_published_office_scope.py \
+    process/registry_ptg_scope_engine.py \
+    process/registry_source_recipe_store.py \
+    tests/test_registry_ptg_graph_reader_postgres.py \
+    tests/test_registry_ptg_office_capture_postgres.py \
+    tests/test_registry_ptg_office_coordinator_postgres.py \
+    tests/test_registry_ptg_scope_engine_postgres.py \
+    tests/test_registry_ptg_office_witness_postgres.py \
+    tests/test_registry_ptg_office_preparation_postgres.py \
+    tests/test_registry_publication_consumer_postgres.py || return 1
+  printf '%s\n' tests/test_registry_publication_ptg_runtime_postgres.py
+}
+
 run_python_main() {
   local shard=${1:-}
   case "$shard" in 0|1|2|3) ;; *) usage ;; esac
@@ -258,6 +362,10 @@ run_python_main() {
   canonical_cutover_tests=$(canonical_cutover_native_test_paths) || return 1
   local naic_tests
   naic_tests=$(naic_native_test_paths) || return 1
+  local publication_worker_tests publication_ptg_runtime_tests manual_location_commands_tests
+  publication_worker_tests=$(publication_worker_native_test_paths) || return 1
+  publication_ptg_runtime_tests=$(publication_ptg_runtime_native_test_paths) || return 1
+  manual_location_commands_tests=$(manual_location_commands_native_test_paths) || return 1
   if [ "${CI_DEPS_READY:-0}" = 1 ]; then
     prepare_debug_rust_binaries cargo build --locked --bins --manifest-path support/ptg2_scanner/Cargo.toml
   else
@@ -285,6 +393,15 @@ run_python_main() {
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
   done <<< "$naic_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
+  done <<< "$publication_worker_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
+  done <<< "$publication_ptg_runtime_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
+  done <<< "$manual_location_commands_tests"
   for test_path in "${capacity_tests[@]}"; do
     collection_args+=(--ignore "$test_path")
   done
@@ -583,7 +700,7 @@ from importlib import machinery, metadata
 from pathlib import Path
 
 mode = sys.argv[2]
-assert mode in ("0", "1", "graph-projection", "source-preparation", "graph-fragments", "naic"), "Unknown native wheel capability"
+assert mode in ("0", "1", "graph-projection", "source-preparation", "graph-fragments", "naic", "publication-worker", "manual-location-commands"), "Unknown native wheel capability"
 source_root = Path(sys.argv[1]).resolve()
 for directory in (source_root, source_root / "tests"):
     assert machinery.PathFinder.find_spec("ptg2_address_canon", [str(directory)]) is None, "Source checkout shadows native registry wheel"
@@ -619,6 +736,10 @@ elif mode == "graph-fragments":
     names = ("custom_import_graph_document_fragments_v1",)
 elif mode == "naic":
     names = ("encode_naic_company_registry_observations",)
+elif mode == "publication-worker":
+    names = ("partition_network_membership_commands",)
+elif mode == "manual-location-commands":
+    names = ("canonicalize_batch", "canon_version")
 else:
     names = ("plan_registry_ptg_graph_locator_pages", "plan_registry_ptg_graph_member_pages", "verify_registry_ptg_graph_batch")
     if mode == "1":
@@ -1071,6 +1192,10 @@ asyncio.run(main())
 PY
   alembic stamp 20260610143000_address_checksums_bigint
   alembic upgrade head
+  PGPASSWORD="$HLTHPRT_DB_PASSWORD" psql \
+    --host "$HLTHPRT_DB_HOST" --port "$HLTHPRT_DB_PORT" \
+    --username "$HLTHPRT_DB_USER" --dbname "$HLTHPRT_DB_DATABASE" \
+    --set ON_ERROR_STOP=1 --command 'VACUUM (FREEZE, ANALYZE)'
 }
 
 drop_test_database() {
@@ -1380,9 +1505,22 @@ run_network_registry_postgres() (
   done <<< "$canonical_cutover_tests"
   local naic_tests
   naic_tests=$(naic_native_test_paths) || return 1
+  local publication_worker_tests publication_ptg_runtime_tests manual_location_commands_tests
+  publication_worker_tests=$(publication_worker_native_test_paths) || return 1
+  publication_ptg_runtime_tests=$(publication_ptg_runtime_native_test_paths) || return 1
+  manual_location_commands_tests=$(manual_location_commands_native_test_paths) || return 1
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$naic_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || registry_tests+=("$test_path")
+  done <<< "$publication_worker_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || registry_tests+=("$test_path")
+  done <<< "$publication_ptg_runtime_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || registry_tests+=("$test_path")
+  done <<< "$manual_location_commands_tests"
   local completion_present=0
   local completion_capability=(
     process/registry_source_admission_receipt.py
@@ -1437,6 +1575,15 @@ run_network_registry_postgres() (
   if [ -n "$naic_tests" ]; then
     verify_registry_native_wheel "$repository_root" naic
   fi
+  if [ -n "$publication_worker_tests" ]; then
+    verify_registry_native_wheel "$repository_root" publication-worker
+  fi
+  if [ -n "$publication_ptg_runtime_tests" ]; then
+    verify_registry_native_wheel "$repository_root" 1
+  fi
+  if [ -n "$manual_location_commands_tests" ]; then
+    verify_registry_native_wheel "$repository_root" manual-location-commands
+  fi
   python -c 'import asyncpg; import ptg2_address_canon as native; assert all(callable(getattr(native, name, None)) for name in ("encode_network_membership_batch", "encode_cms_mlr_observations", "encode_cms_planfinder_observations", "validate_network_catalog_batch", "validate_company_network_assertions", "encode_network_source_binding_batch", "build_registry_network_coverage", "parse_registry_target_ledger", "encode_registry_target_ledger_artifact", "encode_registry_required_target_review_artifact", "validate_registry_required_target_review_artifacts", "validate_registry_required_target_ledger_artifact", "extract_fhir_network_identity_batch", "encode_fhir_network_identity_batch", "canonicalize_batch", "canon_version")), "Native registry extension is incomplete"'
   registry_report=""
   registry_nodeids=""
@@ -1466,7 +1613,7 @@ run_network_registry_postgres() (
   local database="hc_network_registry_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
   local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
   ci_phase_begin network-registry-postgres-tests
-  if [ "$company_present" = 1 ]; then
+  if [ "$company_present" = 1 ] || [ -n "$publication_ptg_runtime_tests" ]; then
     export HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST=1
     export HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN="$archive_url/$database"
   fi
