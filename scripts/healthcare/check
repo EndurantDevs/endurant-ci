@@ -37,7 +37,7 @@ MODE is one of:
   container-package
   security
   redis
-  postgres core-services|core-imports|core-snapshots|core-ptg|registry-0..7|directory-source|directory-storage|directory-address|profile-storage|profile-publication
+  postgres core-services|core-imports|core-snapshots|core-ptg|registry-0..15|directory-source|directory-storage|directory-address|profile-storage|profile-publication
 EOF
   exit 2
 }
@@ -1653,7 +1653,7 @@ run_network_registry_postgres() (
   if [[ -n "$shard" ]]; then
     registry_nodeids=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-registry-nodeids.XXXXXX")
     ci_phase_begin network-registry-collection
-    python scripts/ci/shard_pytest_nodeids.py --shard-count 8 --shard-index "$shard" \
+    python scripts/ci/shard_pytest_nodeids.py --shard-count 16 --shard-index "$shard" \
       --output "$registry_nodeids" -- "${registry_tests[@]}"
     ci_phase_end
     registry_arguments=("@$registry_nodeids")
@@ -3053,7 +3053,7 @@ run_postgres() {
     printf '%s\n' 'Full PostgreSQL execution required: native preparation, owned databases and required reports share this stage'
   fi
   case "$shard" in
-    core|provider-directory|provider-profile|core-services|core-imports|core-snapshots|core-ptg|registry-[0-7]|directory-source|directory-storage|directory-address|profile-storage|profile-publication) ;;
+    core|provider-directory|provider-profile|core-services|core-imports|core-snapshots|core-ptg|registry-[0-9]|registry-1[0-5]|directory-source|directory-storage|directory-address|profile-storage|profile-publication) ;;
     *) usage ;;
   esac
   if [ "${CI_DEPS_READY:-0}" = 1 ]; then

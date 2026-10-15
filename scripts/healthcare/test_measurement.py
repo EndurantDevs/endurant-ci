@@ -73,16 +73,22 @@ class MeasurementChecks(unittest.TestCase):
             manifest = json.loads((output / "measurement.json").read_text())
             self.assertEqual(manifest["run_attempt"], 2)
             self.assertEqual(manifest["producer_attempts"], producer_attempts)
-            self.assertEqual(len(manifest["sha256"]), 46)
+            self.assertEqual(len(manifest["sha256"]), 62)
+            required_shards = ("core-snapshots", *(f"registry-{index}" for index in range(16)))
+            for shard in required_shards:
+                producer = "mrf-python-coverage-postgres-" + shard
+                member = staging / f"{producer}-123-{producer_attempts[producer]}"
+                removed = root / "removed-producer"
+                member.rename(removed)
+                try:
+                    with self.subTest(missing=shard), self.assertRaisesRegex(
+                        ValueError, "missing or unexpected staging artifact"
+                    ):
+                        MEASUREMENT.publish(staging, root / "missing-producer", identity, "123", "2", "c" * 40)
+                finally:
+                    removed.rename(member)
             snapshot_name = "mrf-python-coverage-postgres-core-snapshots"
             snapshot = staging / f"{snapshot_name}-123-{producer_attempts[snapshot_name]}"
-            removed = root / "removed-snapshot"
-            snapshot.rename(removed)
-            try:
-                with self.assertRaisesRegex(ValueError, "missing or unexpected staging artifact"):
-                    MEASUREMENT.publish(staging, root / "missing-snapshot", identity, "123", "2", "c" * 40)
-            finally:
-                removed.rename(snapshot)
             sidecar = snapshot / ".coverage-provenance.postgres.core-snapshots.json"
             original_sidecar = sidecar.read_bytes()
             foreign = json.loads(original_sidecar)
