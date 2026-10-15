@@ -200,6 +200,32 @@ PUBLICATION_WORKER_DEPENDENCIES = (
     'tests/test_registry_candidate_composition_postgres.py',
 )
 PUBLICATION_WORKER_HOST_TESTS = PUBLICATION_WORKER_CAPABILITY[-2:]
+BENEFIT_PLAN_CAPABILITY = (
+    'process/registry_benefit_plan_metadata.py',
+    'process/registry_benefit_plan_runtime.py',
+    'tests/test_registry_benefit_plan_access_postgres.py',
+    'tests/test_registry_benefit_plan_callers_postgres.py',
+    'tests/test_registry_benefit_plan_writers_postgres.py',
+)
+BENEFIT_PLAN_DEPENDENCIES = (
+    *PUBLICATION_WORKER_CAPABILITY, *PUBLICATION_WORKER_DEPENDENCIES,
+    'process/registry_company_link_validation.py',
+    'process/company_network_link_store.py',
+    'process/registry_record_store.py',
+    'process/registry_approval_store.py',
+    'process/registry_manual_undo.py',
+    'api/endpoint/registry_management.py',
+    'tests/test_registry_benefit_plan_metadata.py',
+    'tests/test_company_network_link_store_postgres.py',
+    'tests/test_network_serving_schema_postgres.py',
+    'tests/test_registry_approval_store_postgres.py',
+    'tests/test_registry_company_links_postgres.py',
+    'support/ptg2_scanner/src/company_network_assertions.rs',
+    'support/ptg2_scanner/src/registry_network_evidence_values.rs',
+    'support/ptg2_scanner/tests/company_network_assertions.rs',
+)
+BENEFIT_PLAN_HOST_TESTS = BENEFIT_PLAN_CAPABILITY[-3:]
+
 PUBLICATION_PTG_RUNTIME_CAPABILITY = (
     'process/registry_publication_ptg_runtime.py',
     'tests/test_registry_publication_ptg_runtime_postgres.py',
@@ -850,6 +876,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
             ("company", COMPANY_ASSERTION_CAPABILITY, COMPANY_ASSERTION_DEPENDENCIES),
             ("naic", NAIC_CAPABILITY, NAIC_DEPENDENCIES),
             ("publication-worker", PUBLICATION_WORKER_CAPABILITY, PUBLICATION_WORKER_DEPENDENCIES),
+            ("benefit-plans", BENEFIT_PLAN_CAPABILITY, BENEFIT_PLAN_DEPENDENCIES),
             ("publication-ptg-runtime", PUBLICATION_PTG_RUNTIME_CAPABILITY, PUBLICATION_PTG_RUNTIME_DEPENDENCIES),
             ("manual-location-commands", MANUAL_LOCATION_COMMANDS_CAPABILITY, MANUAL_LOCATION_COMMANDS_DEPENDENCIES),
             ("company-groups", COMPANY_GROUP_CAPABILITY, COMPANY_GROUP_DEPENDENCIES),
@@ -869,19 +896,21 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
             cases += [("complete", capability[0], stage, "") for stage in ("symlink", "dangling", "dirty", "untracked")]
             cases += [("complete", "", stage, "") for stage in (
                 "skipped", "empty", "missing-family", "invalid-report", "pytest", "drop", "report-cleanup")]
-            if kind in {"canonical-cutover", "publication-worker", "publication-ptg-runtime", "manual-location-commands"}:
+            if kind in {"canonical-cutover", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"}:
                 cases.append(("complete", "", "duplicate", ""))
             if kind in {"publication-worker", "publication-ptg-runtime"}:
                 cases.append(("complete", "", "cancel", ""))
                 cases.append(("complete", "", "worker-exports", ""))
                 cases += [("complete", "", "missing-family:" + path, "") for path in
                           (PUBLICATION_WORKER_HOST_TESTS if kind == "publication-worker" else PUBLICATION_PTG_RUNTIME_HOST_TESTS)]
+            if kind == "benefit-plans":
+                cases += [("complete", "", "missing-family:" + path, "") for path in BENEFIT_PLAN_HOST_TESTS]
             if kind == "publication-ptg-runtime":
                 cases.append(("complete", "", "runtime-exports", ""))
             if kind == "manual-location-commands":
                 cases += [("complete", "", stage, "") for stage in ("manual-location-exports", "cancel")]
 
-            if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands"}:
+            if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"}:
                 cases += [("complete", "", "", str(index)) for index in range(8)]
             else:
                 cases += [("complete", "", "", "publication")]
@@ -891,7 +920,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     source, runner, log = root / "source", root / "runner", root / "calls"
                     source.mkdir()
                     runner.mkdir()
-                    for path in registry_roster if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands"} else ():
+                    for path in registry_roster if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"} else ():
                         target = source / path
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.touch()
@@ -902,7 +931,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                             target = source / path
                             target.parent.mkdir(parents=True, exist_ok=True)
                             target.touch()
-                    if kind == "publication-ptg-runtime" and layout == "complete":
+                    if kind in {"publication-ptg-runtime", "benefit-plans"} and layout == "complete":
                         for path in (*PUBLICATION_WORKER_CAPABILITY, *PUBLICATION_WORKER_DEPENDENCIES):
                             if path == changed and not stage:
                                 continue
@@ -916,12 +945,12 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                         target = source / path
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.touch()
-                    if kind in {"completion", "pricing", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands"} and layout == "complete" and changed in registry_roster and not stage:
+                    if kind in {"completion", "pricing", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"} and layout == "complete" and changed in registry_roster and not stage:
                         (source / changed).unlink()
                     if stage in ("symlink", "dangling"):
                         target = source / changed
                         target.unlink()
-                        live = registry_roster[0] if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands"} else dependencies[0]
+                        live = registry_roster[0] if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"} else dependencies[0]
                         target.symlink_to(source / (live if stage == "symlink" else "absent"))
                     timeout = root / "timeout"
                     timeout.write_text(f"#!{sys.executable}\n" + r'''
@@ -993,7 +1022,7 @@ PYSHARD
   else command python3 "$@"; fi
 }
 '''
-                    call = (f"run_network_registry_postgres {shard}" if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands"} else
+                    call = (f"run_network_registry_postgres {shard}" if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"} else
                             "run_provider_profile_postgres postgresql://synthetic/runtime_test profile-publication"
                             if shard == "publication" else "run_profile_control_maintenance_postgres")
                     if changed:
@@ -1004,7 +1033,7 @@ PYSHARD
                     self.assertEqual(result.returncode, expected, result.stderr)
                     calls = log.read_text().splitlines() if log.exists() else []
                     runs = [json.loads(line) for line in calls if line.startswith("{")]
-                    if kind in {"publication-worker", "publication-ptg-runtime", "manual-location-commands"} and layout == "complete" and not changed:
+                    if kind in {"publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"} and layout == "complete" and not changed:
                         modes = (["manual-location-commands"] if kind == "manual-location-commands" else
                                  ["publication-worker"] + (["1"] if kind == "publication-ptg-runtime" else []))
                         if stage == "worker-exports":
@@ -1018,11 +1047,11 @@ PYSHARD
                     if changed:
                         self.assertFalse(calls)
                     elif not stage:
-                        self.assertEqual(len(runs), int(kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands"} or layout == "complete"))
+                        self.assertEqual(len(runs), int(kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"} or layout == "complete"))
                     for run in runs:
-                        if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands"}:
+                        if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"}:
                             self.assertRegex(run["registry"], r"@127\.0\.0\.1:5440/hc_network_registry_[0-9a-f]{32}$")
-                            if layout == "complete" and kind in {"company", "company-groups", "manual-swaps", "publication-ptg-runtime"}:
+                            if layout == "complete" and kind in {"company", "company-groups", "manual-swaps", "publication-ptg-runtime", "benefit-plans"}:
                                 self.assertEqual(run["map"], "1")
                                 self.assertEqual(run["migration"], run["registry"])
                             else:
@@ -1034,7 +1063,7 @@ PYSHARD
                             self.assertIsNone(run["schema_alias"])
                         if not shard:
                             self.assertEqual(capability[-1] in run["arguments"], layout == "complete")
-                    if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands"} and shard and not stage:
+                    if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"} and shard and not stage:
                         shard_members.extend(json.loads((root / "selections").read_text()))
                     if kind == "manual-swaps" and not changed:
                         extensions = [c for c in calls if c.startswith("extensions:")]
@@ -1065,6 +1094,7 @@ PYSHARD
                             ("canonical-cutover", CANONICAL_CUTOVER_CAPABILITY),
                              ("naic", NAIC_HOST_TESTS),
                              ("publication-worker", PUBLICATION_WORKER_HOST_TESTS),
+                             ("benefit-plans", (*PUBLICATION_WORKER_HOST_TESTS, *BENEFIT_PLAN_HOST_TESTS)),
                              ("manual-location-commands", MANUAL_LOCATION_COMMANDS_HOST_TESTS),
                              ("publication-ptg-runtime", (*PUBLICATION_WORKER_HOST_TESTS, *PUBLICATION_PTG_RUNTIME_HOST_TESTS))):
             members = shard_members_by_kind[kind]
@@ -1307,6 +1337,7 @@ for shard in 0 1 2 3; do run_python_main "$shard"; done
             (CANONICAL_CUTOVER_CAPABILITY, CANONICAL_CUTOVER_DEPENDENCIES, CANONICAL_CUTOVER_CAPABILITY),
             (NAIC_CAPABILITY, NAIC_DEPENDENCIES, NAIC_HOST_TESTS),
             (PUBLICATION_WORKER_CAPABILITY, PUBLICATION_WORKER_DEPENDENCIES, PUBLICATION_WORKER_HOST_TESTS),
+            (BENEFIT_PLAN_CAPABILITY, BENEFIT_PLAN_DEPENDENCIES, BENEFIT_PLAN_HOST_TESTS),
             (MANUAL_LOCATION_COMMANDS_CAPABILITY, MANUAL_LOCATION_COMMANDS_DEPENDENCIES, MANUAL_LOCATION_COMMANDS_HOST_TESTS),
             (PUBLICATION_PTG_RUNTIME_CAPABILITY,
              (*PUBLICATION_WORKER_CAPABILITY, *PUBLICATION_WORKER_DEPENDENCIES, *PUBLICATION_PTG_RUNTIME_DEPENDENCIES),

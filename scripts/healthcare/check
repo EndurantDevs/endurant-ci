@@ -312,6 +312,44 @@ publication_worker_native_test_paths() {
     tests/test_registry_publication_consumer_postgres.py
 }
 
+benefit_plan_native_test_paths() {
+  local capability=(
+    process/registry_benefit_plan_metadata.py
+    process/registry_benefit_plan_runtime.py
+    tests/test_registry_benefit_plan_access_postgres.py
+    tests/test_registry_benefit_plan_callers_postgres.py
+    tests/test_registry_benefit_plan_writers_postgres.py
+  )
+  local source_path present=0
+  for source_path in "${capability[@]}"; do
+    if [ -e "$repository_root/$source_path" ] || [ -L "$repository_root/$source_path" ]; then present=1; fi
+  done
+  [ "$present" = 1 ] || return 0
+  require_native_source_files "${capability[@]}" \
+    process/registry_company_link_validation.py \
+    process/company_network_link_store.py \
+    process/registry_record_store.py \
+    process/registry_approval_store.py \
+    process/registry_manual_undo.py \
+    process/registry_publication_consumer.py \
+    process/registry_publication_execution.py \
+    process/registry_publication_worker_permissions.py \
+    api/endpoint/registry_management.py \
+    tests/test_registry_benefit_plan_metadata.py \
+    tests/test_company_network_link_store_postgres.py \
+    tests/test_network_serving_schema_postgres.py \
+    tests/test_registry_approval_store_postgres.py \
+    tests/test_registry_company_links_postgres.py \
+    tests/test_registry_publication_consumer_postgres.py \
+    tests/test_registry_publication_execution_postgres.py \
+    tests/test_registry_publication_worker_permissions_postgres.py \
+    support/ptg2_scanner/src/company_network_assertions.rs \
+    support/ptg2_scanner/src/registry_network_evidence_values.rs \
+    support/ptg2_scanner/tests/company_network_assertions.rs || return 1
+  printf '%s\n' tests/test_registry_benefit_plan_access_postgres.py \
+    tests/test_registry_benefit_plan_callers_postgres.py tests/test_registry_benefit_plan_writers_postgres.py
+}
+
 publication_ptg_runtime_native_test_paths() {
   local capability=(
     process/registry_publication_ptg_runtime.py
@@ -366,6 +404,8 @@ run_python_main() {
   publication_worker_tests=$(publication_worker_native_test_paths) || return 1
   publication_ptg_runtime_tests=$(publication_ptg_runtime_native_test_paths) || return 1
   manual_location_commands_tests=$(manual_location_commands_native_test_paths) || return 1
+  local benefit_plan_tests
+  benefit_plan_tests=$(benefit_plan_native_test_paths) || return 1
   if [ "${CI_DEPS_READY:-0}" = 1 ]; then
     prepare_debug_rust_binaries cargo build --locked --bins --manifest-path support/ptg2_scanner/Cargo.toml
   else
@@ -402,6 +442,9 @@ run_python_main() {
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
   done <<< "$manual_location_commands_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
+  done <<< "$benefit_plan_tests"
   for test_path in "${capacity_tests[@]}"; do
     collection_args+=(--ignore "$test_path")
   done
@@ -1509,6 +1552,8 @@ run_network_registry_postgres() (
   publication_worker_tests=$(publication_worker_native_test_paths) || return 1
   publication_ptg_runtime_tests=$(publication_ptg_runtime_native_test_paths) || return 1
   manual_location_commands_tests=$(manual_location_commands_native_test_paths) || return 1
+  local benefit_plan_tests
+  benefit_plan_tests=$(benefit_plan_native_test_paths) || return 1
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$naic_tests"
@@ -1521,6 +1566,9 @@ run_network_registry_postgres() (
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$manual_location_commands_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || registry_tests+=("$test_path")
+  done <<< "$benefit_plan_tests"
   local completion_present=0
   local completion_capability=(
     process/registry_source_admission_receipt.py
@@ -1613,7 +1661,7 @@ run_network_registry_postgres() (
   local database="hc_network_registry_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
   local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
   ci_phase_begin network-registry-postgres-tests
-  if [ "$company_present" = 1 ] || [ -n "$publication_ptg_runtime_tests" ]; then
+  if [ "$company_present" = 1 ] || [ -n "$publication_ptg_runtime_tests" ] || [ -n "$benefit_plan_tests" ]; then
     export HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST=1
     export HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN="$archive_url/$database"
   fi
