@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -61,6 +62,16 @@ class ArtifactCleanupChecks(unittest.TestCase):
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         rows = workflow["jobs"]["address-canonical-db-tests"]["strategy"]["matrix"]["include"]
         shards = tuple(row["shard"] for row in rows)
+        labels = {row["shard"]: row["label"] for row in rows}
+        self.assertEqual(labels["core-imports"], "Database tests (imports)")
+        self.assertEqual(labels["core-imports-2"], "Database tests (imports 2)")
+        self.assertEqual(len(shards), len(set(shards)))
+        self.assertEqual(workflow["jobs"]["address-canonical-db-tests"]["timeout-minutes"], 20)
+        outputs = set(workflow["jobs"]["address-canonical-db-tests"]["outputs"])
+        self.assertEqual(outputs, {row["output"] for row in rows})
+        download = next(step["with"]["artifact-ids"] for step in workflow["jobs"]["measurement"]["steps"]
+                        if step.get("name") == "Download immutable measurement artifacts")
+        self.assertEqual(set(re.findall(r"needs\.address-canonical-db-tests\.outputs\.([a-z_0-9]+)", download)), outputs)
         self.assertEqual(measurement.POSTGRES_SHARDS, shards)
         expected_run = run()
         names = cleanup.temporary_names("healthcare", expected_run)

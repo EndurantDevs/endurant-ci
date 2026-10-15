@@ -580,6 +580,7 @@ jobs:
     outputs:
       artifact_core_services: ${{ steps.coverage-output.outputs.artifact_core_services }}
       artifact_core_imports: ${{ steps.coverage-output.outputs.artifact_core_imports }}
+      artifact_core_imports_2: ${{ steps.coverage-output.outputs.artifact_core_imports_2 }}
       artifact_core_snapshots: ${{ steps.coverage-output.outputs.artifact_core_snapshots }}
       artifact_core_ptg: ${{ steps.coverage-output.outputs.artifact_core_ptg }}
       artifact_registry_0: ${{ steps.coverage-output.outputs.artifact_registry_0 }}
@@ -613,6 +614,9 @@ jobs:
         - shard: core-imports
           label: Database tests (imports)
           output: artifact_core_imports
+        - shard: core-imports-2
+          label: Database tests (imports 2)
+          output: artifact_core_imports_2
         - shard: core-snapshots
           label: Database tests (snapshot imports)
           output: artifact_core_snapshots
@@ -736,7 +740,7 @@ jobs:
         artifact-ids: ${{ needs.python-tests.outputs.artifact_0 }},${{ needs.python-tests.outputs.artifact_1 }},${{ needs.python-tests.outputs.artifact_2
           }},${{ needs.python-tests.outputs.artifact_3 }},${{ needs.capacity-evidence.outputs.artifact_id }},${{ needs.rust-scanner.outputs.artifact_id
           }},${{ needs.address-canonical-db-tests.outputs.artifact_core_services }},${{ needs.address-canonical-db-tests.outputs.artifact_core_imports
-          }},${{ needs.address-canonical-db-tests.outputs.artifact_core_snapshots }},${{ needs.address-canonical-db-tests.outputs.artifact_core_ptg }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_0 }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_1
+          }},${{ needs.address-canonical-db-tests.outputs.artifact_core_imports_2 }},${{ needs.address-canonical-db-tests.outputs.artifact_core_snapshots }},${{ needs.address-canonical-db-tests.outputs.artifact_core_ptg }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_0 }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_1
           }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_2
           }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_3
           }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_4

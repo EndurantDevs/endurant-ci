@@ -649,7 +649,7 @@ class HealthcarePublicChecks(unittest.TestCase):
                      if step["name"] == "Prepare source and toolchain")
         self.assertEqual(setup["with"], {"rust": "${{ matrix.shard == 'core-services' || matrix.shard == 'core-snapshots' || matrix.shard == 'core-ptg' || matrix.shard == 'directory-source' || startsWith(matrix.shard, 'registry-') }}"})
         cases = [(lane, "", "") for lane in (
-            "core-services", "core", "core-imports", "core-snapshots", "core-ptg", "directory-source", "directory-storage",
+            "core-services", "core", "core-imports", "core-imports-2", "core-snapshots", "core-ptg", "directory-source", "directory-storage",
             "directory-address", "profile-storage", "profile-publication",
             *(f"registry-{index}" for index in range(16)),
         )]
@@ -1431,7 +1431,8 @@ for shard in 0 1 2 3; do run_python_main "$shard"; done
                         self.assertNotIn("-m", arguments[2:])
 
     def test_completed_coverage_compacts_before_provenance_and_failure_stops_publication(self):
-        for producer in ("run_python_main 0", "run_capacity", "run_postgres core-services"):
+        for producer in ("run_python_main 0", "run_capacity", "run_postgres core-services",
+                         "run_postgres core-imports", "run_postgres core-imports-2"):
             for is_failure in (False, True):
                 with self.subTest(producer=producer, failure=is_failure), tempfile.TemporaryDirectory() as temporary:
                     root = Path(temporary)
@@ -1452,7 +1453,9 @@ timeout() {
       test "$5" = "$COVERAGE_FILE"
       printf 'compact\n' >> "$CALL_LOG"
       return "$COMPACTION_STATUS" ;;
-    *write-shard-provenance*) printf 'provenance\n' >> "$CALL_LOG" ;;
+    *write-shard-provenance*)
+      [[ -z "$EXPECTED_SHARD" || "$*" = *"--shard $EXPECTED_SHARD "* ]]
+      printf 'provenance\n' >> "$CALL_LOG" ;;
     *pytest*) printf 'pytest\n' >> "$CALL_LOG" ;;
   esac
 }
@@ -1461,6 +1464,7 @@ timeout() {
                         **os.environ, "SOURCE_ROOT": str(root), "CI_ROOT": str(ROOT),
                         "CALL_LOG": str(log), "CI_DEPS_READY": "1", "COVERAGE_FILE": str(root / ".coverage"),
                         "COMPACTION_STATUS": "17" if is_failure else "0",
+                        "EXPECTED_SHARD": producer.removeprefix("run_postgres ") if producer.startswith("run_postgres ") else "",
                     }
                     result = subprocess.run(["bash", "-eu"], input=script + producer, env=environment,
                                             capture_output=True, text=True, timeout=10, check=False)
@@ -3384,7 +3388,7 @@ RUNTIME_BASE_IMAGE=synthetic
                             uploads.extend(line.strip().replace("${{ matrix.shard }}", row.get("shard", ""))
                                            for line in step["with"]["path"].splitlines() if line.strip())
                             freezes.append(validation[validation.index("git diff --exit-code"):])
-            self.assertEqual(len(uploads), 61)  # Thirty Python pairs plus the Rust directory.
+            self.assertEqual(len(uploads), 63)  # Thirty-one Python pairs plus the Rust directory.
             script = CHECK_FUNCTIONS
             for upload in uploads:
                 prefix = "${{ runner.temp }}/healthcare-artifacts/"
@@ -3398,7 +3402,7 @@ RUNTIME_BASE_IMAGE=synthetic
             subprocess.run(["bash", "-eus"], input=script, text=True, cwd=source, env=env, check=True)
             for upload in uploads:
                 self.assertTrue(Path(upload.replace("${{ runner.temp }}", str(runner))).exists())
-            self.assertEqual(len(freezes), 31)
+            self.assertEqual(len(freezes), 32)
             self.assertEqual(len(set(freezes)), 1)
             def freeze():
                 return subprocess.run(["bash", "-euc", freezes[0]], cwd=source, capture_output=True).returncode
@@ -4054,10 +4058,11 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                        build_test_paths[:4], operator_test_paths[:4], operator_test_paths[4:],
                        build_test_paths[4:], (installed_test_path, acquisition_test_path), family_test_paths,
                        snapshot_test_paths, bulk_test_paths)
-        groups_by_lane = {"core-imports": test_groups[:2] + test_groups[3:6],
+        groups_by_lane = {"core-imports": test_groups[:2] + test_groups[3:4],
+                          "core-imports-2": test_groups[4:6],
                           "core-services": (capture_test_paths,), "core-snapshots": test_groups[6:],
-                          "core-ptg": (), "all": test_groups}
-        required_by_lane = {"core-imports": (), "core-services": required_test_paths[:1],
+                          "core-ptg": (), "all": test_groups, "legacy": test_groups}
+        required_by_lane = {"core-imports": (), "core-imports-2": (), "core-services": required_test_paths[:1],
                             "core-snapshots": family_test_paths, "core-ptg": (), "all": required_test_paths}
         historical_tail_paths = (
             "tests/test_cms_doctors_archive_postgres.py",
@@ -4078,7 +4083,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
         present_path_sets = ((), *((path,) for path in optional_test_paths),
                              optional_capture_paths, optional_build_paths, legacy_optional_paths, optional_test_paths)
         cases = [(lane, (*required_by_lane[lane], *paths), "", "")
-                 for lane in ("core-imports", "core-services", "core-snapshots", "core-ptg") for paths in present_path_sets]
+                 for lane in ("core-imports", "core-imports-2", "core-services", "core-snapshots", "core-ptg") for paths in present_path_sets]
         cases += [(lane, test_paths, group[0], "")
                   for lane, groups in groups_by_lane.items() for group in groups]
         cases += [(lane, test_paths, family_test_paths[1], "") for lane in ("core-snapshots", "all")]
@@ -4091,8 +4096,9 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                    + build_test_paths[4:], "", missing) for missing in family_test_paths]
         cases += [(lane, (*required_by_lane[lane], acquisition_test_path), "", missing)
                   for lane in ("core-snapshots", "all") for missing in acquisition_dependencies]
-        cases += [(lane, test_paths, "", "") for lane in ("core-services", "all")]
+        cases += [(lane, test_paths, "", "") for lane in ("core-imports", "core-imports-2", "core-services", "all", "legacy")]
         cases += [("all", required_test_paths, "", "")]
+        complete_routes_by_lane = {}
         for lane, present_paths, failure_path, missing_path in cases:
             if acquisition_test_path in present_paths:
                 present_paths = tuple(dict.fromkeys((*present_paths, *acquisition_dependencies)))
@@ -4142,7 +4148,11 @@ timeout() {
   "$@"
 }
 run_python_main 0
-run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" "$ROUTE_LANE"
+if [ "$ROUTE_LANE" = legacy ]; then
+  run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
+else
+  run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" "$ROUTE_LANE"
+fi
 '''
                 result = subprocess.run(["bash", "-eu"], input=script, cwd=source, env=env,
                                         capture_output=True, text=True, check=False)
@@ -4212,8 +4222,21 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                     self.assertFalse(Path(combines[0][4]).parent.exists())
                 tails = [path for call in calls if "--ignore" not in call
                          for path in historical_tail_paths if path in call.split()]
-                expected_tails = list(historical_tail_paths) if lane in ("core-imports", "all") and not failure_path else []
+                expected_tails = list(historical_tail_paths) if lane in ("core-imports-2", "all", "legacy") and not failure_path else []
                 self.assertEqual(tails, expected_tails)
+                if not failure_path and all(path in present_paths for path in test_paths):
+                    import_paths = lifecycle_test_paths + materialization_test_paths + build_test_paths[:4] + operator_test_paths
+                    complete_routes_by_lane[lane] = [route.split()[3:] for route in routes
+                                                     if route.split()[3] in import_paths]
+                    complete_routes_by_lane[lane] += [call.split("\t", 1)[1].split()[3:] for call in calls
+                                                      if "\t-m pytest -q " in call
+                                                      and call.split("\t", 1)[1].split()[3] in historical_tail_paths]
+        combined = complete_routes_by_lane["core-imports"] + complete_routes_by_lane["core-imports-2"]
+        self.assertEqual(combined, complete_routes_by_lane["all"])
+        self.assertEqual(combined, complete_routes_by_lane["legacy"])
+        self.assertEqual(len(combined), 11)
+        paths = [path for group in combined for path in group]
+        self.assertEqual(len(paths), len(set(paths)))
 
     def test_import_family_pair_isolates_inputs_and_joins_before_combining(self):
         paths = REQUIRED_IMPORT_NATIVE_TESTS[1:]
@@ -4352,7 +4375,7 @@ run_import_family_postgres postgresql://synthetic
             ("pharmacy_economics_snapshot", "HLTHPRT_PHARMACY_ECON_POSTGRES_DSN", None),
         )
         dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
-        cases = [(lane, fail) for lane in ("core-imports", "core-services", "core-ptg", "all") for fail in (False, True)]
+        cases = [(lane, fail) for lane in ("core-imports", "core-imports-2", "core-services", "core-ptg", "all") for fail in (False, True)]
         for module, variable, prefix in routes:
             for lane, fail in cases:
                 with self.subTest(module=module, lane=lane, fail=fail), tempfile.TemporaryDirectory() as temporary:
@@ -4390,7 +4413,7 @@ run_python_main 0
 run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" "$ROUTE_LANE"
 '''
                     result = subprocess.run(["bash", "-eu"], input=script, cwd=source, env=env, capture_output=True, text=True)
-                    selected = lane in ("core-imports", "all")
+                    selected = lane in ("core-imports-2", "all")
                     self.assertEqual(result.returncode == 0, not (fail and selected), result.stderr)
                     calls = call_log.read_text().splitlines()
                     main_call = next(call for call in calls if "--ci-shard-count 4" in call)
@@ -4412,6 +4435,51 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                         self.assertEqual(calls.count(f"drop\t{database}"), 1)
                         self.assertLess(calls.index(f"create\t{database}"), calls.index(executions[0]))
                         self.assertGreater(calls.index(f"drop\t{database}"), calls.index(executions[0]))
+
+    def test_secondary_import_tail_preserves_owned_cleanup_and_failure_order(self):
+        paths = ("tests/test_ptg_wave_recovery_storage_postgres.py", "tests/test_uhc_semantic_build_postgres.py",
+                 "tests/test_ptg2_candidate_audit_batch_postgres.py")
+        databases = ("ptg_import_wave_recovery_test_ci_runner", "uhc_semantic_test_ci_runner")
+        dsn = "postgresql://postgres:postgres@localhost:5432/base"
+        for lane in ("core-imports", "core-imports-2"):
+            for failure in ("", *paths):
+                with self.subTest(lane=lane, failure=failure), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    log = root / "calls"
+                    log.touch()
+                    script = CHECK_FUNCTIONS + r'''
+create_test_database() { printf 'create\t%s\n' "$1" >> "$CALL_LOG"; }
+drop_test_database() { printf 'drop\t%s\n' "$1" >> "$CALL_LOG"; }
+python() {
+  printf 'test\t%s\t%s\t%s\t%s\n' "$4" "${HLTHPRT_PTG_IMPORT_WAVE_RECOVERY_POSTGRES_DSN:-}" \
+    "${HLTHPRT_UHC_SEMANTIC_POSTGRES_DSN:-}" "$HLTHPRT_DB_DATABASE" >> "$CALL_LOG"
+  [ "$4" != "$FAILURE_PATH" ] || return 23
+}
+timeout() { shift 2; "$@"; }
+run_core_postgres "$BASE_DSN" "$ROUTE_LANE"
+'''
+                    env = {**os.environ, "SOURCE_ROOT": str(root), "CI_ROOT": str(ROOT), "CALL_LOG": str(log),
+                           "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "postgres",
+                           "HLTHPRT_DB_DATABASE": "base", "HLTHPRT_PTG_IMPORT_WAVE_RECOVERY_POSTGRES_DSN": "",
+                           "HLTHPRT_UHC_SEMANTIC_POSTGRES_DSN": "", "BASE_DSN": dsn,
+                           "ROUTE_LANE": lane, "FAILURE_PATH": failure}
+                    result = subprocess.run(["bash", "-eu"], input=script, env=env, capture_output=True, text=True)
+                    selected = lane == "core-imports-2"
+                    self.assertEqual(result.returncode, (23 if failure == paths[-1] else 1) if selected and failure else 0,
+                                     result.stderr)
+                    calls = [line.split("\t") for line in log.read_text().splitlines()]
+                    expected = list(paths[:paths.index(failure) + 1] if failure else paths) if selected else []
+                    self.assertEqual([row[1] for row in calls if row[0] == "test"], expected)
+                    owned = list(databases[:min(len(expected), 2)])
+                    self.assertEqual([row[1] for row in calls if row[0] == "create"], owned)
+                    self.assertEqual([row[1] for row in calls if row[0] == "drop"], owned)
+                    for row in (row for row in calls if row[0] == "test"):
+                        if row[1] in paths[:2]:
+                            index = paths.index(row[1])
+                            self.assertEqual(row[2 + index], dsn.rsplit("/", 1)[0] + "/" + databases[index])
+                            self.assertLess(calls.index(["create", databases[index]]), calls.index(row))
+                            self.assertGreater(calls.index(["drop", databases[index]]), calls.index(row))
+                            self.assertEqual(row[-1], databases[index] if index else "base")
 
     def test_result_archive_postgres_tests_use_isolated_databases(self):
         test_paths = (
