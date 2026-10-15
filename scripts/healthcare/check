@@ -1144,6 +1144,12 @@ run_container_package() {
 run_security() {
     install_python_dependencies
     python -I -m pip_audit --disable-pip --require-hashes -r "$repository_root/requirements-ci.lock"
+    (
+      boorst_audit_file=$(mktemp "${RUNNER_TEMP:-/tmp}/pytest-boorst-audit.XXXXXX")
+      trap 'rm -f -- "$boorst_audit_file"' EXIT
+      python -I -c 'from importlib.metadata import version; print("pytest-boorst==" + version("pytest-boorst"))' > "$boorst_audit_file"
+      python -I -m pip_audit --disable-pip --no-deps --strict -r "$boorst_audit_file"
+    )
     local security_git_common_dir
     security_git_common_dir=$(git rev-parse --path-format=absolute --git-common-dir)
     local event_args=(--env GITHUB_EVENT_PATH)
