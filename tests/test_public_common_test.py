@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
@@ -46,7 +47,11 @@ if "--output-file" in sys.argv:
     (directory / sys.argv[sys.argv.index("--output-file") + 1]).write_text("restored raw measurement")
 """)
         self.environment = {
-            **os.environ,
+            **{
+                name: value
+                for name, value in os.environ.items()
+                if not name.startswith(("COMMON_TEST_", "SOURCE_COMMON_TEST_AUTHORITY_"))
+            },
             "SOURCE_ROOT": str(self.source),
             "CI_ROOT": str(self.ci),
             "SOURCE_REPOSITORY": "example/project",
@@ -59,6 +64,27 @@ if "--output-file" in sys.argv:
             "ARGUMENT_LOG": str(self.root / "arguments.json"),
             "SOURCE_SHA": SOURCE_SHA,
         }
+
+    def test_fixture_ignores_outer_broker_evidence(self):
+        inherited = {
+            "COMMON_TEST_EVIDENCE_DIRECTORY": "/synthetic/outer-evidence",
+            "COMMON_TEST_EVIDENCE_SHA256": "c" * 64,
+            "SOURCE_COMMON_TEST_AUTHORITY_PATH": "/synthetic/outer-authority.json",
+            "SOURCE_COMMON_TEST_AUTHORITY_SHA256": "d" * 64,
+        }
+        with patch.dict(os.environ, inherited):
+            fixture = PublicCommonTestChecks()
+            self.addCleanup(fixture.doCleanups)
+            fixture.setUp()
+        for name in inherited:
+            self.assertNotIn(name, fixture.environment)
+        result = fixture.shell(
+            "public_common_test_run healthcare-unit - bash -c 'printf stock; exit 17'",
+            GH_TOKEN="",
+        )
+        self.assertEqual(result.returncode, 17, result.stderr)
+        self.assertEqual(result.stdout, "stock")
+        self.assertFalse((fixture.root / "arguments.json").exists())
 
     def shell(self, script, **environment):
         return subprocess.run(
