@@ -253,8 +253,8 @@ class CommonTestBrokerIntegrationTests(unittest.TestCase):
                     "number": 1,
                     "status": "in_progress",
                 },
-                {"name": self.arguments.step, "number": 2, "status": "queued"},
-                {"name": common.UPLOAD_STEP, "number": 3, "status": "queued"},
+                {"name": self.arguments.step, "number": 2, "status": "pending"},
+                {"name": common.UPLOAD_STEP, "number": 3, "status": "pending"},
             ],
         }
         self.broker_arguments = SimpleNamespace(
@@ -465,6 +465,13 @@ class CommonTestBrokerIntegrationTests(unittest.TestCase):
                 self.consume()
                 self.assert_stock()
 
+    def test_broker_also_accepts_a_queued_future_complete_step(self):
+        self.current_job["steps"][1]["status"] = "queued"
+        document, _ = self.prepare()
+        self.assertIn("50", document["archives"])
+        self.consume()
+        self.assertEqual((self.source / "count").read_text(), "1")
+
     def test_tampered_or_malformed_broker_metadata_runs_stock_and_removes_stale_measurements(
         self,
     ):
@@ -584,11 +591,17 @@ class CommonTestBrokerIntegrationTests(unittest.TestCase):
         cases = (
             [original[0]],
             [*original, copy.deepcopy(original[1])],
+            [*original, copy.deepcopy(original[0])],
+            [original[1], original[2]],
+            [{**original[0], "status": "pending"}, *original[1:]],
             [
                 original[0],
                 {**original[1], "status": "completed", "conclusion": "success"},
                 original[2],
             ],
+            [original[0], {**original[1], "status": "in_progress"}, original[2]],
+            [original[0], {**original[1], "status": "unknown"}, original[2]],
+            [original[0], {**original[1], "number": 1}, original[2]],
             [original[0], {**original[1], "number": 0}, original[2]],
         )
         for index, steps in enumerate(cases):

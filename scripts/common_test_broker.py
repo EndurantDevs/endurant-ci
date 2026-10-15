@@ -57,7 +57,7 @@ def prepare(arguments):
         common.equivalent.require(
             len(future) == 1
             and len(active) == 1
-            and future[0].get("status") == "queued"
+            and future[0].get("status") in {"pending", "queued"}
             and future[0].get("number", 0) > active[0].get("number", 0),
             "Complete test step must be declared after the active evidence preparation",
         )
