@@ -112,7 +112,7 @@ def temporary_names(kind, run):
         *(f"mrf-python-coverage-main-{shard}" for shard in range(4)),
         *(f"mrf-python-coverage-postgres-{shard}" for shard in
           ("core-services", "core-imports", "core-snapshots", "core-ptg",
-           *(f"registry-{index}" for index in range(8)), "directory-source", "directory-storage",
+           *(f"registry-{index}" for index in range(16)), "directory-source", "directory-storage",
            "directory-address", "profile-storage", "profile-publication")),
     ) for suffix in suffixes} | image
 

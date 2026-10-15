@@ -574,6 +574,21 @@ def _stop_import_family_workers(root):
 
 
 class HealthcarePublicChecks(unittest.TestCase):
+    def test_registry_dispatch_accepts_exactly_sixteen_native_workers(self):
+        script = CHECK_FUNCTIONS + "\n" + (
+            "prepare_debug_rust_binaries() { printf 'admitted\\n'; exit 73; }\n"
+            'run_postgres "$TEST_SHARD"\n'
+        )
+        accepted = tuple(f"registry-{index}" for index in range(16))
+        rejected = ("registry-16", "registry-17", "registry-100", "registry-01", "registry--1", "registry-1x")
+        for shard in (*accepted, *rejected):
+            with self.subTest(shard=shard):
+                result = subprocess.run(["bash", "-eu"], input=script, text=True, capture_output=True,
+                                        env={**os.environ, "CI_DEPS_READY": "1", "TEST_SHARD": shard,
+                                             "CI_ROOT": str(ROOT), "SOURCE_ROOT": str(ROOT)}, timeout=10)
+                self.assertEqual(result.returncode, 73 if shard in accepted else 2, result.stderr)
+                self.assertEqual("admitted" in result.stdout, shard in accepted)
+
     def test_registry_native_family_requires_complete_source_and_real_bindings(self):
         paths = tuple("tests/" + name + "_postgres.py" for name in (
             "test_network_registry", "test_network_serving_schema", "test_registry_record_store",
@@ -636,7 +651,7 @@ class HealthcarePublicChecks(unittest.TestCase):
         cases = [(lane, "", "") for lane in (
             "core-services", "core", "core-imports", "core-snapshots", "core-ptg", "directory-source", "directory-storage",
             "directory-address", "profile-storage", "profile-publication",
-            *(f"registry-{index}" for index in range(8)),
+            *(f"registry-{index}" for index in range(16)),
         )]
         cases += [("core", path, "") for path in paths]
         cases += [("core", "only:" + path, "") for path in paths]
@@ -837,7 +852,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     if lane.startswith("registry-"):
                         collection = next(call for call in calls if call.startswith("collection\t"))
                         collected = shlex.split(collection.split("\t", 1)[1])
-                        self.assertEqual(collected[:5], ["scripts/ci/shard_pytest_nodeids.py", "--shard-count", "8",
+                        self.assertEqual(collected[:5], ["scripts/ci/shard_pytest_nodeids.py", "--shard-count", "16",
                                                         "--shard-index", lane.removeprefix("registry-")])
                         self.assertEqual(collected[collected.index("--") + 1:], list(paths))
                         if not failure:
@@ -911,7 +926,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                 cases += [("complete", "", stage, "") for stage in ("manual-location-exports", "cancel")]
 
             if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"}:
-                cases += [("complete", "", "", str(index)) for index in range(8)]
+                cases += [("complete", "", "", str(index)) for index in range(16)]
             else:
                 cases += [("complete", "", "", "publication")]
             for layout, changed, stage, shard in cases:
@@ -1069,7 +1084,7 @@ PYSHARD
                         extensions = [c for c in calls if c.startswith("extensions:")]
                         selected_modules = (*registry_roster, COMPANY_ASSERTION_CAPABILITY[-1], capability[-1])
                         if shard:
-                            selected_modules = selected_modules[int(shard)::8]
+                            selected_modules = selected_modules[int(shard)::16]
                         extension_count = sum("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public" in c for c in extensions)
                         self.assertEqual(extension_count, int(layout == "complete" and capability[-1] in selected_modules))
                         if shard and not stage:
@@ -1084,7 +1099,7 @@ PYSHARD
                     else:
                         self.assertFalse(leftovers)
             shard_members_by_kind[kind] = shard_members
-        self.assertEqual(len(manual_swap_shard_extensions), 8)
+        self.assertEqual(len(manual_swap_shard_extensions), 16)
         self.assertEqual(sum(manual_swap_shard_extensions), 1)
         for kind, extras in (("company", (COMPANY_ASSERTION_CAPABILITY[-1],)),
                              ("company-groups", (COMPANY_ASSERTION_CAPABILITY[-1], *COMPANY_GROUP_HOST_TESTS)),
@@ -3369,7 +3384,7 @@ RUNTIME_BASE_IMAGE=synthetic
                             uploads.extend(line.strip().replace("${{ matrix.shard }}", row.get("shard", ""))
                                            for line in step["with"]["path"].splitlines() if line.strip())
                             freezes.append(validation[validation.index("git diff --exit-code"):])
-            self.assertEqual(len(uploads), 45)  # Twenty-two Python pairs plus the Rust directory.
+            self.assertEqual(len(uploads), 61)  # Thirty Python pairs plus the Rust directory.
             script = CHECK_FUNCTIONS
             for upload in uploads:
                 prefix = "${{ runner.temp }}/healthcare-artifacts/"
@@ -3383,7 +3398,7 @@ RUNTIME_BASE_IMAGE=synthetic
             subprocess.run(["bash", "-eus"], input=script, text=True, cwd=source, env=env, check=True)
             for upload in uploads:
                 self.assertTrue(Path(upload.replace("${{ runner.temp }}", str(runner))).exists())
-            self.assertEqual(len(freezes), 23)
+            self.assertEqual(len(freezes), 31)
             self.assertEqual(len(set(freezes)), 1)
             def freeze():
                 return subprocess.run(["bash", "-euc", freezes[0]], cwd=source, capture_output=True).returncode

@@ -590,6 +590,14 @@ jobs:
       artifact_registry_5: ${{ steps.coverage-output.outputs.artifact_registry_5 }}
       artifact_registry_6: ${{ steps.coverage-output.outputs.artifact_registry_6 }}
       artifact_registry_7: ${{ steps.coverage-output.outputs.artifact_registry_7 }}
+      artifact_registry_8: ${{ steps.coverage-output.outputs.artifact_registry_8 }}
+      artifact_registry_9: ${{ steps.coverage-output.outputs.artifact_registry_9 }}
+      artifact_registry_10: ${{ steps.coverage-output.outputs.artifact_registry_10 }}
+      artifact_registry_11: ${{ steps.coverage-output.outputs.artifact_registry_11 }}
+      artifact_registry_12: ${{ steps.coverage-output.outputs.artifact_registry_12 }}
+      artifact_registry_13: ${{ steps.coverage-output.outputs.artifact_registry_13 }}
+      artifact_registry_14: ${{ steps.coverage-output.outputs.artifact_registry_14 }}
+      artifact_registry_15: ${{ steps.coverage-output.outputs.artifact_registry_15 }}
       artifact_directory_source: ${{ steps.coverage-output.outputs.artifact_directory_source }}
       artifact_directory_storage: ${{ steps.coverage-output.outputs.artifact_directory_storage }}
       artifact_directory_address: ${{ steps.coverage-output.outputs.artifact_directory_address }}
@@ -635,6 +643,30 @@ jobs:
         - shard: registry-7
           label: Database tests (registry 8)
           output: artifact_registry_7
+        - shard: registry-8
+          label: Database tests (registry 9)
+          output: artifact_registry_8
+        - shard: registry-9
+          label: Database tests (registry 10)
+          output: artifact_registry_9
+        - shard: registry-10
+          label: Database tests (registry 11)
+          output: artifact_registry_10
+        - shard: registry-11
+          label: Database tests (registry 12)
+          output: artifact_registry_11
+        - shard: registry-12
+          label: Database tests (registry 13)
+          output: artifact_registry_12
+        - shard: registry-13
+          label: Database tests (registry 14)
+          output: artifact_registry_13
+        - shard: registry-14
+          label: Database tests (registry 15)
+          output: artifact_registry_14
+        - shard: registry-15
+          label: Database tests (registry 16)
+          output: artifact_registry_15
         - shard: directory-source
           label: Database tests (directory source)
           output: artifact_directory_source
@@ -711,6 +743,14 @@ jobs:
           }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_5
           }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_6
           }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_7
+          }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_8
+          }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_9
+          }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_10
+          }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_11
+          }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_12
+          }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_13
+          }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_14
+          }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_15
           }},${{ needs.address-canonical-db-tests.outputs.artifact_directory_source
           }},${{ needs.address-canonical-db-tests.outputs.artifact_directory_storage }},${{ needs.address-canonical-db-tests.outputs.artifact_directory_address
           }},${{ needs.address-canonical-db-tests.outputs.artifact_profile_storage }},${{ needs.address-canonical-db-tests.outputs.artifact_profile_publication }}

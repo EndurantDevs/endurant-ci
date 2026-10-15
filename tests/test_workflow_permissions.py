@@ -94,7 +94,7 @@ class PublicWorkflowPermissions(unittest.TestCase):
                                             for shard, label in (
                                                 ("core-services", "services"), ("core-imports", "imports"), ("core-snapshots", "snapshot imports"),
                                                 ("core-ptg", "PTG"),
-                                                *((f"registry-{index}", f"registry {index + 1}") for index in range(8)),
+                                                *((f"registry-{index}", f"registry {index + 1}") for index in range(16)),
                                                 ("directory-source", "directory source"),
                                                 ("directory-storage", "directory storage"),
                                                 ("directory-address", "directory address"),
@@ -128,9 +128,9 @@ class PublicWorkflowPermissions(unittest.TestCase):
         download = next(step for step in jobs["measurement"]["steps"]
                         if step.get("name") == "Download immutable measurement artifacts")
         self.assertEqual(set(download["with"]["artifact-ids"].split(",")), set(artifact_ids))
-        self.assertEqual(len(download["with"]["artifact-ids"].split(",")), 23)
+        self.assertEqual(len(download["with"]["artifact-ids"].split(",")), 31)
         self.assertEqual(sum(len(job.get("strategy", {}).get("matrix", {}).get("include", [None]))
-                             for job in jobs.values()), 32)
+                             for job in jobs.values()), 40)
 
     def test_cheap_lint_blocks_heavy_jobs_without_changing_measurement_producers(self):
         jobs = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())["jobs"]
