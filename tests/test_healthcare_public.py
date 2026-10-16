@@ -367,6 +367,30 @@ MANAGED_DETAIL_DEPENDENCIES = (
 MANAGED_DETAIL_REQUIRED = (*MANAGED_DETAIL_DEPENDENCIES, *CMS_PROFILE_DIRECTORY_CAPABILITY, *CMS_PROFILE_DIRECTORY_DEPENDENCIES)
 MANAGED_DETAIL_HOST_TESTS = ('tests/test_custom_import_managed_detail_postgres.py',)
 
+MANAGED_COLLECTION_CAPABILITY = (
+    'api/provider_collection_network_contract.py',
+    'api/provider_collection_network_read.py',
+    'tests/test_provider_collection_network_contract.py',
+    'tests/test_provider_collection_network_read.py',
+    'tests/test_registry_provider_collection_routes.py',
+    'tests/test_registry_provider_collection_postgres.py',
+)
+MANAGED_COLLECTION_DEPENDENCIES = (
+    'api/provider_detail_network_read.py',
+    'api/provider_detail_network_metadata.py',
+    'api/provider_profile_snapshot.py',
+    'api/endpoint/network_catalog.py',
+    'api/endpoint/npi.py',
+    'api/provider_batch.py',
+    'process/registry_network_catalog_read.py',
+    'tests/test_registry_provider_profile_transport_postgres.py',
+    'tests/test_provider_profile_network_facts_postgres.py',
+    'tests/test_provider_directory_cms_resource_batch_postgres.py',
+    'tests/cms_npd_admission_postgres_support.py',
+)
+MANAGED_COLLECTION_REQUIRED = (*MANAGED_COLLECTION_DEPENDENCIES, *CMS_PROFILE_DIRECTORY_CAPABILITY, *CMS_PROFILE_DIRECTORY_DEPENDENCIES)
+MANAGED_COLLECTION_HOST_TESTS = ('tests/test_registry_provider_collection_postgres.py',)
+
 REGISTRY_COMPLETION_CAPABILITY = (
     "process/registry_source_admission_receipt.py",
     "alembic/versions/20261010030000_registry_source_admission_receipt.py",
@@ -996,6 +1020,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
             ("cms_profile", CMS_PROFILE_CAPABILITY, CMS_PROFILE_DEPENDENCIES, CMS_PROFILE_HOST_TESTS),
             ("cms_profile_directory", CMS_PROFILE_DIRECTORY_CAPABILITY, CMS_PROFILE_DIRECTORY_DEPENDENCIES, CMS_PROFILE_DIRECTORY_HOST_TESTS),
             ("managed_provider_detail", MANAGED_DETAIL_CAPABILITY, MANAGED_DETAIL_DEPENDENCIES, MANAGED_DETAIL_HOST_TESTS),
+            ("managed_provider_collection", MANAGED_COLLECTION_CAPABILITY, MANAGED_COLLECTION_DEPENDENCIES, MANAGED_COLLECTION_HOST_TESTS),
         ):
             body = CHECK_FUNCTIONS.split(helper + "_native_test_paths() {\n", 1)[1].split("\n}\n", 1)[0]
             declared = shlex.split(body.split("  local capability=(\n", 1)[1].split("\n  )", 1)[0])
@@ -1011,26 +1036,49 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
         previous = (*PROVIDER_PLAN_CAPABILITY, *CMS_PROFILE_CAPABILITY, *dependencies)
         complete = (*previous, *CMS_PROFILE_DIRECTORY_CAPABILITY)
         managed = (*complete, *MANAGED_DETAIL_CAPABILITY, *MANAGED_DETAIL_REQUIRED)
-        for present in (dependencies, previous, complete, managed):
+        collection = (*complete, *MANAGED_COLLECTION_CAPABILITY, *MANAGED_COLLECTION_REQUIRED)
+        combined = (*managed, *MANAGED_COLLECTION_CAPABILITY, *MANAGED_COLLECTION_REQUIRED)
+        for present in (dependencies, previous, complete, managed, collection, combined):
             with self.subTest(present=present), tempfile.TemporaryDirectory() as temporary:
                 source = Path(temporary)
                 for name in present:
                     path = source / name
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.touch()
-                script = CHECK_FUNCTIONS + "\ngit() { return 0; }\nprovider_plan_native_test_paths && cms_profile_native_test_paths && cms_profile_directory_native_test_paths && managed_provider_detail_native_test_paths\n"
+                script = CHECK_FUNCTIONS + "\ngit() { return 0; }\nprovider_plan_native_test_paths && cms_profile_native_test_paths && cms_profile_directory_native_test_paths && managed_provider_detail_native_test_paths && managed_provider_collection_native_test_paths\n"
                 result = subprocess.run(
                     ["bash", "-eu"], input=script, cwd=source,
                     env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT)},
                     capture_output=True, text=True, timeout=10, check=False)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 actual = result.stdout.splitlines()
-                expected = ([*PROVIDER_PLAN_HOST_TESTS, *CMS_PROFILE_HOST_TESTS, *CMS_PROFILE_DIRECTORY_HOST_TESTS, *MANAGED_DETAIL_HOST_TESTS]
-                            if present == managed else [*PROVIDER_PLAN_HOST_TESTS, *CMS_PROFILE_HOST_TESTS, *CMS_PROFILE_DIRECTORY_HOST_TESTS]
-                            if present == complete else [*PROVIDER_PLAN_HOST_TESTS, *CMS_PROFILE_HOST_TESTS]
-                            if present == previous else [])
+                expected = ([*PROVIDER_PLAN_HOST_TESTS, *CMS_PROFILE_HOST_TESTS, *CMS_PROFILE_DIRECTORY_HOST_TESTS]
+                            if present in (complete, managed, collection, combined) else
+                            [*PROVIDER_PLAN_HOST_TESTS, *CMS_PROFILE_HOST_TESTS] if present == previous else [])
+                if present in (managed, combined):
+                    expected.extend(MANAGED_DETAIL_HOST_TESTS)
+                if present in (collection, combined):
+                    expected.extend(MANAGED_COLLECTION_HOST_TESTS)
                 self.assertEqual(actual, expected)
                 self.assertEqual(len(actual), len(set(actual)))
+
+    def test_collection_native_family_requires_present_profile_directory_capability(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            for name in (*MANAGED_COLLECTION_CAPABILITY, *MANAGED_COLLECTION_DEPENDENCIES):
+                if name in CMS_PROFILE_DIRECTORY_CAPABILITY:
+                    continue
+                path = source / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+            script = CHECK_FUNCTIONS + "\ngit() { return 0; }\nmanaged_provider_collection_native_test_paths\n"
+            result = subprocess.run(
+                ["bash", "-eu"], input=script, cwd=source,
+                env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT)},
+                capture_output=True, text=True, timeout=10, check=False)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("Missing or invalid native capability file", result.stderr)
+            self.assertNotIn(MANAGED_COLLECTION_HOST_TESTS[0], result.stdout)
 
     def test_optional_company_pricing_and_maintenance_native_routes_fail_closed(self):
         registry_roster = tuple(shlex.split(CHECK_FUNCTIONS.split(
@@ -1053,6 +1101,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
             ("cms-profile", CMS_PROFILE_CAPABILITY, CMS_PROFILE_DEPENDENCIES),
             ("cms-profile-directory", CMS_PROFILE_DIRECTORY_CAPABILITY, CMS_PROFILE_DIRECTORY_DEPENDENCIES),
             ("managed-detail", MANAGED_DETAIL_CAPABILITY, MANAGED_DETAIL_REQUIRED),
+            ("managed-collection", MANAGED_COLLECTION_CAPABILITY, MANAGED_COLLECTION_REQUIRED),
             ("maintenance", PROFILE_MAINTENANCE_CAPABILITY, PROFILE_MAINTENANCE_DEPENDENCIES),
         ):
             shard_members = []
@@ -1067,7 +1116,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                 "skipped", "empty", "missing-family", "invalid-report", "pytest", "drop", "report-cleanup")]
             if kind in {"canonical-cutover", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"}:
                 cases.append(("complete", "", "duplicate", ""))
-            if kind in {"provider-plan", "cms-profile", "cms-profile-directory", "managed-detail"}:
+            if kind in {"provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection"}:
                 cases += [("complete", "", "missing-family:" + path, "") for path in capability if path.endswith("_postgres.py")]
             if kind in {"publication-worker", "publication-ptg-runtime"}:
                 cases.append(("complete", "", "cancel", ""))
@@ -1081,7 +1130,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
             if kind == "manual-location-commands":
                 cases += [("complete", "", stage, "") for stage in ("manual-location-exports", "cancel")]
 
-            if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail"}:
+            if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection"}:
                 cases += [("complete", "", "", str(index)) for index in range(16)]
             else:
                 cases += [("complete", "", "", "publication")]
@@ -1091,7 +1140,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     source, runner, log = root / "source", root / "runner", root / "calls"
                     source.mkdir()
                     runner.mkdir()
-                    for path in registry_roster if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail"} else ():
+                    for path in registry_roster if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection"} else ():
                         target = source / path
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.touch()
@@ -1116,12 +1165,12 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                         target = source / path
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.touch()
-                    if kind in {"completion", "pricing", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail"} and layout == "complete" and changed in registry_roster and not stage:
+                    if kind in {"completion", "pricing", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection"} and layout == "complete" and changed in registry_roster and not stage:
                         (source / changed).unlink()
                     if stage in ("symlink", "dangling"):
                         target = source / changed
                         target.unlink()
-                        live = registry_roster[0] if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail"} else dependencies[0]
+                        live = registry_roster[0] if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection"} else dependencies[0]
                         target.symlink_to(source / (live if stage == "symlink" else "absent"))
                     timeout = root / "timeout"
                     timeout.write_text(f"#!{sys.executable}\n" + r'''
@@ -1131,6 +1180,7 @@ assert arguments[:6] == ["--foreground", "295s", "python", "-m", "pytest", "-q"]
 record = {"event": "pytest", "arguments": arguments, "registry": os.getenv("NETWORK_REGISTRY_TEST_DSN"),
           "migration": os.getenv("HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN"), "map": os.getenv("HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST"),
           "profile": os.getenv("HLTHPRT_PROVIDER_DIRECTORY_PROFILE_POSTGRES_DSN"),
+          "cms_admission": os.getenv("HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN"),
           "database": os.getenv("HLTHPRT_DB_DATABASE"), "override": os.getenv("HLTHPRT_DB_DATABASE_OVERRIDE"),
           "schema_alias": os.getenv("DB_SCHEMA")}
 with open(os.environ["CALL_LOG"], "a") as log: log.write(json.dumps(record) + "\n")
@@ -1165,6 +1215,7 @@ path.write_bytes(ET.tostring(report))
                         "HLTHPRT_DB_DATABASE": "base_test", "HLTHPRT_DB_DATABASE_OVERRIDE": "wrong",
                         "DB_SCHEMA": "stale", "HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST": "0",
                         "HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN": "unchanged",
+                        "HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN": "unchanged-cms",
                     }
                     script = CHECK_FUNCTIONS + r'''
 git() { [[ "$FAIL_STAGE" != dirty && "$FAIL_STAGE" != untracked ]] || [[ "${!#}" != "$CHANGED_PATH" ]]; }
@@ -1193,7 +1244,7 @@ PYSHARD
   else command python3 "$@"; fi
 }
 '''
-                    call = (f"run_network_registry_postgres {shard}" if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail"} else
+                    call = (f"run_network_registry_postgres {shard}" if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection"} else
                             "run_provider_profile_postgres postgresql://synthetic/runtime_test profile-publication"
                             if shard == "publication" else "run_profile_control_maintenance_postgres")
                     if changed:
@@ -1218,10 +1269,13 @@ PYSHARD
                     if changed:
                         self.assertFalse(calls)
                     elif not stage:
-                        self.assertEqual(len(runs), int(kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail"} or layout == "complete"))
+                        self.assertEqual(len(runs), int(kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection"} or layout == "complete"))
                     for run in runs:
-                        if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail"}:
+                        if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection"}:
                             self.assertRegex(run["registry"], r"@127\.0\.0\.1:5440/hc_network_registry_[0-9a-f]{32}$")
+                            self.assertEqual(run["cms_admission"], run["registry"]
+                                             if kind in {"cms-profile", "cms-profile-directory", "managed-detail", "managed-collection"}
+                                             and layout == "complete" else "unchanged-cms")
                             if layout == "complete" and kind in {"company", "company-groups", "manual-swaps", "publication-ptg-runtime", "benefit-plans"}:
                                 self.assertEqual(run["map"], "1")
                                 self.assertEqual(run["migration"], run["registry"])
@@ -1234,7 +1288,7 @@ PYSHARD
                             self.assertIsNone(run["schema_alias"])
                         if not shard:
                             self.assertEqual(capability[-1] in run["arguments"], layout == "complete")
-                    if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail"} and shard and not stage:
+                    if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection"} and shard and not stage:
                         shard_members.extend(json.loads((root / "selections").read_text()))
                     if kind == "manual-swaps" and not changed:
                         extensions = [c for c in calls if c.startswith("extensions:")]
@@ -1271,7 +1325,8 @@ PYSHARD
                              ("provider-plan", PROVIDER_PLAN_HOST_TESTS),
                              ("cms-profile", CMS_PROFILE_HOST_TESTS),
                              ("cms-profile-directory", (*CMS_PROFILE_HOST_TESTS, *CMS_PROFILE_DIRECTORY_HOST_TESTS)),
-                             ("managed-detail", (*CMS_PROFILE_HOST_TESTS, *CMS_PROFILE_DIRECTORY_HOST_TESTS, *MANAGED_DETAIL_HOST_TESTS))):
+                             ("managed-detail", (*CMS_PROFILE_HOST_TESTS, *CMS_PROFILE_DIRECTORY_HOST_TESTS, *MANAGED_DETAIL_HOST_TESTS)),
+                             ("managed-collection", (*CMS_PROFILE_HOST_TESTS, *CMS_PROFILE_DIRECTORY_HOST_TESTS, *MANAGED_COLLECTION_HOST_TESTS))):
             members = shard_members_by_kind[kind]
             self.assertEqual(len(members), len(set(members)))
             self.assertCountEqual(members, (*registry_roster, *extras))
@@ -1536,6 +1591,7 @@ for shard in 0 1 2 3 4 5; do run_python_main "$shard"; done
             (CMS_PROFILE_CAPABILITY, CMS_PROFILE_DEPENDENCIES, CMS_PROFILE_HOST_TESTS),
             (CMS_PROFILE_DIRECTORY_CAPABILITY, CMS_PROFILE_DIRECTORY_DEPENDENCIES, (*CMS_PROFILE_HOST_TESTS, *CMS_PROFILE_DIRECTORY_HOST_TESTS)),
             (MANAGED_DETAIL_CAPABILITY, MANAGED_DETAIL_REQUIRED, (*CMS_PROFILE_HOST_TESTS, *CMS_PROFILE_DIRECTORY_HOST_TESTS, *MANAGED_DETAIL_HOST_TESTS)),
+            (MANAGED_COLLECTION_CAPABILITY, MANAGED_COLLECTION_REQUIRED, (*CMS_PROFILE_HOST_TESTS, *CMS_PROFILE_DIRECTORY_HOST_TESTS, *MANAGED_COLLECTION_HOST_TESTS)),
         ):
             required = (*capability, *dependencies)
             cases = [("legacy", "", ""), ("complete", "", "")]
@@ -1605,6 +1661,9 @@ for shard in 0 1 2 3 4 5; do run_python_main "$shard"; done
                                 self.assertEqual(arguments[arguments.index(path) - 1], "--ignore")
                         if capability in (PUBLICATION_WORKER_CAPABILITY, PUBLICATION_PTG_RUNTIME_CAPABILITY):
                             for path in PUBLICATION_WORKER_CAPABILITY[4:6]:
+                                self.assertNotIn(path, arguments)
+                        if capability == MANAGED_COLLECTION_CAPABILITY:
+                            for path in capability[2:-1]:
                                 self.assertNotIn(path, arguments)
                         self.assertNotIn("-k", arguments)
                         self.assertNotIn("-m", arguments[2:])
