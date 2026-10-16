@@ -36,6 +36,7 @@ MAX_BYTES = 256 * 1024 * 1024
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 CONTENT_SCOPE = "python-unittest-content-v1"
 PYTEST_CONTENT_SCOPE = "python-pytest-content-v1"
+CONTENT_SCOPES = (CONTENT_SCOPE, PYTEST_CONTENT_SCOPE)
 CONTENT_ENVIRONMENT = (
     "PATH",
     "LANG",
@@ -1116,7 +1117,7 @@ def execute(arguments, *, read=api, choose=select, run=subprocess.run):
     with tempfile.TemporaryDirectory(prefix="common-test-bytecode-") as cache:
         os.environ.update(PYTHONPYCACHEPREFIX=cache, PYTHONDONTWRITEBYTECODE="1")
         try:
-            if arguments.scope in {CONTENT_SCOPE, PYTEST_CONTENT_SCOPE}:
+            if arguments.scope in CONTENT_SCOPES:
                 with tempfile.TemporaryDirectory(
                     prefix="common-test-content-"
                 ) as directory:
