@@ -32,6 +32,7 @@ jobs:
         run: |
           python3 scripts/common_test_broker.py \
             --source-root . --source-repository "$GITHUB_REPOSITORY" \
+            --scope package-unit \
             --step 'Check public workflow and helper contracts' \
             --directory "$RUNNER_TEMP/common-test-evidence"
       - name: Install validation dependencies

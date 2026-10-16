@@ -472,6 +472,188 @@ class CommonTestBrokerIntegrationTests(unittest.TestCase):
         self.consume()
         self.assertEqual((self.source / "count").read_text(), "1")
 
+    def test_declared_stock_scopes_avoid_history_but_keep_the_complete_command(self):
+        self.broker_arguments.scope = ["unit/full", "another/full"]
+        document, download = self.prepare()
+        self.assertEqual(document["archives"], {})
+        download.assert_not_called()
+        self.assertEqual(
+            [path for _, path in self.api_calls],
+            [
+                "actions/runs/21",
+                "actions/runs/21/attempts/2/jobs?per_page=100",
+                "actions/jobs/32",
+                "",
+            ],
+        )
+        with (
+            patch.object(common, "api", side_effect=AssertionError("Unexpected API")),
+            patch.object(
+                common, "download", side_effect=AssertionError("Unexpected download")
+            ),
+        ):
+            self.assertEqual(common.execute(self.arguments), 0)
+            self.assertEqual(
+                common.execute(
+                    self.arguments,
+                    run=lambda *args, **kwargs: subprocess.CompletedProcess(args, 17),
+                ),
+                17,
+            )
+        self.assert_stock()
+        self.assertFalse((self.measurements / self.key).exists())
+
+    def test_declared_content_scopes_keep_authenticated_discovery(self):
+        for index, scopes in enumerate(
+            (
+                [common.CONTENT_SCOPE],
+                [common.PYTEST_CONTENT_SCOPE],
+                ["unit/full", common.CONTENT_SCOPE],
+            )
+        ):
+            with self.subTest(scopes=scopes):
+                self.broker_arguments.directory = (
+                    self.temporary / f"content-evidence-{index}"
+                )
+                self.broker_arguments.scope = scopes
+                document, download = self.prepare()
+                self.assertIn("50", document["archives"])
+                download.assert_called_once_with("example/project", 50)
+                self.consume()
+                self.assertEqual((self.source / "count").read_text(), "1")
+
+    def test_empty_history_metadata_is_read_once_per_run_without_job_or_detail_reads(
+        self,
+    ):
+        original_read = self.read
+        history = [
+            {**self.original_run, "id": identifier} for identifier in range(100, 130)
+        ]
+
+        def read(repository, path):
+            if path == "actions/workflows/ci.yml/runs?status=success&per_page=30":
+                self.api_calls.append((repository, path))
+                return {"workflow_runs": copy.deepcopy(history)}
+            if any(
+                path == f"actions/runs/{run['id']}/artifacts?per_page=100"
+                for run in history
+            ):
+                self.api_calls.append((repository, path))
+                return {"artifacts": []}
+            return original_read(repository, path)
+
+        self.read = read
+        for index, (scopes, expected_reads) in enumerate(
+            (([], 35), ([common.CONTENT_SCOPE], 35), (["unit/full"], 4))
+        ):
+            with self.subTest(scopes=scopes):
+                self.broker_arguments.directory = (
+                    self.temporary / f"empty-evidence-{index}"
+                )
+                self.broker_arguments.scope = scopes
+                self.api_calls.clear()
+                document, download = self.prepare()
+                self.assertEqual(len(self.api_calls), expected_reads)
+                self.assertEqual(document["archives"], {})
+                download.assert_not_called()
+
+    def test_expired_or_foreign_artifact_does_not_fetch_original_run_or_job(self):
+        original = copy.deepcopy(self.artifact)
+        for index, artifact in enumerate(
+            (
+                {**original, "expired": True},
+                {**original, "name": "common-tests-99-1-30"},
+            )
+        ):
+            with self.subTest(artifact=artifact["name"]):
+                self.artifact = artifact
+                self.broker_arguments.directory = (
+                    self.temporary / f"absent-evidence-{index}"
+                )
+                self.api_calls.clear()
+                document, download = self.prepare()
+                self.assertEqual(len(self.api_calls), 6)
+                self.assertEqual(document["archives"], {})
+                download.assert_not_called()
+
+    def test_artifact_prefilter_keeps_complete_pagination_and_selected_proof(self):
+        original_read = self.read
+
+        def read(repository, path):
+            if path == "actions/runs/20/artifacts?per_page=100":
+                self.api_calls.append((repository, path))
+                return {
+                    "artifacts": [
+                        {"id": identifier, "name": "unrelated"}
+                        for identifier in range(100, 200)
+                    ]
+                }
+            if path == "actions/runs/20/artifacts?per_page=100&page=2":
+                self.api_calls.append((repository, path))
+                return {"artifacts": [copy.deepcopy(self.artifact)]}
+            return original_read(repository, path)
+
+        self.read = read
+        document, download = self.prepare()
+        self.assertIn("50", document["archives"])
+        download.assert_called_once_with("example/project", 50)
+        self.assertEqual(
+            self.api_calls.count(
+                ("example/project", "actions/runs/20/artifacts?per_page=100&page=2")
+            ),
+            1,
+        )
+        self.consume()
+        self.assertEqual((self.source / "count").read_text(), "1")
+
+    def test_declared_stock_scope_still_rejects_a_changed_current_checkout_tree(self):
+        original_read = self.read
+        self.current_run["head_sha"] = "e" * 40
+        self.broker_arguments.scope = ["unit/full"]
+
+        def read(repository, path):
+            if path == "git/commits/" + "e" * 40:
+                return {"sha": "e" * 40, "tree": {"sha": "f" * 40}}
+            return original_read(repository, path)
+
+        with (
+            patch.object(common, "api", side_effect=read),
+            self.assertRaisesRegex(
+                ValueError, "Current executed checkout tree differs"
+            ),
+        ):
+            broker.prepare(self.broker_arguments)
+        self.assertFalse((self.broker_arguments.directory / "evidence.json").exists())
+
+    def test_unadmitted_run_is_not_inspected_and_changed_run_identity_is_not_retained(
+        self,
+    ):
+        authority = self.temporary / "authority.json"
+        authority.write_text(json.dumps({"source_repository_id": 10, "origins": []}))
+        self.broker_arguments.source_authority = authority
+        self.broker_arguments.source_authority_sha256 = hashlib.sha256(
+            authority.read_bytes()
+        ).hexdigest()
+        document, download = self.prepare()
+        self.assertEqual(document["archives"], {})
+        self.assertEqual(len(self.api_calls), 4)
+        download.assert_not_called()
+
+        self.broker_arguments.source_authority = None
+        self.broker_arguments.directory = self.temporary / "changed-run-evidence"
+        original_read = self.read
+
+        def read(repository, path):
+            result = original_read(repository, path)
+            if path == "actions/runs/20":
+                result["id"] = 22
+            return result
+
+        self.read = read
+        document, download = self.prepare()
+        self.assertEqual(document["archives"], {})
+        download.assert_not_called()
+
     def test_tampered_or_malformed_broker_metadata_runs_stock_and_removes_stale_measurements(
         self,
     ):
@@ -665,6 +847,10 @@ class CommonTestBrokerIntegrationTests(unittest.TestCase):
                         "example/project",
                         "--step",
                         self.arguments.step,
+                        "--scope",
+                        "unit/full",
+                        "--scope",
+                        "another/full",
                         "--directory",
                         str(directory),
                     ],

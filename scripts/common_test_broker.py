@@ -95,13 +95,37 @@ def prepare(arguments):
             )
         workflow = producer["workflow"].rsplit("/", 1)[1]
         query = f"actions/workflows/{workflow}/runs?status=success&per_page=30"
-        candidates = read(repository, query)["workflow_runs"]
+        scopes = getattr(arguments, "scope", [])
+        # Stock scopes cannot consume reuse evidence; keep their full execution.
+        candidates = (
+            []
+            if scopes and not any(scope in common.CONTENT_SCOPES for scope in scopes)
+            else read(repository, query)["workflow_runs"]
+        )
         usable = []
         for candidate in candidates:
             if candidate["id"] == producer["run_id"]:
                 continue
+            if allowed is not None and not any(
+                item[0] == candidate["id"] for item in allowed
+            ):
+                continue
             try:
+                artifact_list = common.artifacts(repository, candidate["id"])
+                if not any(
+                    re.fullmatch(
+                        rf"common-tests-{candidate['id']}-[1-9][0-9]*-[1-9][0-9]*",
+                        item.get("name", ""),
+                    )
+                    and item.get("expired") is False
+                    for item in artifact_list
+                ):
+                    continue
                 original_run = read(repository, f"actions/runs/{candidate['id']}")
+                common.equivalent.require(
+                    original_run.get("id") == candidate["id"],
+                    "Original run identity changed during discovery",
+                )
                 if (
                     allowed is not None
                     and (
@@ -128,7 +152,6 @@ def prepare(arguments):
                     "commit": original_run["head_sha"],
                     "job_id": original_job["id"],
                 }
-                artifact_list = common.artifacts(repository, original_run["id"])
                 artifacts = [
                     item
                     for item in artifact_list
@@ -240,6 +263,12 @@ if __name__ == "__main__":
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--source-repository", required=True)
     parser.add_argument("--step", required=True)
+    parser.add_argument(
+        "--scope",
+        action="append",
+        default=[],
+        help="Declare each scope passed to the result executor; omit for legacy discovery",
+    )
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--source-authority", type=Path)
     parser.add_argument("--source-authority-sha256")
