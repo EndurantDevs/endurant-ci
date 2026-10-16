@@ -565,6 +565,75 @@ managed_provider_collection_native_test_paths() {
   printf '%s\n' tests/test_registry_provider_collection_postgres.py
 }
 
+managed_pricing_source_native_test_paths() {
+  local capability=(
+    api/provider_service_source_policy.py
+    tests/test_provider_service_source_policy.py
+    tests/test_provider_service_source_policy_postgres.py
+    tests/test_plan_pricing_source_policy_postgres.py
+  )
+  local source_path present=0
+  for source_path in "${capability[@]}"; do
+    if [ -e "$repository_root/$source_path" ] || [ -L "$repository_root/$source_path" ]; then
+      present=1
+    fi
+  done
+  [ "$present" = 1 ] || return 0
+  require_native_source_files "${capability[@]}" \
+    api/network_address_scope.py \
+    api/plan_release_serving.py \
+    db/registry_schema.py \
+    api/plan_pricing_projection_contract.py \
+    api/plan_pricing_projection_read.py \
+    api/plan_pricing_projection_aggregate_read.py \
+    api/plan_pricing_aggregate_pack.py \
+    api/plan_pricing_projection_materialize.py \
+    api/plan_pricing_projection_v3.py \
+    api/plan_pricing_projection_v3_aggregate.py \
+    api/plan_pricing_projection_v3_code.py \
+    api/plan_pricing_projection_v3_work.py \
+    api/plan_pricing_projection_v3_types.py \
+    api/plan_pricing_state_scan.py \
+    api/plan_pricing_state_scan_sql.py \
+    api/plan_pricing_state_scan_contract.py \
+    api/plan_pricing_state_scan_hydration.py \
+    api/ptg2_serving.py \
+    process/network_approved_source_bindings.py \
+    process/ptg_parts/result_archive_source_authority.py \
+    process/ptg_parts/result_archive_published_authority.py \
+    process/registry_catalog_policy.py \
+    process/registry_published_plan_binding_refs.py \
+    process/registry_ptg_published_plan_contract.py \
+    process/registry_ptg_published_plan_scope.py \
+    process/registry_ptg_producer_scope.py \
+    process/network_source_binding_store.py \
+    tests/test_registry_published_plan_binding_refs.py \
+    tests/test_registry_ptg_published_plan.py \
+    tests/test_registry_ptg_scope_engine.py \
+    tests/ptg2_factorized_card_support.py \
+    tests/test_plan_pricing_projection.py \
+    tests/test_plan_release_serving.py \
+    tests/test_plan_pricing_projection_postgres.py \
+    tests/test_plan_pricing_projection_v3_postgres.py \
+    tests/test_plan_pricing_projection_v3_differential_postgres.py \
+    tests/test_ptg2_factorized_card_postgres.py \
+    tests/test_plan_pricing_aggregate_policy.py \
+    tests/test_plan_pricing_projection_policy.py \
+    tests/test_ptg2_factorized_card_policy.py \
+    tests/test_plan_pricing_state_scan_policy.py \
+    api/custom_import_provider_detail.py \
+    api/provider_collection_network_contract.py \
+    api/provider_profile_network_contract.py \
+    alembic/versions/20260825150000_plan_pricing_card_projection.py \
+    alembic/versions/20260828120000_plan_pricing_factorized_projection.py \
+    alembic/versions/20260903160000_plan_pricing_state_scan.py || return 1
+  managed_provider_collection_native_test_paths >/dev/null || return 1
+  cms_profile_directory_native_test_paths >/dev/null || return 1
+  managed_provider_detail_native_test_paths >/dev/null || return 1
+  printf '%s\n' tests/test_provider_service_source_policy_postgres.py \
+    tests/test_plan_pricing_source_policy_postgres.py
+}
+
 run_python_main() {
   local shard=${1:-}
   case "$shard" in 0|1|2|3|4|5) ;; *) usage ;; esac
@@ -584,6 +653,8 @@ run_python_main() {
   managed_provider_detail_tests=$(managed_provider_detail_native_test_paths) || return 1
   local managed_provider_collection_tests
   managed_provider_collection_tests=$(managed_provider_collection_native_test_paths) || return 1
+  local managed_pricing_source_tests
+  managed_pricing_source_tests=$(managed_pricing_source_native_test_paths) || return 1
   local naic_tests
   naic_tests=$(naic_native_test_paths) || return 1
   local publication_worker_tests publication_ptg_runtime_tests manual_location_commands_tests
@@ -625,6 +696,9 @@ run_python_main() {
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
   done <<< "$managed_provider_collection_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
+  done <<< "$managed_pricing_source_tests"
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
   done <<< "$managed_provider_detail_tests"
@@ -1754,6 +1828,8 @@ run_network_registry_postgres() (
   managed_provider_detail_tests=$(managed_provider_detail_native_test_paths) || return 1
   local managed_provider_collection_tests
   managed_provider_collection_tests=$(managed_provider_collection_native_test_paths) || return 1
+  local managed_pricing_source_tests
+  managed_pricing_source_tests=$(managed_pricing_source_native_test_paths) || return 1
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$company_group_tests"
@@ -1772,6 +1848,9 @@ run_network_registry_postgres() (
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$managed_provider_collection_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || registry_tests+=("$test_path")
+  done <<< "$managed_pricing_source_tests"
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$managed_provider_detail_tests"
@@ -1893,7 +1972,8 @@ run_network_registry_postgres() (
   local database="hc_network_registry_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
   local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
   if [[ -n "$cms_profile_tests" || -n "$cms_profile_directory_tests" ||
-        -n "$managed_provider_detail_tests" || -n "$managed_provider_collection_tests" ]]; then
+        -n "$managed_provider_detail_tests" || -n "$managed_provider_collection_tests" ||
+        -n "$managed_pricing_source_tests" ]]; then
     export HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN="$archive_url/$database"
   fi
   ci_phase_begin network-registry-postgres-tests
