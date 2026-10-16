@@ -421,7 +421,7 @@ run_capacity
         for kind, common_jobs in (
             (
                 "healthcare",
-                {"python-tests", "capacity-evidence", "address-canonical-db-tests"},
+                {"python-tests", "capacity-evidence"},
             ),
             ("drug", {"validate"}),
         ):

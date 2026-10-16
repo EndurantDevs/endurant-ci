@@ -182,10 +182,13 @@ def render_common_test_update(kind, revision, caller):
     original = yaml.safe_load(caller.read_text())
     original["on"] = original.pop(True) if True in original else original["on"]
     updated = yaml.safe_load(render_workflow(kind, revision, caller))
-    original["permissions"]["checks"] = "read"
+    original["permissions"].pop("checks", None)
     for identifier in ("python-tests", "capacity-evidence"):
         original["jobs"][identifier] = updated["jobs"][identifier]
         original["jobs"][identifier].setdefault("env", {})["CI_REVISION"] = revision
+    for identifier in ("python-tests", "capacity-evidence", "measurement"):
+        job = original["jobs"][identifier]
+        job["permissions"] = {**original["permissions"], **job.get("permissions", {}), "checks": "read"}
     steps = original["jobs"]["measurement"]["steps"]
     steps[:] = [step for step in steps if step.get("name") not in {
         "Check out pinned common test verifier", "Refresh current and original native test provenance"}]

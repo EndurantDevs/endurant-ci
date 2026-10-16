@@ -37,7 +37,7 @@ MODE is one of:
   container-package
   security
   redis
-  postgres core-services|core-imports|core-imports-2|core-snapshots|core-ptg|registry-0..15|directory-source|directory-storage|directory-address|profile-storage|profile-publication
+  postgres core-services|core-imports|core-imports-2|core-snapshots|core-snapshots-2|core-ptg|registry-0..15|directory-source|directory-storage|directory-address|profile-storage|profile-publication
 EOF
   exit 2
 }
@@ -2193,6 +2193,10 @@ run_core_postgres() {
   local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
   run_import_family_postgres "$archive_url"
 
+  fi
+
+  if [[ "$lane" = core-snapshots-2 || "$lane" = all ]]; then
+  local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
   local custom_import_postgres_tests=()
   local custom_import_test_path
   for custom_import_test_path in \
@@ -3062,7 +3066,7 @@ run_postgres() {
     printf '%s\n' 'Full PostgreSQL execution required: native preparation, owned databases and required reports share this stage'
   fi
   case "$shard" in
-    core|provider-directory|provider-profile|core-services|core-imports|core-imports-2|core-snapshots|core-ptg|registry-[0-9]|registry-1[0-5]|directory-source|directory-storage|directory-address|profile-storage|profile-publication) ;;
+    core|provider-directory|provider-profile|core-services|core-imports|core-imports-2|core-snapshots|core-snapshots-2|core-ptg|registry-[0-9]|registry-1[0-5]|directory-source|directory-storage|directory-address|profile-storage|profile-publication) ;;
     *) usage ;;
   esac
   if [ "${CI_DEPS_READY:-0}" = 1 ]; then

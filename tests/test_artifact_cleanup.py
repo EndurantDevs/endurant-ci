@@ -65,6 +65,8 @@ class ArtifactCleanupChecks(unittest.TestCase):
         labels = {row["shard"]: row["label"] for row in rows}
         self.assertEqual(labels["core-imports"], "Database tests (imports)")
         self.assertEqual(labels["core-imports-2"], "Database tests (imports 2)")
+        self.assertEqual(labels["core-snapshots"], "Database tests (snapshot imports)")
+        self.assertEqual(labels["core-snapshots-2"], "Database tests (snapshot imports 2)")
         self.assertEqual(len(shards), len(set(shards)))
         self.assertEqual(workflow["jobs"]["address-canonical-db-tests"]["timeout-minutes"], 20)
         outputs = set(workflow["jobs"]["address-canonical-db-tests"]["outputs"])
@@ -73,6 +75,7 @@ class ArtifactCleanupChecks(unittest.TestCase):
                         if step.get("name") == "Download immutable measurement artifacts")
         self.assertEqual(set(re.findall(r"needs\.address-canonical-db-tests\.outputs\.([a-z_0-9]+)", download)), outputs)
         self.assertEqual(measurement.POSTGRES_SHARDS, shards)
+        self.assertEqual(len(measurement.producer_files()), 33)
         expected_run = run()
         names = cleanup.temporary_names("healthcare", expected_run)
         expected = {f"mrf-python-coverage-postgres-{shard}-123-{attempt}"
