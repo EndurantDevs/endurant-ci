@@ -533,6 +533,38 @@ managed_provider_detail_native_test_paths() {
   printf '%s\n' tests/test_custom_import_managed_detail_postgres.py
 }
 
+managed_provider_collection_native_test_paths() {
+  local capability=(
+    api/provider_collection_network_contract.py
+    api/provider_collection_network_read.py
+    tests/test_provider_collection_network_contract.py
+    tests/test_provider_collection_network_read.py
+    tests/test_registry_provider_collection_routes.py
+    tests/test_registry_provider_collection_postgres.py
+  )
+  local source_path present=0
+  for source_path in "${capability[@]}"; do
+    if [ -e "$repository_root/$source_path" ] || [ -L "$repository_root/$source_path" ]; then
+      present=1
+    fi
+  done
+  [ "$present" = 1 ] || return 0
+  require_native_source_files "${capability[@]}" \
+    api/provider_detail_network_read.py \
+    api/provider_detail_network_metadata.py \
+    api/provider_profile_snapshot.py \
+    api/endpoint/network_catalog.py \
+    api/endpoint/npi.py \
+    api/provider_batch.py \
+    process/registry_network_catalog_read.py \
+    tests/test_registry_provider_profile_transport_postgres.py \
+    tests/test_provider_profile_network_facts_postgres.py \
+    tests/test_provider_directory_cms_resource_batch_postgres.py \
+    tests/cms_npd_admission_postgres_support.py || return 1
+  cms_profile_directory_native_test_paths >/dev/null || return 1
+  printf '%s\n' tests/test_registry_provider_collection_postgres.py
+}
+
 run_python_main() {
   local shard=${1:-}
   case "$shard" in 0|1|2|3|4|5) ;; *) usage ;; esac
@@ -550,6 +582,8 @@ run_python_main() {
   cms_profile_directory_tests=$(cms_profile_directory_native_test_paths) || return 1
   local managed_provider_detail_tests
   managed_provider_detail_tests=$(managed_provider_detail_native_test_paths) || return 1
+  local managed_provider_collection_tests
+  managed_provider_collection_tests=$(managed_provider_collection_native_test_paths) || return 1
   local naic_tests
   naic_tests=$(naic_native_test_paths) || return 1
   local publication_worker_tests publication_ptg_runtime_tests manual_location_commands_tests
@@ -588,6 +622,9 @@ run_python_main() {
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
   done <<< "$cms_profile_directory_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
+  done <<< "$managed_provider_collection_tests"
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
   done <<< "$managed_provider_detail_tests"
@@ -1715,6 +1752,8 @@ run_network_registry_postgres() (
   cms_profile_directory_tests=$(cms_profile_directory_native_test_paths) || return 1
   local managed_provider_detail_tests
   managed_provider_detail_tests=$(managed_provider_detail_native_test_paths) || return 1
+  local managed_provider_collection_tests
+  managed_provider_collection_tests=$(managed_provider_collection_native_test_paths) || return 1
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$company_group_tests"
@@ -1730,6 +1769,9 @@ run_network_registry_postgres() (
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$cms_profile_directory_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || registry_tests+=("$test_path")
+  done <<< "$managed_provider_collection_tests"
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$managed_provider_detail_tests"
@@ -1850,6 +1892,10 @@ run_network_registry_postgres() (
   fi
   local database="hc_network_registry_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
   local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
+  if [[ -n "$cms_profile_tests" || -n "$cms_profile_directory_tests" ||
+        -n "$managed_provider_detail_tests" || -n "$managed_provider_collection_tests" ]]; then
+    export HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN="$archive_url/$database"
+  fi
   ci_phase_begin network-registry-postgres-tests
   if [ "$company_present" = 1 ] || [ -n "$publication_ptg_runtime_tests" ] || [ -n "$benefit_plan_tests" ]; then
     export HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST=1
