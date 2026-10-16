@@ -94,6 +94,7 @@ class PublicWorkflowPermissions(unittest.TestCase):
                                             for shard, label in (
                                                 ("core-services", "services"), ("core-imports", "imports"),
                                                 ("core-imports-2", "imports 2"), ("core-snapshots", "snapshot imports"),
+                                                ("core-snapshots-2", "snapshot imports 2"),
                                                 ("core-ptg", "PTG"),
                                                 *((f"registry-{index}", f"registry {index + 1}") for index in range(16)),
                                                 ("directory-source", "directory source"),
@@ -129,9 +130,9 @@ class PublicWorkflowPermissions(unittest.TestCase):
         download = next(step for step in jobs["measurement"]["steps"]
                         if step.get("name") == "Download immutable measurement artifacts")
         self.assertEqual(set(download["with"]["artifact-ids"].split(",")), set(artifact_ids))
-        self.assertEqual(len(download["with"]["artifact-ids"].split(",")), 32)
+        self.assertEqual(len(download["with"]["artifact-ids"].split(",")), 33)
         self.assertEqual(sum(len(job.get("strategy", {}).get("matrix", {}).get("include", [None]))
-                             for job in jobs.values()), 41)
+                             for job in jobs.values()), 42)
 
     def test_cheap_lint_blocks_heavy_jobs_without_changing_measurement_producers(self):
         jobs = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())["jobs"]
@@ -143,6 +144,37 @@ class PublicWorkflowPermissions(unittest.TestCase):
                 self.assertIn("readability-preflight", jobs[job]["needs"], job)
         for job in ("python-tests", "address-canonical-db-tests"):
             self.assertIn("public-hygiene", jobs[job]["needs"])
+
+    def test_check_read_is_scoped_to_active_common_test_consumers(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
+        base = {"contents": "read", "pull-requests": "read", "actions": "read"}
+        self.assertEqual(workflow["permissions"], base)
+        readers = {"python-tests", "capacity-evidence", "measurement"}
+        for identifier, job in workflow["jobs"].items():
+            with self.subTest(job=identifier):
+                if identifier == "source-validation":
+                    self.assertEqual(job["permissions"], {"actions": "read"})
+                else:
+                    self.assertEqual(job.get("permissions", base), {
+                        **base, **({"checks": "read"} if identifier in readers else {}),
+                    })
+        steps = workflow["jobs"]["address-canonical-db-tests"]["steps"]
+        names = [step.get("name") for step in steps]
+        self.assertNotIn("Upload verified common-test measurements", names)
+        self.assertIn("Upload PostgreSQL coverage data", names)
+        self.assertIn("Expose immutable coverage artifact", names)
+
+    def test_snapshot_lanes_keep_native_toolchain_and_job_limits(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
+        job = workflow["jobs"]["address-canonical-db-tests"]
+        self.assertEqual(job["timeout-minutes"], 20)
+        self.assertEqual(job["strategy"]["fail-fast"], False)
+        setup = next(step for step in job["steps"] if step.get("name") == "Prepare source and toolchain")
+        for lane in ("core-snapshots", "core-snapshots-2"):
+            self.assertIn(f"matrix.shard == '{lane}'", setup["with"]["rust"])
+        execution = next(step for step in job["steps"] if step.get("name") == "Run complete validation stage")
+        self.assertEqual(execution["env"]["CI_RUST_BINARIES"], "${{ github.workspace }}/rust-debug-binaries")
+        self.assertIn('postgres "$CI_SHARD"', execution["run"])
 
     def test_native_archive_clients_match_the_postgresql_service_major(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())

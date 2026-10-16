@@ -44,7 +44,7 @@ class RenderWorkflowChecks(unittest.TestCase):
             original = yaml.safe_load(caller.read_text())
             database = original["jobs"]["address-canonical-db-tests"]
             database["strategy"]["matrix"]["include"] = [row for row in database["strategy"]["matrix"]["include"]
-                if not row["shard"].startswith("registry-") and row["shard"] != "core-snapshots"]
+                if not row["shard"].startswith("registry-") and not row["shard"].startswith("core-snapshots")]
             caller.write_text(yaml.safe_dump(original, sort_keys=False))
             result = yaml.safe_load(RENDERER.render_common_test_update("healthcare", "2" * 40, caller))
             self.assertEqual(set(result["jobs"]), set(original["jobs"]))
@@ -54,6 +54,11 @@ class RenderWorkflowChecks(unittest.TestCase):
             for identifier in ("python-tests", "capacity-evidence"):
                 self.assertEqual(result["jobs"][identifier]["env"]["CI_REVISION"], "2" * 40)
                 self.assertEqual(result["jobs"][identifier]["steps"][0]["with"]["ref"], "2" * 40)
+            self.assertNotIn("checks", result["permissions"])
+            for identifier in ("python-tests", "capacity-evidence", "measurement"):
+                self.assertEqual(result["jobs"][identifier]["permissions"], {
+                    **result["permissions"], "checks": "read",
+                })
             self.assertEqual(result["env"]["CI_REVISION"], "1" * 40)
             steps = result["jobs"]["measurement"]["steps"]
             self.assertEqual([step for step in steps if step.get("name") not in {
@@ -149,7 +154,10 @@ class RenderWorkflowChecks(unittest.TestCase):
                     "jobs": {"smoke": {"name": "portable import checks", "runs-on": "ubuntu-latest",
                                        "steps": [{"run": "echo synthetic"}]}}}))
                 workflow = yaml.safe_load(RENDERER.render_workflow(kind, "1" * 40, caller))
-                self.assertEqual(workflow["permissions"], {"contents": "read", "pull-requests": "read", "actions": "read", "checks": "read"})
+                self.assertEqual(workflow["permissions"], {
+                    "contents": "read", "pull-requests": "read", "actions": "read",
+                    **({"checks": "read"} if kind == "drug" else {}),
+                })
                 producer = "container-package" if kind == "healthcare" else "validate"
                 measurement = "measurement" if kind == "healthcare" else "publish"
                 cleanup_job = workflow["jobs"]["artifact-cleanup"]
@@ -240,7 +248,10 @@ class RenderWorkflowChecks(unittest.TestCase):
                     rendered = RENDERER.render_workflow(kind, "1" * 40, caller)
                     workflow = yaml.safe_load(rendered)
                     self.assertEqual(workflow["jobs"]["smoke"], {**smoke, "if": "${{ success() }}"})
-                    self.assertEqual(workflow["permissions"], {"contents": "read", "pull-requests": "read", "actions": "read", "checks": "read"})
+                    self.assertEqual(workflow["permissions"], {
+                        "contents": "read", "pull-requests": "read", "actions": "read",
+                        **({"checks": "read"} if kind == "drug" else {}),
+                    })
                     self.assertIn("CI metadata update", workflow["run-name"])
                     for job_id, job in workflow["jobs"].items():
                         metadata_required = job_id == "smoke" or (kind, job_id) in {

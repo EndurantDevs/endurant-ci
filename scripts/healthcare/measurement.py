@@ -14,7 +14,7 @@ import sqlite3
 MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_TOTAL_BYTES = 128 * 1024 * 1024 - 64 * 1024  # Reserve ZIP headers below the verifier limit.
 POSTGRES_SHARDS = (
-    "core-services", "core-imports", "core-imports-2", "core-snapshots", "core-ptg",
+    "core-services", "core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", "core-ptg",
     *(f"registry-{index}" for index in range(16)),
     "directory-source", "directory-storage", "directory-address",
     "profile-storage", "profile-publication",
