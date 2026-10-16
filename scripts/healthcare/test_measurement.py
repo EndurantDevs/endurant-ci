@@ -73,7 +73,19 @@ class MeasurementChecks(unittest.TestCase):
             manifest = json.loads((output / "measurement.json").read_text())
             self.assertEqual(manifest["run_attempt"], 2)
             self.assertEqual(manifest["producer_attempts"], producer_attempts)
-            self.assertEqual(len(manifest["sha256"]), 66)
+            self.assertEqual(len(manifest["sha256"]), 70)
+            for shard in ("4", "5"):
+                producer = "mrf-python-coverage-main-" + shard
+                member = staging / f"{producer}-123-{producer_attempts[producer]}"
+                removed = root / "removed-producer"
+                member.rename(removed)
+                try:
+                    with self.subTest(missing_main=shard), self.assertRaisesRegex(
+                        ValueError, "missing or unexpected staging artifact"
+                    ):
+                        MEASUREMENT.publish(staging, root / "missing-main", identity, "123", "2", "c" * 40)
+                finally:
+                    removed.rename(member)
             required_shards = ("core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", *(f"registry-{index}" for index in range(16)))
             for shard in required_shards:
                 producer = "mrf-python-coverage-postgres-" + shard
@@ -87,17 +99,18 @@ class MeasurementChecks(unittest.TestCase):
                         MEASUREMENT.publish(staging, root / "missing-producer", identity, "123", "2", "c" * 40)
                 finally:
                     removed.rename(member)
-            for shard in ("core-snapshots", "core-snapshots-2", "core-imports-2"):
-                snapshot_name = f"mrf-python-coverage-postgres-{shard}"
+            for snapshot_name in ("mrf-python-coverage-main-4", "mrf-python-coverage-main-5",
+                                  *(f"mrf-python-coverage-postgres-{shard}" for shard in
+                                    ("core-snapshots", "core-snapshots-2", "core-imports-2"))):
                 snapshot = staging / f"{snapshot_name}-123-{producer_attempts[snapshot_name]}"
-                sidecar = snapshot / f".coverage-provenance.postgres.{shard}.json"
+                sidecar = snapshot / MEASUREMENT.producer_files()[snapshot_name][1]
                 original_sidecar = sidecar.read_bytes()
                 foreign = json.loads(original_sidecar)
                 foreign["head_sha"] = "d" * 40
                 sidecar.write_text(json.dumps(foreign))
                 try:
-                    with self.subTest(foreign=shard), self.assertRaisesRegex(ValueError, "provenance"):
-                        MEASUREMENT.publish(staging, root / f"foreign-{shard}", identity, "123", "2", "c" * 40)
+                    with self.subTest(foreign=snapshot_name), self.assertRaisesRegex(ValueError, "provenance"):
+                        MEASUREMENT.publish(staging, root / f"foreign-{snapshot_name}", identity, "123", "2", "c" * 40)
                 finally:
                     sidecar.write_bytes(original_sidecar)
             self.assertEqual(MEASUREMENT.MAX_FILE_BYTES, 32 * 1024 * 1024)

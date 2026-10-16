@@ -109,7 +109,7 @@ def temporary_names(kind, run):
         return image | {f"drug-public-staging-{suffix}" for suffix in suffixes}
     return {f"{name}-{suffix}" for name in (
         "healthcare-rust-debug", "mrf-rust-coverage", "mrf-python-coverage-capacity",
-        *(f"mrf-python-coverage-main-{shard}" for shard in range(4)),
+        *(f"mrf-python-coverage-main-{shard}" for shard in range(6)),
         *(f"mrf-python-coverage-postgres-{shard}" for shard in
           ("core-services", "core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", "core-ptg",
            *(f"registry-{index}" for index in range(16)), "directory-source", "directory-storage",

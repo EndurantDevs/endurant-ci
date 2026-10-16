@@ -45,6 +45,15 @@ class RenderWorkflowChecks(unittest.TestCase):
             database = original["jobs"]["address-canonical-db-tests"]
             database["strategy"]["matrix"]["include"] = [row for row in database["strategy"]["matrix"]["include"]
                 if not row["shard"].startswith("registry-") and not row["shard"].startswith("core-snapshots")]
+            download = next(step for step in original["jobs"]["measurement"]["steps"]
+                            if step.get("name") == "Download immutable measurement artifacts")
+            native_outputs = {row["output"] for row in database["strategy"]["matrix"]["include"]}
+            selectors = []
+            for selector in download["with"]["artifact-ids"].split(","):
+                native_output = re.search(r"needs\.address-canonical-db-tests\.outputs\.([a-z_0-9]+)", selector)
+                if native_output is None or native_output[1] in native_outputs:
+                    selectors.append(selector)
+            download["with"]["artifact-ids"] = ",".join(selectors).replace("${{ needs.python-tests", "${{\n  needs.python-tests")
             caller.write_text(yaml.safe_dump(original, sort_keys=False))
             result = yaml.safe_load(RENDERER.render_common_test_update("healthcare", "2" * 40, caller))
             self.assertEqual(set(result["jobs"]), set(original["jobs"]))
@@ -69,6 +78,47 @@ class RenderWorkflowChecks(unittest.TestCase):
             self.assertEqual(verifier["with"]["ref"], "2" * 40)
             caller.write_text(yaml.safe_dump(result, sort_keys=False))
             self.assertEqual(yaml.safe_load(RENDERER.render_common_test_update("healthcare", "2" * 40, caller)), result)
+
+    def test_common_test_update_rejects_historical_python_topology(self):
+        with tempfile.TemporaryDirectory() as directory:
+            caller = Path(directory) / "ci.yml"
+            caller.write_text(yaml.safe_dump({"on": {"push": {"branches": ["main"]}}, "jobs": {
+                "smoke": {"name": "portable checks", "runs-on": "ubuntu-latest", "steps": [{"run": "true"}]}}}))
+            original = yaml.safe_load(RENDERER.render_workflow("healthcare", "1" * 40, caller))
+            for inventory in ("matrix", "outputs", "both", "downloads", "duplicate-selector", "selector-order",
+                              "missing-download", "duplicate-download"):
+                with self.subTest(inventory=inventory):
+                    legacy = json.loads(json.dumps(original))
+                    job = legacy["jobs"]["python-tests"]
+                    if inventory in ("matrix", "both"):
+                        rows = job["strategy"]["matrix"]["include"][:4]
+                        for index, row in enumerate(rows):
+                            row["label"] = f"Python tests ({index + 1}/4)"
+                        job["strategy"]["matrix"]["include"] = rows
+                    if inventory in ("outputs", "both"):
+                        for index in (4, 5):
+                            job["outputs"].pop(f"artifact_{index}")
+                    steps = legacy["jobs"]["measurement"]["steps"]
+                    download = next(step for step in steps if step.get("name") == "Download immutable measurement artifacts")
+                    selectors = re.findall(r"\$\{\{\s*needs\.python-tests\.outputs\.artifact_[0-9]+\s*\}\}",
+                                           download["with"]["artifact-ids"])
+                    if inventory == "downloads":
+                        download["with"]["artifact-ids"] = ",".join(
+                            selector for selector in download["with"]["artifact-ids"].split(",")
+                            if selector.strip() not in selectors[4:])
+                    elif inventory == "duplicate-selector":
+                        download["with"]["artifact-ids"] += "," + selectors[-1]
+                    elif inventory == "selector-order":
+                        download["with"]["artifact-ids"] = download["with"]["artifact-ids"].replace(
+                            selectors[0], "selector-placeholder"
+                        ).replace(selectors[1], selectors[0]).replace("selector-placeholder", selectors[1])
+                    elif inventory == "missing-download":
+                        steps.remove(download)
+                    elif inventory == "duplicate-download":
+                        steps.append(download)
+                    caller.write_text(yaml.safe_dump(legacy, sort_keys=False))
+                    with self.assertRaisesRegex(ValueError, "regenerate the complete workflow"):
+                        RENDERER.render_common_test_update("healthcare", "2" * 40, caller)
 
     def test_legacy_pip_smoke_preserves_its_only_python_setup(self):
         steps = [{"uses": "actions/setup-python@" + "a" * 40, "with": {"python-version": "3.13"}},
@@ -104,6 +154,9 @@ class RenderWorkflowChecks(unittest.TestCase):
                     canonical = yaml.safe_load((ROOT / ".github/workflows" / f"{kind}.yml").read_text())
                     rendered = RENDERER.render_workflow(kind, "1" * 40, caller)
                     workflow = yaml.safe_load(rendered)
+                    if kind == "healthcare":
+                        self.assertEqual(sum(len(job.get("strategy", {}).get("matrix", {}).get("include", [None]))
+                                             for job in workflow["jobs"].values()), 47)
                     self.assertEqual(workflow["on"], original["on"])
                     self.assertEqual(set(workflow["jobs"]), {"smoke", "dev-image-publication", "artifact-cleanup", *canonical["jobs"]})
                     self.assertNotIn("${{ inputs.ci_revision }}", rendered)

@@ -30,7 +30,7 @@ usage: scripts/healthcare/check MODE [ARG]
 MODE is one of:
   hygiene
   quality
-  python-main 0|1|2|3
+  python-main 0|1|2|3|4|5
   capacity
   api-contract
   rust
@@ -391,7 +391,7 @@ publication_ptg_runtime_native_test_paths() {
 
 run_python_main() {
   local shard=${1:-}
-  case "$shard" in 0|1|2|3) ;; *) usage ;; esac
+  case "$shard" in 0|1|2|3|4|5) ;; *) usage ;; esac
   local company_group_tests
   company_group_tests=$(company_group_native_test_paths) || return 1
   local manual_source_swap_tests
@@ -556,7 +556,7 @@ run_python_main() {
   ci_phase_begin python-tests
   public_common_test_run "healthcare-python-main-${shard}" "$COVERAGE_FILE" \
     timeout --foreground 420s python -m pytest -q -n 1 --dist loadscope --durations=20 \
-    -p scripts.ci.shard_pytest_nodeids --ci-shard-count 4 --ci-shard-index "$shard" \
+    -p scripts.ci.shard_pytest_nodeids --ci-shard-count 6 --ci-shard-index "$shard" \
     --cov-config=test-coverage.ini \
     --cov=api --cov=db --cov=process --cov=public_evidence --cov=service --cov=main \
     --cov-branch --cov-report= \

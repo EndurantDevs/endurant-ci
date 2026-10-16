@@ -182,6 +182,20 @@ def render_common_test_update(kind, revision, caller):
     original = yaml.safe_load(caller.read_text())
     original["on"] = original.pop(True) if True in original else original["on"]
     updated = yaml.safe_load(render_workflow(kind, revision, caller))
+    python_job = original["jobs"].get("python-tests", {})
+    expected_python = updated["jobs"]["python-tests"]
+    python_downloads = []
+    for workflow in (original, updated):
+        downloads = [step for step in workflow["jobs"].get("measurement", {}).get("steps", [])
+                     if step.get("name") == "Download immutable measurement artifacts"]
+        if len(downloads) != 1:
+            raise ValueError("Python measurement topology differs; regenerate the complete workflow")
+        artifact_ids = re.sub(r"\s+", "", downloads[0].get("with", {}).get("artifact-ids", ""))
+        python_downloads.append(re.findall(r"\$\{\{needs\.python-tests\.outputs\.[^}]*\}\}", artifact_ids))
+    if (python_job.get("strategy", {}).get("matrix") != expected_python["strategy"]["matrix"]
+            or python_job.get("outputs") != expected_python["outputs"]
+            or python_downloads[0] != python_downloads[1]):
+        raise ValueError("Python measurement topology differs; regenerate the complete workflow")
     original["permissions"].pop("checks", None)
     for identifier in ("python-tests", "capacity-evidence"):
         original["jobs"][identifier] = updated["jobs"][identifier]
