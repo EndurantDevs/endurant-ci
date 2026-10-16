@@ -75,9 +75,16 @@ class ArtifactCleanupChecks(unittest.TestCase):
                         if step.get("name") == "Download immutable measurement artifacts")
         self.assertEqual(set(re.findall(r"needs\.address-canonical-db-tests\.outputs\.([a-z_0-9]+)", download)), outputs)
         self.assertEqual(measurement.POSTGRES_SHARDS, shards)
-        self.assertEqual(len(measurement.producer_files()), 33)
+        self.assertEqual(len(measurement.producer_files()), 35)
         expected_run = run()
         names = cleanup.temporary_names("healthcare", expected_run)
+        main_shards = tuple(row["shard"] for row in workflow["jobs"]["python-tests"]["strategy"]["matrix"]["include"])
+        self.assertEqual(main_shards, tuple(str(index) for index in range(6)))
+        main_producers = {f"mrf-python-coverage-main-{shard}" for shard in main_shards}
+        self.assertEqual({name for name in measurement.producer_files() if "-main-" in name}, main_producers)
+        self.assertEqual({name for name in names if name.startswith("mrf-python-coverage-main-")},
+                         {f"{producer}-123-{attempt}" for producer in main_producers
+                          for attempt in range(1, expected_run["run_attempt"] + 1)})
         expected = {f"mrf-python-coverage-postgres-{shard}-123-{attempt}"
                     for shard in shards for attempt in range(1, expected_run["run_attempt"] + 1)}
         self.assertEqual({name for name in names if name.startswith("mrf-python-coverage-postgres-")}, expected)

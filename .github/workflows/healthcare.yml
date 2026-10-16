@@ -205,22 +205,30 @@ jobs:
       artifact_1: ${{ steps.coverage-output.outputs.artifact_1 }}
       artifact_2: ${{ steps.coverage-output.outputs.artifact_2 }}
       artifact_3: ${{ steps.coverage-output.outputs.artifact_3 }}
+      artifact_4: ${{ steps.coverage-output.outputs.artifact_4 }}
+      artifact_5: ${{ steps.coverage-output.outputs.artifact_5 }}
     strategy:
       fail-fast: true
       matrix:
         include:
         - shard: '0'
-          label: Python tests (1/4)
+          label: Python tests (1/6)
           output: artifact_0
         - shard: '1'
-          label: Python tests (2/4)
+          label: Python tests (2/6)
           output: artifact_1
         - shard: '2'
-          label: Python tests (3/4)
+          label: Python tests (3/6)
           output: artifact_2
         - shard: '3'
-          label: Python tests (4/4)
+          label: Python tests (4/6)
           output: artifact_3
+        - shard: '4'
+          label: Python tests (5/6)
+          output: artifact_4
+        - shard: '5'
+          label: Python tests (6/6)
+          output: artifact_5
     env:
       COMMON_TEST_EQUIVALENCE: 'true'
       COMMON_TEST_STEP: 'Run complete validation stage'
@@ -748,7 +756,7 @@ jobs:
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       with:
         artifact-ids: ${{ needs.python-tests.outputs.artifact_0 }},${{ needs.python-tests.outputs.artifact_1 }},${{ needs.python-tests.outputs.artifact_2
-          }},${{ needs.python-tests.outputs.artifact_3 }},${{ needs.capacity-evidence.outputs.artifact_id }},${{ needs.rust-scanner.outputs.artifact_id
+          }},${{ needs.python-tests.outputs.artifact_3 }},${{ needs.python-tests.outputs.artifact_4 }},${{ needs.python-tests.outputs.artifact_5 }},${{ needs.capacity-evidence.outputs.artifact_id }},${{ needs.rust-scanner.outputs.artifact_id
           }},${{ needs.address-canonical-db-tests.outputs.artifact_core_services }},${{ needs.address-canonical-db-tests.outputs.artifact_core_imports
           }},${{ needs.address-canonical-db-tests.outputs.artifact_core_imports_2 }},${{ needs.address-canonical-db-tests.outputs.artifact_core_snapshots }},${{ needs.address-canonical-db-tests.outputs.artifact_core_snapshots_2 }},${{ needs.address-canonical-db-tests.outputs.artifact_core_ptg }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_0 }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_1
           }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_2

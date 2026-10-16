@@ -88,8 +88,8 @@ class PublicWorkflowPermissions(unittest.TestCase):
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         jobs = workflow["jobs"]
         expected = {
-            "python-tests": [(str(index), f"Python tests ({index + 1}/4)", f"artifact_{index}")
-                             for index in range(4)],
+            "python-tests": [(str(index), f"Python tests ({index + 1}/6)", f"artifact_{index}")
+                             for index in range(6)],
             "address-canonical-db-tests": [(shard, f"Database tests ({label})", "artifact_" + shard.replace("-", "_"))
                                             for shard, label in (
                                                 ("core-services", "services"), ("core-imports", "imports"),
@@ -130,9 +130,10 @@ class PublicWorkflowPermissions(unittest.TestCase):
         download = next(step for step in jobs["measurement"]["steps"]
                         if step.get("name") == "Download immutable measurement artifacts")
         self.assertEqual(set(download["with"]["artifact-ids"].split(",")), set(artifact_ids))
-        self.assertEqual(len(download["with"]["artifact-ids"].split(",")), 33)
+        self.assertEqual(len(download["with"]["artifact-ids"].split(",")), 35)
         self.assertEqual(sum(len(job.get("strategy", {}).get("matrix", {}).get("include", [None]))
-                             for job in jobs.values()), 42)
+                             for job in jobs.values()), 44)
+        self.assertEqual(jobs["python-tests"]["timeout-minutes"], 20)
 
     def test_cheap_lint_blocks_heavy_jobs_without_changing_measurement_producers(self):
         jobs = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())["jobs"]

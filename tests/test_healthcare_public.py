@@ -1271,6 +1271,19 @@ run_registry_ptg_scope_postgres postgresql://synthetic/runtime_test
                                             capture_output=True, text=True, check=False)
                     self.assertEqual(result.returncode == 0, actual == names, result.stderr)
 
+    def test_python_main_rejects_shards_outside_the_six_lane_inventory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = {**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT)}
+            for shard in ("", "-1", "6", "00", "1.0", "true"):
+                with self.subTest(shard=shard):
+                    result = subprocess.run(
+                        ["bash", "-eu"], input=CHECK_FUNCTIONS + '\nrun_python_main "$INVALID_SHARD"\n',
+                        env={**environment, "INVALID_SHARD": shard}, capture_output=True, text=True,
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("python-main 0|1|2|3|4|5", result.stderr)
+                    self.assertEqual(list(Path(temporary).iterdir()), [])
+
     def test_planfinder_decoder_uses_python_discovery(self):
         offline_paths = (
             *COMPANY_ASSERTION_CAPABILITY[3:5],
@@ -1315,7 +1328,7 @@ mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
 prepare_debug_rust_binaries() { :; }
 python() { printf '%s\n' "$*" >> "$CALL_LOG"; }
 timeout() { shift 2; "$@"; }
-for shard in 0 1 2 3; do run_python_main "$shard"; done
+for shard in 0 1 2 3 4 5; do run_python_main "$shard"; done
 '''
                 environment_map = {
                     **os.environ, "SOURCE_ROOT": str(source_root), "CI_ROOT": str(ROOT),
@@ -1326,9 +1339,10 @@ for shard in 0 1 2 3; do run_python_main "$shard"; done
                 self.assertEqual(run_result.returncode, 0, run_result.stderr)
                 calls = [shlex.split(call) for call in call_log.read_text().splitlines()]
                 selections = [call for call in calls if call[:2] == ["-m", "pytest"]]
-                self.assertEqual(len(selections), 4)
+                self.assertEqual(len(selections), 6)
                 for shard, arguments in enumerate(selections):
                     self.assertEqual(arguments[arguments.index("--ci-shard-index") + 1], str(shard))
+                    self.assertEqual(arguments[arguments.index("--ci-shard-count") + 1], "6")
                     self.assertIn("scripts.ci.shard_pytest_nodeids", arguments)
                     for path in offline_paths:
                         self.assertNotIn(path, arguments)
@@ -1343,7 +1357,7 @@ for shard in 0 1 2 3; do run_python_main "$shard"; done
                     self.assertTrue(all(arguments[index - 1] == "--ignore" for index in python_paths))
                     self.assertIn("--cov=process", arguments)
                 provenance_calls = [call for call in calls if "write-shard-provenance" in call]
-                self.assertEqual(len(provenance_calls), 4)
+                self.assertEqual(len(provenance_calls), 6)
 
     def test_company_group_modules_leave_python_discovery_only_with_closed_native_capability(self):
         for capability, dependencies, host_tests in (
@@ -1405,7 +1419,7 @@ for shard in 0 1 2 3; do run_python_main "$shard"; done
     prepare_debug_rust_binaries() { printf 'build\n' >> "$CALL_LOG"; }
     python() { printf '%s\n' "$*" >> "$CALL_LOG"; }
     timeout() { shift 2; "$@"; }
-    for shard in 0 1 2 3; do run_python_main "$shard" || exit 1; done
+    for shard in 0 1 2 3 4 5; do run_python_main "$shard" || exit 1; done
     '''
                     result = subprocess.run(["bash", "-eu"], input=script, cwd=source, env=environment,
                                             capture_output=True, text=True, timeout=30, check=False)
@@ -1416,10 +1430,10 @@ for shard in 0 1 2 3; do run_python_main "$shard"; done
                         self.assertFalse(calls)
                         continue
                     runs = [arguments for arguments in calls if arguments[:2] == ["-m", "pytest"]]
-                    self.assertEqual(len(runs), 4)
+                    self.assertEqual(len(runs), 6)
                     for shard, arguments in enumerate(runs):
                         self.assertEqual(arguments[arguments.index("--ci-shard-index") + 1], str(shard))
-                        self.assertEqual(arguments[arguments.index("--ci-shard-count") + 1], "4")
+                        self.assertEqual(arguments[arguments.index("--ci-shard-count") + 1], "6")
                         for path in host_tests:
                             self.assertEqual(arguments.count(path), int(layout == "complete"))
                             if layout == "complete":
@@ -2550,7 +2564,7 @@ run_provider_profile_postgres "postgresql://postgres:postgres@localhost:5432/ptg
                 )
                 self.assertEqual(result.returncode == 0, not fail, result.stderr)
                 calls = call_log.read_text().splitlines()
-                main_call = next(call for call in calls if "--ci-shard-count 4" in call)
+                main_call = next(call for call in calls if "--ci-shard-count 6" in call)
                 for test_path in test_paths:
                     self.assertIn(f"--ignore {test_path}", main_call)
                 profile_call = next(
@@ -2635,7 +2649,7 @@ run_api_contract
         self.assertIn("api-contract", workflow["jobs"]["measurement"]["needs"])
         main = CHECK_FUNCTIONS.split("run_python_main() {", 1)[1].split("\n}\n", 1)[0]
         self.assertNotIn("test_coverage_forecast.py", main)
-        self.assertIn("--ci-shard-count 4", main)
+        self.assertIn("--ci-shard-count 6", main)
 
     def test_runtime_contract_modules_fail_closed_without_creating_a_tool_environment(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3439,7 +3453,7 @@ RUNTIME_BASE_IMAGE=synthetic
                             uploads.extend(line.strip().replace("${{ matrix.shard }}", row.get("shard", ""))
                                            for line in step["with"]["path"].splitlines() if line.strip())
                             freezes.append(validation[validation.index("git diff --exit-code"):])
-            self.assertEqual(len(uploads), 65)  # Thirty-two Python pairs plus the Rust directory.
+            self.assertEqual(len(uploads), 69)  # Thirty-four Python pairs plus the Rust directory.
             script = CHECK_FUNCTIONS
             for upload in uploads:
                 prefix = "${{ runner.temp }}/healthcare-artifacts/"
@@ -3453,7 +3467,7 @@ RUNTIME_BASE_IMAGE=synthetic
             subprocess.run(["bash", "-eus"], input=script, text=True, cwd=source, env=env, check=True)
             for upload in uploads:
                 self.assertTrue(Path(upload.replace("${{ runner.temp }}", str(runner))).exists())
-            self.assertEqual(len(freezes), 33)
+            self.assertEqual(len(freezes), 35)
             self.assertEqual(len(set(freezes)), 1)
             def freeze():
                 return subprocess.run(["bash", "-euc", freezes[0]], cwd=source, capture_output=True).returncode
@@ -4217,7 +4231,7 @@ fi
                                              for call in call_log.read_text().splitlines()))
                     continue
                 calls = call_log.read_text().splitlines()
-                main_call = next(call for call in calls if "--ci-shard-count 4" in call)
+                main_call = next(call for call in calls if "--ci-shard-count 6" in call)
                 for test_path in test_paths:
                     if test_path in required_test_paths or (test_path in present_paths and test_path not in mixed_test_paths):
                         self.assertIn(f"--ignore {test_path}", main_call)
@@ -4471,7 +4485,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                     selected = lane in ("core-imports-2", "all")
                     self.assertEqual(result.returncode == 0, not (fail and selected), result.stderr)
                     calls = call_log.read_text().splitlines()
-                    main_call = next(call for call in calls if "--ci-shard-count 4" in call)
+                    main_call = next(call for call in calls if "--ci-shard-count 6" in call)
                     self.assertIn(f"--ignore {test_path}", main_call)
                     executions = [call for call in calls if call.endswith(f"\t-m pytest -q {test_path}")]
                     if not selected:
@@ -4611,7 +4625,7 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                 result = subprocess.run(["bash", "-eu"], input=script, cwd=source, env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, int(bool(failed_path) and lane != "core-imports"), result.stderr)
                 calls = call_log.read_text().splitlines()
-                main_call = next(call for call in calls if "--ci-shard-count 4" in call)
+                main_call = next(call for call in calls if "--ci-shard-count 6" in call)
                 for test_path in test_paths:
                     self.assertIn(f"--ignore {test_path}", main_call)
 

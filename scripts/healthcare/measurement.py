@@ -30,7 +30,7 @@ SQL_COLUMNS = {
 
 def producer_files():
     result = {}
-    for kind, shards in (("main", ("0", "1", "2", "3")),
+    for kind, shards in (("main", ("0", "1", "2", "3", "4", "5")),
                          ("capacity", ("capacity",)),
                          ("postgres", POSTGRES_SHARDS)):
         for shard in shards:
