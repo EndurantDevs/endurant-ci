@@ -389,6 +389,117 @@ publication_ptg_runtime_native_test_paths() {
   printf '%s\n' tests/test_registry_publication_ptg_runtime_postgres.py
 }
 
+provider_plan_native_test_paths() {
+  local capability=(
+    process/registry_provider_plan_read.py
+    tests/test_registry_provider_plan_read.py
+    tests/test_network_catalog_provider_plan_routes.py
+    tests/test_registry_provider_plan_read_postgres.py
+    tests/test_registry_provider_plan_transport_postgres.py
+  )
+  local source_path present=0
+  for source_path in "${capability[@]}"; do
+    if [ -e "$repository_root/$source_path" ] || [ -L "$repository_root/$source_path" ]; then
+      present=1
+    fi
+  done
+  [ "$present" = 1 ] || return 0
+  require_native_source_files "${capability[@]}" \
+    api/endpoint/network_catalog.py || return 1
+  printf '%s\n' tests/test_registry_provider_plan_read_postgres.py \
+    tests/test_registry_provider_plan_transport_postgres.py
+}
+
+cms_profile_native_test_paths() {
+  local capability=(
+    api/provider_profile_network_facts.py
+    tests/test_provider_profile_network_facts.py
+    tests/test_provider_profile_network_facts_postgres.py
+  )
+  local source_path present=0
+  for source_path in "${capability[@]}"; do
+    if [ -e "$repository_root/$source_path" ] || [ -L "$repository_root/$source_path" ]; then
+      present=1
+    fi
+  done
+  [ "$present" = 1 ] || return 0
+  require_native_source_files "${capability[@]}" \
+    api/provider_directory_cms_network_scope.py \
+    process/network_cms_registry_address_capture.py || return 1
+  printf '%s\n' tests/test_provider_profile_network_facts_postgres.py
+}
+
+cms_profile_directory_native_test_paths() {
+  local capability=(
+    api/provider_profile_cms_resources.py
+    api/provider_profile_scoped_resources.py
+    api/provider_profile_scoped_sql.py
+    api/provider_profile_network_contract.py
+    api/provider_profile_network_read.py
+    tests/test_provider_profile_cms_resources.py
+    tests/test_provider_profile_scoped_resources.py
+    tests/test_provider_profile_scoped_sql.py
+    tests/test_provider_profile_network_contract.py
+    tests/test_provider_profile_network_read.py
+    tests/test_network_catalog_provider_profile_routes.py
+    tests/test_provider_profile_cms_resources_postgres.py
+    tests/test_provider_profile_directory_read_postgres.py
+    tests/test_registry_provider_profile_transport_postgres.py
+    tests/test_provider_profile_network_privacy_postgres.py
+  )
+  local source_path present=0
+  for source_path in "${capability[@]}"; do
+    if [ -e "$repository_root/$source_path" ] || [ -L "$repository_root/$source_path" ]; then
+      present=1
+    fi
+  done
+  [ "$present" = 1 ] || return 0
+  require_native_source_files "${capability[@]}" \
+    api/provider_profile_network_facts.py \
+    tests/test_provider_profile_network_facts.py \
+    tests/test_provider_profile_network_facts_postgres.py \
+    api/provider_directory_cms_network_scope.py \
+    process/network_cms_registry_address_capture.py \
+    api/endpoint/network_catalog.py \
+    api/endpoint/npi.py \
+    api/provider_profile_snapshot.py \
+    api/provider_profile_cms.py \
+    tests/test_provider_profile_cms.py \
+    tests/test_network_catalog_routes.py \
+    tests/test_provider_directory_cms_resource_batch_postgres.py \
+    api/provider_profile.py \
+    api/provider_profile_states.py \
+    db/connection.py \
+    db/models/system.py \
+    process/provider_directory_cms_serving_receipt.py \
+    process/provider_directory_profile.py \
+    process/sql/provider_directory_profile_evidence.sql \
+    tests/cms_npd_admission_postgres_support.py \
+    tests/test_network_cms_registry_source_pair_postgres.py \
+    tests/cms_registry_recipe_postgres_support.py \
+    tests/test_network_custom_address_source_postgres.py \
+    tests/test_network_serving_schema_postgres.py \
+    tests/test_registry_candidate_composition_postgres.py \
+    tests/test_registry_retained_site_adoption_postgres.py \
+    tests/test_network_fhir_membership_source_postgres.py \
+    tests/test_registry_approval_store_postgres.py \
+    api/provider_directory_entities_contract.py \
+    process/network_address_projection.py \
+    process/network_approved_membership_source.py \
+    process/network_fhir_membership_source.py \
+    process/network_membership_candidate_lifecycle.py \
+    process/network_membership_copy.py \
+    process/network_membership_pipeline.py \
+    process/network_serving_read.py \
+    process/registry_candidate_composition.py \
+    process/registry_record_store.py \
+    process/registry_source_recipe_store.py || return 1
+  printf '%s\n' tests/test_provider_profile_cms_resources_postgres.py \
+    tests/test_provider_profile_directory_read_postgres.py \
+    tests/test_registry_provider_profile_transport_postgres.py \
+    tests/test_provider_profile_network_privacy_postgres.py
+}
+
 run_python_main() {
   local shard=${1:-}
   case "$shard" in 0|1|2|3|4|5) ;; *) usage ;; esac
@@ -398,6 +509,12 @@ run_python_main() {
   manual_source_swap_tests=$(manual_source_swap_native_test_paths) || return 1
   local canonical_cutover_tests
   canonical_cutover_tests=$(canonical_cutover_native_test_paths) || return 1
+  local provider_plan_tests
+  provider_plan_tests=$(provider_plan_native_test_paths) || return 1
+  local cms_profile_tests
+  cms_profile_tests=$(cms_profile_native_test_paths) || return 1
+  local cms_profile_directory_tests
+  cms_profile_directory_tests=$(cms_profile_directory_native_test_paths) || return 1
   local naic_tests
   naic_tests=$(naic_native_test_paths) || return 1
   local publication_worker_tests publication_ptg_runtime_tests manual_location_commands_tests
@@ -430,6 +547,15 @@ run_python_main() {
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
   done <<< "$canonical_cutover_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
+  done <<< "$provider_plan_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
+  done <<< "$cms_profile_directory_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
+  done <<< "$cms_profile_tests"
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
   done <<< "$naic_tests"
@@ -1543,6 +1669,12 @@ run_network_registry_postgres() (
   manual_source_swap_tests=$(manual_source_swap_native_test_paths) || return 1
   local canonical_cutover_tests
   canonical_cutover_tests=$(canonical_cutover_native_test_paths) || return 1
+  local provider_plan_tests
+  provider_plan_tests=$(provider_plan_native_test_paths) || return 1
+  local cms_profile_tests
+  cms_profile_tests=$(cms_profile_native_test_paths) || return 1
+  local cms_profile_directory_tests
+  cms_profile_directory_tests=$(cms_profile_directory_native_test_paths) || return 1
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$company_group_tests"
@@ -1552,6 +1684,15 @@ run_network_registry_postgres() (
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$canonical_cutover_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || registry_tests+=("$test_path")
+  done <<< "$provider_plan_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || registry_tests+=("$test_path")
+  done <<< "$cms_profile_directory_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || registry_tests+=("$test_path")
+  done <<< "$cms_profile_tests"
   local naic_tests
   naic_tests=$(naic_native_test_paths) || return 1
   local publication_worker_tests publication_ptg_runtime_tests manual_location_commands_tests

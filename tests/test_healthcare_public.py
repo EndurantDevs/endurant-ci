@@ -259,6 +259,89 @@ PUBLICATION_PTG_RUNTIME_DEPENDENCIES = (
 )
 PUBLICATION_PTG_RUNTIME_HOST_TESTS = PUBLICATION_PTG_RUNTIME_CAPABILITY[-1:]
 
+PROVIDER_PLAN_CAPABILITY = (
+    'process/registry_provider_plan_read.py',
+    'tests/test_registry_provider_plan_read.py',
+    'tests/test_network_catalog_provider_plan_routes.py',
+    'tests/test_registry_provider_plan_read_postgres.py',
+    'tests/test_registry_provider_plan_transport_postgres.py',
+)
+PROVIDER_PLAN_DEPENDENCIES = ('api/endpoint/network_catalog.py',)
+PROVIDER_PLAN_HOST_TESTS = ('tests/test_registry_provider_plan_read_postgres.py', 'tests/test_registry_provider_plan_transport_postgres.py')
+
+CMS_PROFILE_CAPABILITY = (
+    'api/provider_profile_network_facts.py',
+    'tests/test_provider_profile_network_facts.py',
+    'tests/test_provider_profile_network_facts_postgres.py',
+)
+CMS_PROFILE_DEPENDENCIES = ('api/provider_directory_cms_network_scope.py', 'process/network_cms_registry_address_capture.py')
+CMS_PROFILE_HOST_TESTS = ('tests/test_provider_profile_network_facts_postgres.py',)
+
+CMS_PROFILE_DIRECTORY_CAPABILITY = (
+    'api/provider_profile_cms_resources.py',
+    'api/provider_profile_scoped_resources.py',
+    'api/provider_profile_scoped_sql.py',
+    'api/provider_profile_network_contract.py',
+    'api/provider_profile_network_read.py',
+    'tests/test_provider_profile_cms_resources.py',
+    'tests/test_provider_profile_scoped_resources.py',
+    'tests/test_provider_profile_scoped_sql.py',
+    'tests/test_provider_profile_network_contract.py',
+    'tests/test_provider_profile_network_read.py',
+    'tests/test_network_catalog_provider_profile_routes.py',
+    'tests/test_provider_profile_cms_resources_postgres.py',
+    'tests/test_provider_profile_directory_read_postgres.py',
+    'tests/test_registry_provider_profile_transport_postgres.py',
+    'tests/test_provider_profile_network_privacy_postgres.py',
+)
+CMS_PROFILE_DIRECTORY_DEPENDENCIES = (
+    'api/provider_profile_network_facts.py',
+    'tests/test_provider_profile_network_facts.py',
+    'tests/test_provider_profile_network_facts_postgres.py',
+    'api/provider_directory_cms_network_scope.py',
+    'process/network_cms_registry_address_capture.py',
+    'api/endpoint/network_catalog.py',
+    'api/endpoint/npi.py',
+    'api/provider_profile_snapshot.py',
+    'api/provider_profile_cms.py',
+    'tests/test_provider_profile_cms.py',
+    'tests/test_network_catalog_routes.py',
+    'tests/test_provider_directory_cms_resource_batch_postgres.py',
+    'api/provider_profile.py',
+    'api/provider_profile_states.py',
+    'db/connection.py',
+    'db/models/system.py',
+    'process/provider_directory_cms_serving_receipt.py',
+    'process/provider_directory_profile.py',
+    'process/sql/provider_directory_profile_evidence.sql',
+    'tests/cms_npd_admission_postgres_support.py',
+    'tests/test_network_cms_registry_source_pair_postgres.py',
+    'tests/cms_registry_recipe_postgres_support.py',
+    'tests/test_network_custom_address_source_postgres.py',
+    'tests/test_network_serving_schema_postgres.py',
+    'tests/test_registry_candidate_composition_postgres.py',
+    'tests/test_registry_retained_site_adoption_postgres.py',
+    'tests/test_network_fhir_membership_source_postgres.py',
+    'tests/test_registry_approval_store_postgres.py',
+    'api/provider_directory_entities_contract.py',
+    'process/network_address_projection.py',
+    'process/network_approved_membership_source.py',
+    'process/network_fhir_membership_source.py',
+    'process/network_membership_candidate_lifecycle.py',
+    'process/network_membership_copy.py',
+    'process/network_membership_pipeline.py',
+    'process/network_serving_read.py',
+    'process/registry_candidate_composition.py',
+    'process/registry_record_store.py',
+    'process/registry_source_recipe_store.py',
+)
+CMS_PROFILE_DIRECTORY_HOST_TESTS = (
+    'tests/test_provider_profile_cms_resources_postgres.py',
+    'tests/test_provider_profile_directory_read_postgres.py',
+    'tests/test_registry_provider_profile_transport_postgres.py',
+    'tests/test_provider_profile_network_privacy_postgres.py',
+)
+
 REGISTRY_COMPLETION_CAPABILITY = (
     "process/registry_source_admission_receipt.py",
     "alembic/versions/20261010030000_registry_source_admission_receipt.py",
@@ -882,6 +965,45 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
         self.assertEqual(len(successful_shard_members), len(set(successful_shard_members)))
         self.assertCountEqual(successful_shard_members, paths)
 
+    def test_provider_native_capabilities_match_the_actual_closed_rosters(self):
+        for helper, capability, dependencies, native_tests in (
+            ("provider_plan", PROVIDER_PLAN_CAPABILITY, PROVIDER_PLAN_DEPENDENCIES, PROVIDER_PLAN_HOST_TESTS),
+            ("cms_profile", CMS_PROFILE_CAPABILITY, CMS_PROFILE_DEPENDENCIES, CMS_PROFILE_HOST_TESTS),
+            ("cms_profile_directory", CMS_PROFILE_DIRECTORY_CAPABILITY, CMS_PROFILE_DIRECTORY_DEPENDENCIES, CMS_PROFILE_DIRECTORY_HOST_TESTS),
+        ):
+            body = CHECK_FUNCTIONS.split(helper + "_native_test_paths() {\n", 1)[1].split("\n}\n", 1)[0]
+            declared = shlex.split(body.split("  local capability=(\n", 1)[1].split("\n  )", 1)[0])
+            self.assertEqual(tuple(declared), capability)
+            required = body.split('require_native_source_files "${capability[@]}"', 1)[1].split(" || return 1", 1)[0]
+            self.assertEqual(tuple(shlex.split(required.replace("\\\n", ""))), dependencies)
+            emitted = body.split("printf '%s\\n' ", 1)[1]
+            self.assertEqual(tuple(shlex.split(emitted.replace("\\\n", ""))), native_tests)
+
+    def test_provider_optional_native_groups_are_independent_and_coexist(self):
+        dependencies = (*PROVIDER_PLAN_DEPENDENCIES, *CMS_PROFILE_DEPENDENCIES,
+                        *(path for path in CMS_PROFILE_DIRECTORY_DEPENDENCIES if path not in CMS_PROFILE_CAPABILITY))
+        previous = (*PROVIDER_PLAN_CAPABILITY, *CMS_PROFILE_CAPABILITY, *dependencies)
+        complete = (*previous, *CMS_PROFILE_DIRECTORY_CAPABILITY)
+        for present in (dependencies, previous, complete):
+            with self.subTest(present=present), tempfile.TemporaryDirectory() as temporary:
+                source = Path(temporary)
+                for name in present:
+                    path = source / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.touch()
+                script = CHECK_FUNCTIONS + "\ngit() { return 0; }\nprovider_plan_native_test_paths && cms_profile_native_test_paths && cms_profile_directory_native_test_paths\n"
+                result = subprocess.run(
+                    ["bash", "-eu"], input=script, cwd=source,
+                    env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT)},
+                    capture_output=True, text=True, timeout=10, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                actual = result.stdout.splitlines()
+                expected = ([*PROVIDER_PLAN_HOST_TESTS, *CMS_PROFILE_HOST_TESTS, *CMS_PROFILE_DIRECTORY_HOST_TESTS]
+                            if present == complete else [*PROVIDER_PLAN_HOST_TESTS, *CMS_PROFILE_HOST_TESTS]
+                            if present == previous else [])
+                self.assertEqual(actual, expected)
+                self.assertEqual(len(actual), len(set(actual)))
+
     def test_optional_company_pricing_and_maintenance_native_routes_fail_closed(self):
         registry_roster = tuple(shlex.split(CHECK_FUNCTIONS.split(
             "run_network_registry_postgres() (\n", 1)[1].split("  local registry_tests=(\n", 1)[1].split("\n  )", 1)[0]))
@@ -899,6 +1021,9 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
             ("pricing", REGISTRY_PRICING_CAPABILITY, REGISTRY_PRICING_DEPENDENCIES),
             ("manual-swaps", MANUAL_SOURCE_SWAP_CAPABILITY, MANUAL_SOURCE_SWAP_DEPENDENCIES),
             ("canonical-cutover", CANONICAL_CUTOVER_CAPABILITY, CANONICAL_CUTOVER_DEPENDENCIES),
+            ("provider-plan", PROVIDER_PLAN_CAPABILITY, PROVIDER_PLAN_DEPENDENCIES),
+            ("cms-profile", CMS_PROFILE_CAPABILITY, CMS_PROFILE_DEPENDENCIES),
+            ("cms-profile-directory", CMS_PROFILE_DIRECTORY_CAPABILITY, CMS_PROFILE_DIRECTORY_DEPENDENCIES),
             ("maintenance", PROFILE_MAINTENANCE_CAPABILITY, PROFILE_MAINTENANCE_DEPENDENCIES),
         ):
             shard_members = []
@@ -913,6 +1038,8 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                 "skipped", "empty", "missing-family", "invalid-report", "pytest", "drop", "report-cleanup")]
             if kind in {"canonical-cutover", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"}:
                 cases.append(("complete", "", "duplicate", ""))
+            if kind in {"provider-plan", "cms-profile", "cms-profile-directory"}:
+                cases += [("complete", "", "missing-family:" + path, "") for path in capability if path.endswith("_postgres.py")]
             if kind in {"publication-worker", "publication-ptg-runtime"}:
                 cases.append(("complete", "", "cancel", ""))
                 cases.append(("complete", "", "worker-exports", ""))
@@ -925,7 +1052,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
             if kind == "manual-location-commands":
                 cases += [("complete", "", stage, "") for stage in ("manual-location-exports", "cancel")]
 
-            if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"}:
+            if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory"}:
                 cases += [("complete", "", "", str(index)) for index in range(16)]
             else:
                 cases += [("complete", "", "", "publication")]
@@ -935,7 +1062,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     source, runner, log = root / "source", root / "runner", root / "calls"
                     source.mkdir()
                     runner.mkdir()
-                    for path in registry_roster if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"} else ():
+                    for path in registry_roster if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory"} else ():
                         target = source / path
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.touch()
@@ -960,12 +1087,12 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                         target = source / path
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.touch()
-                    if kind in {"completion", "pricing", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"} and layout == "complete" and changed in registry_roster and not stage:
+                    if kind in {"completion", "pricing", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory"} and layout == "complete" and changed in registry_roster and not stage:
                         (source / changed).unlink()
                     if stage in ("symlink", "dangling"):
                         target = source / changed
                         target.unlink()
-                        live = registry_roster[0] if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"} else dependencies[0]
+                        live = registry_roster[0] if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory"} else dependencies[0]
                         target.symlink_to(source / (live if stage == "symlink" else "absent"))
                     timeout = root / "timeout"
                     timeout.write_text(f"#!{sys.executable}\n" + r'''
@@ -1037,7 +1164,7 @@ PYSHARD
   else command python3 "$@"; fi
 }
 '''
-                    call = (f"run_network_registry_postgres {shard}" if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"} else
+                    call = (f"run_network_registry_postgres {shard}" if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory"} else
                             "run_provider_profile_postgres postgresql://synthetic/runtime_test profile-publication"
                             if shard == "publication" else "run_profile_control_maintenance_postgres")
                     if changed:
@@ -1062,9 +1189,9 @@ PYSHARD
                     if changed:
                         self.assertFalse(calls)
                     elif not stage:
-                        self.assertEqual(len(runs), int(kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"} or layout == "complete"))
+                        self.assertEqual(len(runs), int(kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory"} or layout == "complete"))
                     for run in runs:
-                        if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"}:
+                        if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory"}:
                             self.assertRegex(run["registry"], r"@127\.0\.0\.1:5440/hc_network_registry_[0-9a-f]{32}$")
                             if layout == "complete" and kind in {"company", "company-groups", "manual-swaps", "publication-ptg-runtime", "benefit-plans"}:
                                 self.assertEqual(run["map"], "1")
@@ -1078,7 +1205,7 @@ PYSHARD
                             self.assertIsNone(run["schema_alias"])
                         if not shard:
                             self.assertEqual(capability[-1] in run["arguments"], layout == "complete")
-                    if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"} and shard and not stage:
+                    if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory"} and shard and not stage:
                         shard_members.extend(json.loads((root / "selections").read_text()))
                     if kind == "manual-swaps" and not changed:
                         extensions = [c for c in calls if c.startswith("extensions:")]
@@ -1111,7 +1238,10 @@ PYSHARD
                              ("publication-worker", PUBLICATION_WORKER_HOST_TESTS),
                              ("benefit-plans", (*PUBLICATION_WORKER_HOST_TESTS, *BENEFIT_PLAN_HOST_TESTS)),
                              ("manual-location-commands", MANUAL_LOCATION_COMMANDS_HOST_TESTS),
-                             ("publication-ptg-runtime", (*PUBLICATION_WORKER_HOST_TESTS, *PUBLICATION_PTG_RUNTIME_HOST_TESTS))):
+                             ("publication-ptg-runtime", (*PUBLICATION_WORKER_HOST_TESTS, *PUBLICATION_PTG_RUNTIME_HOST_TESTS)),
+                             ("provider-plan", PROVIDER_PLAN_HOST_TESTS),
+                             ("cms-profile", CMS_PROFILE_HOST_TESTS),
+                             ("cms-profile-directory", (*CMS_PROFILE_HOST_TESTS, *CMS_PROFILE_DIRECTORY_HOST_TESTS))):
             members = shard_members_by_kind[kind]
             self.assertEqual(len(members), len(set(members)))
             self.assertCountEqual(members, (*registry_roster, *extras))
@@ -1371,6 +1501,10 @@ for shard in 0 1 2 3 4 5; do run_python_main "$shard"; done
             (PUBLICATION_PTG_RUNTIME_CAPABILITY,
              (*PUBLICATION_WORKER_CAPABILITY, *PUBLICATION_WORKER_DEPENDENCIES, *PUBLICATION_PTG_RUNTIME_DEPENDENCIES),
              (*PUBLICATION_WORKER_HOST_TESTS, *PUBLICATION_PTG_RUNTIME_HOST_TESTS)),
+
+            (PROVIDER_PLAN_CAPABILITY, PROVIDER_PLAN_DEPENDENCIES, PROVIDER_PLAN_HOST_TESTS),
+            (CMS_PROFILE_CAPABILITY, CMS_PROFILE_DEPENDENCIES, CMS_PROFILE_HOST_TESTS),
+            (CMS_PROFILE_DIRECTORY_CAPABILITY, CMS_PROFILE_DIRECTORY_DEPENDENCIES, (*CMS_PROFILE_HOST_TESTS, *CMS_PROFILE_DIRECTORY_HOST_TESTS)),
         ):
             required = (*capability, *dependencies)
             cases = [("legacy", "", ""), ("complete", "", "")]
