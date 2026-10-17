@@ -222,6 +222,8 @@ canonical_cutover_native_test_paths() {
     api/endpoint/npi.py api/network_address_scope.py process/network_address_projection.py \
     process/network_membership_candidate_lifecycle.py process/network_membership_copy.py \
     process/network_membership_pipeline.py process/network_serving_read.py \
+    process/provider_directory_projection_stage.py \
+    tests/test_registry_approval_store_postgres.py \
     tests/test_network_address_read_scope_postgres.py tests/test_network_membership_publication_postgres.py \
     tests/test_network_membership_serving_indexes_postgres.py tests/test_network_serving_routes_postgres.py \
     tests/test_network_serving_schema_postgres.py || return 1
