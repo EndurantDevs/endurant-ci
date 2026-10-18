@@ -566,7 +566,9 @@ REGISTRY_SOURCE_LIFECYCLE_DEPENDENCIES = (
     *PUBLICATION_PTG_RUNTIME_CAPABILITY, *PUBLICATION_PTG_RUNTIME_DEPENDENCIES,
     "tests/cms_npd_admission_postgres_support.py",
     "tests/cms_registry_recipe_postgres_support.py",
-    "tests/cms_generic_source_native_support.py",
+    "tests/cms_registry_complete_publication_postgres_support.py",
+    "tests/cms_registry_wal_support.py",
+    "tests/registry_candidate_custody_postgres_support.py",
     "tests/test_network_registry_cms_prepared_pair_postgres.py",
     "tests/test_network_cms_registry_source_pair_postgres.py",
     "tests/test_registry_candidate_composition_postgres.py",
@@ -1250,6 +1252,38 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
 
     def test_managed_pricing_source_native_routes_fail_closed(self):
         self._check_optional_native_routes(only_kinds={"managed-pricing-source"})
+
+    def test_registry_source_lifecycle_uses_current_native_publication_support(self):
+        support_paths = (
+            "tests/cms_npd_admission_postgres_support.py",
+            "tests/cms_registry_recipe_postgres_support.py",
+            "tests/cms_registry_complete_publication_postgres_support.py",
+            "tests/cms_registry_wal_support.py",
+            "tests/registry_candidate_custody_postgres_support.py",
+        )
+        body = CHECK_FUNCTIONS.split("registry_source_lifecycle_native_test_paths() {\n", 1)[1].split("\n}\n", 1)[0]
+        required = body.split('require_native_source_files "${capability[@]}"', 1)[1].split(" || return 1", 1)[0]
+        self.assertTrue(set(support_paths).issubset(shlex.split(required.replace("\\\n", ""))))
+        self.assertNotIn("cms_generic_source_native_support.py", body)
+        paths = tuple(dict.fromkeys((*REGISTRY_SOURCE_LIFECYCLE_CAPABILITY, *REGISTRY_SOURCE_LIFECYCLE_DEPENDENCIES)))
+        for missing in (None, *support_paths):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temporary:
+                source = Path(temporary)
+                for name in paths:
+                    if name == missing:
+                        continue
+                    target = source / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.touch()
+                result = subprocess.run(
+                    ["bash", "-eu"],
+                    input=CHECK_FUNCTIONS + "\ngit() { return 0; }\nregistry_source_lifecycle_native_test_paths\n",
+                    cwd=source, env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT)},
+                    capture_output=True, text=True, timeout=10, check=False)
+                self.assertEqual(result.returncode, int(missing is not None), result.stderr)
+                self.assertEqual(result.stdout.splitlines(), [] if missing else list(REGISTRY_SOURCE_LIFECYCLE_TESTS))
+                if missing:
+                    self.assertIn("Missing or invalid native capability file: " + missing, result.stderr)
 
     def test_registry_source_lifecycle_native_routes_fail_closed(self):
         self._check_optional_native_routes(only_kinds={"source-lifecycle"})
