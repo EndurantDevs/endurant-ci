@@ -636,6 +636,53 @@ managed_pricing_source_native_test_paths() {
     tests/test_plan_pricing_source_policy_postgres.py
 }
 
+registry_source_lifecycle_native_test_paths() {
+  local capability=(
+    process/registry_cms_source_consumer.py
+    tests/test_registry_cms_source_consumer.py
+    process/registry_cms_source_notifications.py
+    tests/test_registry_cms_source_notifications.py
+    db/cms_registry_source_pair_slot.py
+    alembic/versions/20261016010000_cms_registry_source_pair_slot.py
+    tests/test_cms_registry_source_pair_slot_postgres.py
+    tests/test_registry_cms_source_consumer_postgres.py
+    tests/test_registry_cms_source_consumer_initial_postgres.py
+    tests/test_registry_cms_source_consumer_race_postgres.py
+    tests/test_registry_cms_source_mixed_postgres.py
+    tests/test_registry_composition_session_bridge_postgres.py
+  )
+  local source_path present=0
+  for source_path in "${capability[@]}"; do
+    if [ -e "$repository_root/$source_path" ] || [ -L "$repository_root/$source_path" ]; then present=1; fi
+  done
+  [ "$present" = 1 ] || return 0
+  require_native_source_files "${capability[@]}" \
+    tests/cms_npd_admission_postgres_support.py \
+    tests/cms_registry_recipe_postgres_support.py \
+    tests/cms_generic_source_native_support.py \
+    tests/test_network_registry_cms_prepared_pair_postgres.py \
+    tests/test_network_cms_registry_source_pair_postgres.py \
+    tests/test_registry_candidate_composition_postgres.py \
+    tests/test_network_custom_address_source_postgres.py \
+    tests/test_network_serving_schema_postgres.py \
+    process/registry_candidate_composition.py \
+    process/network_membership_pipeline.py \
+    process/network_serving_read.py \
+    process/registry_publication_ptg_runtime.py \
+    tests/test_registry_publication_ptg_runtime_postgres.py || return 1
+  local parent_tests
+  parent_tests=$(publication_worker_native_test_paths) || return 1
+  [ -n "$parent_tests" ] || { printf 'Registry source lifecycle requires publication worker capability\n' >&2; return 1; }
+  parent_tests=$(publication_ptg_runtime_native_test_paths) || return 1
+  [ -n "$parent_tests" ] || { printf 'Registry source lifecycle requires PTG publication capability\n' >&2; return 1; }
+  printf '%s\n' tests/test_cms_registry_source_pair_slot_postgres.py \
+    tests/test_registry_cms_source_consumer_postgres.py \
+    tests/test_registry_cms_source_consumer_initial_postgres.py \
+    tests/test_registry_cms_source_consumer_race_postgres.py \
+    tests/test_registry_cms_source_mixed_postgres.py \
+    tests/test_registry_composition_session_bridge_postgres.py
+}
+
 run_python_main() {
   local shard=${1:-}
   case "$shard" in 0|1|2|3|4|5) ;; *) usage ;; esac
@@ -657,6 +704,8 @@ run_python_main() {
   managed_provider_collection_tests=$(managed_provider_collection_native_test_paths) || return 1
   local managed_pricing_source_tests
   managed_pricing_source_tests=$(managed_pricing_source_native_test_paths) || return 1
+  local registry_source_lifecycle_tests
+  registry_source_lifecycle_tests=$(registry_source_lifecycle_native_test_paths) || return 1
   local naic_tests
   naic_tests=$(naic_native_test_paths) || return 1
   local publication_worker_tests publication_ptg_runtime_tests manual_location_commands_tests
@@ -701,6 +750,9 @@ run_python_main() {
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
   done <<< "$managed_pricing_source_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
+  done <<< "$registry_source_lifecycle_tests"
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
   done <<< "$managed_provider_detail_tests"
@@ -801,6 +853,7 @@ run_python_main() {
     tests/test_registry_ptg_office_coordinator_postgres.py \
     tests/test_registry_publication_permissions_postgres.py \
     tests/test_registry_ptg_office_intent_runtime_postgres.py \
+    tests/test_registry_ptg_office_selection_postgres.py \
     tests/test_company_registry_assertions_postgres.py \
     tests/test_provider_directory_profile_control_maintenance_postgres.py; do
     if [ -f "$repository_root/$test_path" ]; then
@@ -1832,6 +1885,8 @@ run_network_registry_postgres() (
   managed_provider_collection_tests=$(managed_provider_collection_native_test_paths) || return 1
   local managed_pricing_source_tests
   managed_pricing_source_tests=$(managed_pricing_source_native_test_paths) || return 1
+  local registry_source_lifecycle_tests
+  registry_source_lifecycle_tests=$(registry_source_lifecycle_native_test_paths) || return 1
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$company_group_tests"
@@ -1853,6 +1908,9 @@ run_network_registry_postgres() (
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$managed_pricing_source_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || registry_tests+=("$test_path")
+  done <<< "$registry_source_lifecycle_tests"
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$managed_provider_detail_tests"
@@ -1975,11 +2033,11 @@ run_network_registry_postgres() (
   local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
   if [[ -n "$cms_profile_tests" || -n "$cms_profile_directory_tests" ||
         -n "$managed_provider_detail_tests" || -n "$managed_provider_collection_tests" ||
-        -n "$managed_pricing_source_tests" ]]; then
+        -n "$managed_pricing_source_tests" || -n "$registry_source_lifecycle_tests" ]]; then
     export HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN="$archive_url/$database"
   fi
   ci_phase_begin network-registry-postgres-tests
-  if [ "$company_present" = 1 ] || [ -n "$publication_ptg_runtime_tests" ] || [ -n "$benefit_plan_tests" ]; then
+  if [ "$company_present" = 1 ] || [ -n "$publication_ptg_runtime_tests" ] || [ -n "$benefit_plan_tests" ] || [ -n "$registry_source_lifecycle_tests" ]; then
     export HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST=1
     export HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN="$archive_url/$database"
   fi
@@ -1994,7 +2052,7 @@ run_registry_ptg_scope_postgres() (
   # Measure bootstrap phases without closing the caller's database phase.
   ci_phase_name=''
   local test_path present=0 office_present=0 office_witness_present=0 custody_present=0 preparation_present=0 choices_present=0
-  local source_reviews_present=0 coordinator_present=0
+  local source_reviews_present=0 coordinator_present=0 selection_present=0
   local office_witness_test=tests/test_registry_ptg_office_witness_postgres.py
   local registry_tests=(
     tests/test_registry_ptg_graph_reader_postgres.py
@@ -2042,6 +2100,12 @@ run_registry_ptg_scope_postgres() (
     api/control_registry_ptg_scope.py
     tests/test_registry_ptg_published_source.py
   )
+  local selection_capability=(
+    process/registry_ptg_office_selection.py
+    tests/registry_ptg_office_selection_postgres_support.py
+    tests/test_registry_ptg_office_selection.py
+    tests/test_registry_ptg_office_selection_postgres.py
+  )
   local coordinator_capability=(
     process/registry_ptg_office_intent.py
     process/registry_ptg_office_intent_view.py
@@ -2057,6 +2121,15 @@ run_registry_ptg_scope_postgres() (
     tests/test_registry_publication_permissions_postgres.py
     tests/test_registry_ptg_office_intent_runtime_postgres.py
   )
+  for test_path in "${selection_capability[@]}"; do
+    if [ -e "$repository_root/$test_path" ] || [ -L "$repository_root/$test_path" ]; then
+      selection_present=1
+      coordinator_present=1
+      source_reviews_present=1
+      preparation_present=1
+      custody_present=1
+    fi
+  done
   for test_path in "${coordinator_capability[@]}"; do
     if [ -e "$repository_root/$test_path" ] || [ -L "$repository_root/$test_path" ]; then
       coordinator_present=1
@@ -2185,6 +2258,13 @@ run_registry_ptg_scope_postgres() (
       tests/test_registry_publication_permissions_postgres.py
       tests/test_registry_ptg_office_intent_runtime_postgres.py
     )
+  fi
+  if [ "$selection_present" = 1 ]; then
+    require_native_source_files "${selection_capability[@]}" \
+      process/registry_ptg_source_notifications.py process/registry_ptg_source_consumer.py \
+      tests/test_registry_publication_ptg_runtime_postgres.py || return 1
+    capability+=("${selection_capability[@]}")
+    registry_tests+=(tests/test_registry_ptg_office_selection_postgres.py)
   fi
   for test_path in "${capability[@]}"; do
     if [ ! -f "$repository_root/$test_path" ] || [ -L "$repository_root/$test_path" ]; then
