@@ -659,7 +659,9 @@ registry_source_lifecycle_native_test_paths() {
   require_native_source_files "${capability[@]}" \
     tests/cms_npd_admission_postgres_support.py \
     tests/cms_registry_recipe_postgres_support.py \
-    tests/cms_generic_source_native_support.py \
+    tests/cms_registry_complete_publication_postgres_support.py \
+    tests/cms_registry_wal_support.py \
+    tests/registry_candidate_custody_postgres_support.py \
     tests/test_network_registry_cms_prepared_pair_postgres.py \
     tests/test_network_cms_registry_source_pair_postgres.py \
     tests/test_registry_candidate_composition_postgres.py \
