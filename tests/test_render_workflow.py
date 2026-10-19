@@ -156,7 +156,7 @@ class RenderWorkflowChecks(unittest.TestCase):
                     workflow = yaml.safe_load(rendered)
                     if kind == "healthcare":
                         self.assertEqual(sum(len(job.get("strategy", {}).get("matrix", {}).get("include", [None]))
-                                             for job in workflow["jobs"].values()), 47)
+                                             for job in workflow["jobs"].values()), 48)
                     self.assertEqual(workflow["on"], original["on"])
                     self.assertEqual(set(workflow["jobs"]), {"smoke", "dev-image-publication", "artifact-cleanup", *canonical["jobs"]})
                     self.assertNotIn("${{ inputs.ci_revision }}", rendered)
