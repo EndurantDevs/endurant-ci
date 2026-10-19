@@ -73,7 +73,7 @@ class MeasurementChecks(unittest.TestCase):
             manifest = json.loads((output / "measurement.json").read_text())
             self.assertEqual(manifest["run_attempt"], 2)
             self.assertEqual(manifest["producer_attempts"], producer_attempts)
-            self.assertEqual(len(manifest["sha256"]), 70)
+            self.assertEqual(len(manifest["sha256"]), 72)
             for shard in ("4", "5"):
                 producer = "mrf-python-coverage-main-" + shard
                 member = staging / f"{producer}-123-{producer_attempts[producer]}"
@@ -86,7 +86,7 @@ class MeasurementChecks(unittest.TestCase):
                         MEASUREMENT.publish(staging, root / "missing-main", identity, "123", "2", "c" * 40)
                 finally:
                     removed.rename(member)
-            required_shards = ("core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", *(f"registry-{index}" for index in range(16)))
+            required_shards = ("core-services-2", "core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", *(f"registry-{index}" for index in range(16)))
             for shard in required_shards:
                 producer = "mrf-python-coverage-postgres-" + shard
                 member = staging / f"{producer}-123-{producer_attempts[producer]}"

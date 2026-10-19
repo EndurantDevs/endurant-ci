@@ -526,7 +526,7 @@ jobs:
     - name: Prepare source and toolchain
       uses: ./ci/scripts/healthcare/setup
       with:
-        rust: ${{ matrix.shard == 'core-services' || matrix.shard == 'core-snapshots' || matrix.shard == 'core-snapshots-2' || matrix.shard == 'core-ptg' || matrix.shard == 'directory-source' || startsWith(matrix.shard, 'registry-') }}
+        rust: ${{ (matrix.shard == 'core-services' || matrix.shard == 'core-services-2') || matrix.shard == 'core-snapshots' || matrix.shard == 'core-snapshots-2' || matrix.shard == 'core-ptg' || matrix.shard == 'directory-source' || startsWith(matrix.shard, 'registry-') }}
     - name: Install PostgreSQL client
       run: |
         sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update -qq
@@ -588,6 +588,7 @@ jobs:
         printf ''%s=%s\n'' "$ARTIFACT_OUTPUT" "$ARTIFACT_ID" >> "$GITHUB_OUTPUT"'
     outputs:
       artifact_core_services: ${{ steps.coverage-output.outputs.artifact_core_services }}
+      artifact_core_services_2: ${{ steps.coverage-output.outputs.artifact_core_services_2 }}
       artifact_core_imports: ${{ steps.coverage-output.outputs.artifact_core_imports }}
       artifact_core_imports_2: ${{ steps.coverage-output.outputs.artifact_core_imports_2 }}
       artifact_core_snapshots: ${{ steps.coverage-output.outputs.artifact_core_snapshots }}
@@ -621,6 +622,9 @@ jobs:
         - shard: core-services
           label: Database tests (services)
           output: artifact_core_services
+        - shard: core-services-2
+          label: Database tests (services 2)
+          output: artifact_core_services_2
         - shard: core-imports
           label: Database tests (imports)
           output: artifact_core_imports
@@ -757,7 +761,7 @@ jobs:
       with:
         artifact-ids: ${{ needs.python-tests.outputs.artifact_0 }},${{ needs.python-tests.outputs.artifact_1 }},${{ needs.python-tests.outputs.artifact_2
           }},${{ needs.python-tests.outputs.artifact_3 }},${{ needs.python-tests.outputs.artifact_4 }},${{ needs.python-tests.outputs.artifact_5 }},${{ needs.capacity-evidence.outputs.artifact_id }},${{ needs.rust-scanner.outputs.artifact_id
-          }},${{ needs.address-canonical-db-tests.outputs.artifact_core_services }},${{ needs.address-canonical-db-tests.outputs.artifact_core_imports
+          }},${{ needs.address-canonical-db-tests.outputs.artifact_core_services }},${{ needs.address-canonical-db-tests.outputs.artifact_core_services_2 }},${{ needs.address-canonical-db-tests.outputs.artifact_core_imports
           }},${{ needs.address-canonical-db-tests.outputs.artifact_core_imports_2 }},${{ needs.address-canonical-db-tests.outputs.artifact_core_snapshots }},${{ needs.address-canonical-db-tests.outputs.artifact_core_snapshots_2 }},${{ needs.address-canonical-db-tests.outputs.artifact_core_ptg }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_0 }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_1
           }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_2
           }},${{ needs.address-canonical-db-tests.outputs.artifact_registry_3

@@ -37,7 +37,7 @@ MODE is one of:
   container-package
   security
   redis
-  postgres core-services|core-imports|core-imports-2|core-snapshots|core-snapshots-2|core-ptg|registry-0..15|directory-source|directory-storage|directory-address|profile-storage|profile-publication
+  postgres core-services|core-services-2|core-imports|core-imports-2|core-snapshots|core-snapshots-2|core-ptg|registry-0..15|directory-source|directory-storage|directory-address|profile-storage|profile-publication
 EOF
   exit 2
 }
@@ -2301,7 +2301,12 @@ run_registry_ptg_scope_postgres() (
 run_core_postgres() {
   local dsn=$1
   local lane=${2:-all}
-  if [[ "$lane" = core-services || "$lane" = all ]]; then
+  if [[ "$lane" = core-services || "$lane" = core-services-2 || "$lane" = all ]]; then
+  local services_shard_options=()
+  case "$lane" in
+    core-services) services_shard_options=(-p scripts.ci.shard_pytest_nodeids --ci-shard-count 2 --ci-shard-index 0) ;;
+    core-services-2) services_shard_options=(-p scripts.ci.shard_pytest_nodeids --ci-shard-count 2 --ci-shard-index 1) ;;
+  esac
   HLTHPRT_PROVIDER_DIRECTORY_MIGRATION_POSTGRES_DSN=$dsn \
   HLTHPRT_OBSERVED_NPI_INDEX_MIGRATION_POSTGRES_DSN=$dsn \
   HLTHPRT_MRF_FILE_CURSOR_MIGRATION_POSTGRES_DSN=$dsn \
@@ -2314,7 +2319,7 @@ run_core_postgres() {
   HLTHPRT_SITE_INTELLIGENCE_POSTGRES_DSN=$dsn \
   HLTHPRT_HOSPITAL_PRICE_MIGRATION_POSTGRES_DSN=$dsn \
   HLTHPRT_PLAN_PRICING_PROJECTION_POSTGRES_DSN=$dsn \
-    timeout --foreground 295s python -m pytest -q \
+    timeout --foreground 295s python -m pytest -q ${services_shard_options[@]+"${services_shard_options[@]}"} \
     tests/test_prescription_autocomplete_postgres.py \
     tests/test_terminology_synonym_publication_postgres.py \
     tests/test_site_intelligence_fast_paths_postgres.py \
@@ -2366,7 +2371,9 @@ run_core_postgres() {
     tests/test_formulary_fhir_serving_index_postgres.py \
     tests/test_formulary_fhir_collections_postgres.py \
     tests/test_process_mrf_address_summary_db.py
+  fi
 
+  if [[ "$lane" = core-services || "$lane" = all ]]; then
   if [ -f "$repository_root/tests/test_npi_result_archive_postgres.py" ]; then
     HLTHPRT_NPI_RESULT_ARCHIVE_TEST_DSN=$dsn \
       timeout --foreground 295s python -m pytest -q \
@@ -3460,7 +3467,7 @@ run_postgres() {
     printf '%s\n' 'Full PostgreSQL execution required: native preparation, owned databases and required reports share this stage'
   fi
   case "$shard" in
-    core|provider-directory|provider-profile|core-services|core-imports|core-imports-2|core-snapshots|core-snapshots-2|core-ptg|registry-[0-9]|registry-1[0-5]|directory-source|directory-storage|directory-address|profile-storage|profile-publication) ;;
+    core|provider-directory|provider-profile|core-services|core-services-2|core-imports|core-imports-2|core-snapshots|core-snapshots-2|core-ptg|registry-[0-9]|registry-1[0-5]|directory-source|directory-storage|directory-address|profile-storage|profile-publication) ;;
     *) usage ;;
   esac
   if [ "${CI_DEPS_READY:-0}" = 1 ]; then
