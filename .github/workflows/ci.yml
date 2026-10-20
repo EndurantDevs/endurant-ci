@@ -57,7 +57,7 @@ jobs:
             --evidence-directory "${COMMON_TEST_EVIDENCE_DIRECTORY:-$RUNNER_TEMP/common-test-evidence}" \
             --evidence-sha256 "${COMMON_TEST_EVIDENCE_SHA256:-}" \
             --measurements "$RUNNER_TEMP/common-test-measurements" \
-            -- bash -euc "python -m unittest discover -s tests -p 'test_*.py'; python scripts/healthcare/test_measurement.py"
+            -- bash -euc "python -m unittest discover -s tests -p 'test_*.py' -v; python scripts/healthcare/test_measurement.py"
       - name: Upload verified common-test measurements
         if: success() && steps.common-tests.outputs.artifact_name != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

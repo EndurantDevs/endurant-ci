@@ -1,5 +1,6 @@
 """Keep shared public validation on read-only hosted execution."""
 import pathlib
+import shlex
 import unittest
 from unittest.mock import patch
 
@@ -63,6 +64,30 @@ class PublicWorkflowPermissions(unittest.TestCase):
                     self.assertNotIn("secrets", job)
                     self.check_steps(job.get("steps", []))
                 self.assertNotRegex(path.read_text(), r"\bsecrets[.\[]")
+
+    def test_package_policy_keeps_verbose_complete_tests_and_proof_inputs(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+        job = workflow["jobs"]["validate"]
+        self.assertEqual(job["timeout-minutes"], 20)
+        self.assertEqual(job.get("permissions", workflow["permissions"]),
+                         {"contents": "read", "actions": "read", "checks": "read"})
+        step = next(step for step in job["steps"]
+                    if step.get("name") == "Check public workflow and helper contracts")
+        self.assertEqual(shlex.split(step["run"].replace("\\\n", "")), [
+            "python", "scripts/common_test_result.py",
+            "--source-root", ".", "--source-repository", "$GITHUB_REPOSITORY",
+            "--recipe-root", ".", "--recipe-file", "@tracked",
+            "--scope", "package-unit", "--step", "Check public workflow and helper contracts",
+            "--environment", "PUBLIC_CI_DOCKER_COMPATIBILITY",
+            "--evidence-directory", "${COMMON_TEST_EVIDENCE_DIRECTORY:-$RUNNER_TEMP/common-test-evidence}",
+            "--evidence-sha256", "${COMMON_TEST_EVIDENCE_SHA256:-}",
+            "--measurements", "$RUNNER_TEMP/common-test-measurements", "--", "bash", "-euc",
+            "python -m unittest discover -s tests -p 'test_*.py' -v; python scripts/healthcare/test_measurement.py",
+        ])
+        self.assertIn(
+            '--evidence-directory "${COMMON_TEST_EVIDENCE_DIRECTORY:-$RUNNER_TEMP/common-test-evidence}"',
+            step["run"],
+        )
 
     def test_unapproved_uv_requirement_is_rejected(self):
         with self.assertRaises(AssertionError):
