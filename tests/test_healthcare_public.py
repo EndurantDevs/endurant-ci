@@ -566,7 +566,6 @@ REGISTRY_SOURCE_LIFECYCLE_CAPABILITY = (
     "tests/test_registry_cms_source_consumer_initial_postgres.py",
     "tests/test_registry_cms_source_consumer_race_postgres.py",
     "tests/test_registry_cms_source_mixed_postgres.py",
-    "tests/test_registry_composition_session_bridge_postgres.py",
 )
 REGISTRY_SOURCE_LIFECYCLE_TESTS = (
     "tests/test_cms_registry_source_pair_slot_postgres.py",
@@ -579,6 +578,7 @@ REGISTRY_SOURCE_LIFECYCLE_TESTS = (
 REGISTRY_SOURCE_LIFECYCLE_DEPENDENCIES = (
     *PUBLICATION_WORKER_CAPABILITY, *PUBLICATION_WORKER_DEPENDENCIES,
     *PUBLICATION_PTG_RUNTIME_CAPABILITY, *PUBLICATION_PTG_RUNTIME_DEPENDENCIES,
+    "tests/test_registry_composition_session_bridge_postgres.py",
     "tests/cms_npd_admission_postgres_support.py",
     "tests/cms_registry_recipe_postgres_support.py",
     "tests/cms_registry_complete_publication_postgres_support.py",
@@ -1385,7 +1385,9 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
             if kind in {"canonical-cutover", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"}:
                 cases.append(("complete", "", "duplicate", ""))
             if kind in {"provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"}:
-                cases += [("complete", "", "missing-family:" + path, "") for path in capability if path.endswith("_postgres.py")]
+                cases += [("complete", "", "missing-family:" + path, "") for path in
+                          (REGISTRY_SOURCE_LIFECYCLE_TESTS if kind == "source-lifecycle" else capability)
+                          if path.endswith("_postgres.py")]
             if kind in {"publication-worker", "publication-ptg-runtime"}:
                 cases.append(("complete", "", "cancel", ""))
                 cases.append(("complete", "", "worker-exports", ""))
@@ -1902,6 +1904,8 @@ for shard in 0 1 2 3 4 5; do run_python_main "$shard"; done
                 continue
             required = (*capability, *dependencies)
             cases = [("legacy", "", ""), ("complete", "", "")]
+            if capability == REGISTRY_SOURCE_LIFECYCLE_CAPABILITY:
+                cases.append(("legacy_bridge", "", ""))
             missing_paths = dependencies if capability == CANONICAL_CUTOVER_CAPABILITY else required
             if capability == MANUAL_LOCATION_COMMANDS_CAPABILITY:
                 missing_paths = (*capability[:-1], *dependencies)
@@ -1909,6 +1913,9 @@ for shard in 0 1 2 3 4 5; do run_python_main "$shard"; done
             cases += [("only", path, "") for path in (capability[-1:] if capability == MANUAL_LOCATION_COMMANDS_CAPABILITY else capability)]
             cases += [("complete", path, stage) for path in capability
                       for stage in ("symlink", "dangling", "dirty", "staged", "untracked")]
+            if capability == REGISTRY_SOURCE_LIFECYCLE_CAPABILITY:
+                cases += [("complete", REGISTRY_SOURCE_LIFECYCLE_TESTS[-1], stage)
+                          for stage in ("symlink", "dangling", "dirty", "staged", "untracked")]
             with tempfile.TemporaryDirectory() as temporary, ThreadPoolExecutor(max_workers=4) as pool:
                 def run(indexed_case, required=required):
                     index, (layout, changed, stage) = indexed_case
@@ -1917,6 +1924,7 @@ for shard in 0 1 2 3 4 5; do run_python_main "$shard"; done
                     try:
                         source.mkdir(parents=True)
                         selected = ((*COMPANY_ASSERTION_CAPABILITY, *MANUAL_LOCATION_COMMANDS_CAPABILITY[:1]) if layout == "legacy" else
+                                    (REGISTRY_SOURCE_LIFECYCLE_TESTS[-1],) if layout == "legacy_bridge" else
                                     (changed,) if layout == "only" else required)
                         for name in selected:
                             if name == changed and stage == "missing":
