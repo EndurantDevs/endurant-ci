@@ -15,7 +15,7 @@ MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_TOTAL_BYTES = 128 * 1024 * 1024 - 64 * 1024  # Reserve ZIP headers below the verifier limit.
 POSTGRES_SHARDS = (
     "core-services", "core-services-2", "core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", "core-ptg",
-    *(f"registry-{index}" for index in range(32)),
+    *(f"registry-{index}" for index in range(48)),
     "directory-source", "directory-storage", "directory-address",
     "profile-storage", "profile-publication",
 )
