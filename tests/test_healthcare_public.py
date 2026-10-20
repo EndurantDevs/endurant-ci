@@ -1896,28 +1896,31 @@ for shard in 0 1 2 3 4 5; do run_python_main "$shard"; done
             cases += [("only", path, "") for path in (capability[-1:] if capability == MANUAL_LOCATION_COMMANDS_CAPABILITY else capability)]
             cases += [("complete", path, stage) for path in capability
                       for stage in ("symlink", "dangling", "dirty", "staged", "untracked")]
-            for layout, changed, stage in cases:
-                with self.subTest(layout=layout, changed=changed, stage=stage), tempfile.TemporaryDirectory() as temporary:
-                    source, log = Path(temporary) / "source", Path(temporary) / "calls"
-                    source.mkdir()
-                    selected = ((*COMPANY_ASSERTION_CAPABILITY, *MANUAL_LOCATION_COMMANDS_CAPABILITY[:1]) if layout == "legacy" else
-                                (changed,) if layout == "only" else required)
-                    for name in selected:
-                        if name == changed and stage == "missing":
-                            continue
-                        path = source / name
-                        path.parent.mkdir(parents=True, exist_ok=True)
-                        path.touch()
-                    if stage in {"symlink", "dangling"}:
-                        path = source / changed
-                        path.unlink()
-                        path.symlink_to(source / (COMPANY_ASSERTION_CAPABILITY[0] if stage == "symlink" else "absent"))
-                    environment = {
-                        **os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
-                        "CI_DEPS_READY": "1", "COVERAGE_BASE_SHA": "a" * 40,
-                        "CALL_LOG": str(log), "CHANGED_PATH": changed, "FAIL_STAGE": stage,
-                    }
-                    script = CHECK_FUNCTIONS + r'''
+            with tempfile.TemporaryDirectory() as temporary, ThreadPoolExecutor(max_workers=4) as pool:
+                def run(indexed_case, required=required):
+                    index, (layout, changed, stage) = indexed_case
+                    root = Path(temporary) / str(index)
+                    source, log = root / "source", root / "calls"
+                    try:
+                        source.mkdir(parents=True)
+                        selected = ((*COMPANY_ASSERTION_CAPABILITY, *MANUAL_LOCATION_COMMANDS_CAPABILITY[:1]) if layout == "legacy" else
+                                    (changed,) if layout == "only" else required)
+                        for name in selected:
+                            if name == changed and stage == "missing":
+                                continue
+                            path = source / name
+                            path.parent.mkdir(parents=True, exist_ok=True)
+                            path.touch()
+                        if stage in {"symlink", "dangling"}:
+                            path = source / changed
+                            path.unlink()
+                            path.symlink_to(source / (COMPANY_ASSERTION_CAPABILITY[0] if stage == "symlink" else "absent"))
+                        environment = {
+                            **os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                            "CI_DEPS_READY": "1", "COVERAGE_BASE_SHA": "a" * 40,
+                            "CALL_LOG": str(log), "CHANGED_PATH": changed, "FAIL_STAGE": stage,
+                        }
+                        script = CHECK_FUNCTIONS + r'''
     git() {
       if [[ "$1" = -C ]]; then shift 2; fi
       case "$1" in
@@ -1936,33 +1939,42 @@ for shard in 0 1 2 3 4 5; do run_python_main "$shard"; done
     timeout() { shift 2; "$@"; }
     for shard in 0 1 2 3 4 5; do run_python_main "$shard" || exit 1; done
     '''
-                    result = subprocess.run(["bash", "-eu"], input=script, cwd=source, env=environment,
-                                            capture_output=True, text=True, timeout=30, check=False)
-                    rejected = bool(changed)
-                    self.assertEqual(result.returncode, int(rejected), result.stderr)
-                    calls = [shlex.split(line) for line in log.read_text().splitlines()] if log.exists() else []
-                    if rejected:
-                        self.assertFalse(calls)
-                        continue
-                    runs = [arguments for arguments in calls if arguments[:2] == ["-m", "pytest"]]
-                    self.assertEqual(len(runs), 6)
-                    for shard, arguments in enumerate(runs):
-                        self.assertEqual(arguments[arguments.index("--ci-shard-index") + 1], str(shard))
-                        self.assertEqual(arguments[arguments.index("--ci-shard-count") + 1], "6")
-                        if capability == MANAGED_PRICING_SOURCE_CAPABILITY:
-                            self.assertNotIn(MANAGED_PRICING_SOURCE_CAPABILITY[1], arguments)
-                        for path in host_tests:
-                            self.assertEqual(arguments.count(path), int(layout == "complete"))
-                            if layout == "complete":
-                                self.assertEqual(arguments[arguments.index(path) - 1], "--ignore")
-                        if capability in (PUBLICATION_WORKER_CAPABILITY, PUBLICATION_PTG_RUNTIME_CAPABILITY):
-                            for path in PUBLICATION_WORKER_CAPABILITY[4:6]:
-                                self.assertNotIn(path, arguments)
-                        if capability == MANAGED_COLLECTION_CAPABILITY:
-                            for path in capability[2:-1]:
-                                self.assertNotIn(path, arguments)
-                        self.assertNotIn("-k", arguments)
-                        self.assertNotIn("-m", arguments[2:])
+                        result = subprocess.run(["bash", "-eu"], input=script, cwd=source, env=environment,
+                                                capture_output=True, text=True, timeout=30, check=False)
+                    except (OSError, subprocess.SubprocessError) as error:
+                        result = error
+                    return log, result
+
+                for (layout, changed, stage), (log, result) in zip(
+                        cases, pool.map(run, enumerate(cases)), strict=True):
+                    with self.subTest(layout=layout, changed=changed, stage=stage):
+                        if isinstance(result, (OSError, subprocess.SubprocessError)):
+                            raise result
+                        rejected = bool(changed)
+                        self.assertEqual(result.returncode, int(rejected), result.stderr)
+                        calls = [shlex.split(line) for line in log.read_text().splitlines()] if log.exists() else []
+                        if rejected:
+                            self.assertFalse(calls)
+                            continue
+                        runs = [arguments for arguments in calls if arguments[:2] == ["-m", "pytest"]]
+                        self.assertEqual(len(runs), 6)
+                        for shard, arguments in enumerate(runs):
+                            self.assertEqual(arguments[arguments.index("--ci-shard-index") + 1], str(shard))
+                            self.assertEqual(arguments[arguments.index("--ci-shard-count") + 1], "6")
+                            if capability == MANAGED_PRICING_SOURCE_CAPABILITY:
+                                self.assertNotIn(MANAGED_PRICING_SOURCE_CAPABILITY[1], arguments)
+                            for path in host_tests:
+                                self.assertEqual(arguments.count(path), int(layout == "complete"))
+                                if layout == "complete":
+                                    self.assertEqual(arguments[arguments.index(path) - 1], "--ignore")
+                            if capability in (PUBLICATION_WORKER_CAPABILITY, PUBLICATION_PTG_RUNTIME_CAPABILITY):
+                                for path in PUBLICATION_WORKER_CAPABILITY[4:6]:
+                                    self.assertNotIn(path, arguments)
+                            if capability == MANAGED_COLLECTION_CAPABILITY:
+                                for path in capability[2:-1]:
+                                    self.assertNotIn(path, arguments)
+                            self.assertNotIn("-k", arguments)
+                            self.assertNotIn("-m", arguments[2:])
 
     def test_completed_coverage_compacts_before_provenance_and_failure_stops_publication(self):
         for producer in ("run_python_main 0", "run_capacity", "run_postgres core-services",
