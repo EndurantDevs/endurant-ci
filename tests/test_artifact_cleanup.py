@@ -75,7 +75,7 @@ class ArtifactCleanupChecks(unittest.TestCase):
                         if step.get("name") == "Download immutable measurement artifacts")
         self.assertEqual(set(re.findall(r"needs\.address-canonical-db-tests\.outputs\.([a-z_0-9]+)", download)), outputs)
         self.assertEqual(measurement.POSTGRES_SHARDS, shards)
-        self.assertEqual(len(measurement.producer_files()), 36)
+        self.assertEqual(len(measurement.producer_files()), 52)
         expected_run = run()
         names = cleanup.temporary_names("healthcare", expected_run)
         main_shards = tuple(row["shard"] for row in workflow["jobs"]["python-tests"]["strategy"]["matrix"]["include"])
@@ -152,12 +152,13 @@ class ArtifactCleanupChecks(unittest.TestCase):
             names = sorted(cleanup.temporary_names(kind, expected))
             intermediates = [artifact(index + 1, name) for index, name in enumerate(names)]
             current_name = next(name for name in names if name.endswith("-123-2"))
-            keep = [artifact(100, f"{kind}-public-measurement-123-2", 1),
-                    artifact(101, current_name.removesuffix("-2") + "-3"),
-                    artifact(102, current_name.replace("123-2", "999-2")),
-                    artifact(103, current_name + "-unknown"),
-                    artifact(104, current_name.removesuffix("-123-2"))]
-            keep.extend(artifact(200 + index, f"unknown-{index}") for index in range(100))
+            keep_id = len(intermediates) + 1
+            keep = [artifact(keep_id, f"{kind}-public-measurement-123-2", 1),
+                    artifact(keep_id + 1, current_name.removesuffix("-2") + "-3"),
+                    artifact(keep_id + 2, current_name.replace("123-2", "999-2")),
+                    artifact(keep_id + 3, current_name + "-unknown"),
+                    artifact(keep_id + 4, current_name.removesuffix("-123-2"))]
+            keep.extend(artifact(keep_id + 5 + index, f"unknown-{index}") for index in range(100))
             with self.subTest(repository=repository):
                 deleted, calls = self.exercise(intermediates + keep, expected)
                 self.assertEqual(deleted, [item["id"] for item in intermediates])

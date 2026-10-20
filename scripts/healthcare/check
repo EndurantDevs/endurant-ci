@@ -37,7 +37,7 @@ MODE is one of:
   container-package
   security
   redis
-  postgres core-services|core-services-2|core-imports|core-imports-2|core-snapshots|core-snapshots-2|core-ptg|registry-0..15|directory-source|directory-storage|directory-address|profile-storage|profile-publication
+  postgres core-services|core-services-2|core-imports|core-imports-2|core-snapshots|core-snapshots-2|core-ptg|registry-0..31|directory-source|directory-storage|directory-address|profile-storage|profile-publication
 EOF
   exit 2
 }
@@ -2026,7 +2026,7 @@ run_network_registry_postgres() (
   if [[ -n "$shard" ]]; then
     registry_nodeids=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-registry-nodeids.XXXXXX")
     ci_phase_begin network-registry-collection
-    python scripts/ci/shard_pytest_nodeids.py --shard-count 16 --shard-index "$shard" \
+    python scripts/ci/shard_pytest_nodeids.py --shard-count 32 --shard-index "$shard" \
       --output "$registry_nodeids" -- "${registry_tests[@]}"
     ci_phase_end
     registry_arguments=("@$registry_nodeids")
@@ -2959,12 +2959,20 @@ run_available_cms_postgres() (
   local database_scope=$1 test_path
   shift
   local selected=()
+  local exclusions=()
   for test_path in "$@"; do
+    if [[ "$test_path" = --deselect=* ]]; then
+      exclusions+=("$test_path")
+      continue
+    fi
     if [ -f "$repository_root/${test_path%%::*}" ]; then
       selected+=("$test_path")
     fi
   done
   [ "${#selected[@]}" -gt 0 ] || exit 0
+  if [ "${#exclusions[@]}" -gt 0 ]; then
+    selected+=("${exclusions[@]}")
+  fi
   case "$database_scope" in
     owned)
       artifact_root=
@@ -3136,12 +3144,25 @@ run_provider_directory_postgres() {
     tests/test_provider_directory_cms_overlay_projection_postgres.py \
     tests/test_provider_directory_cms_preparation.py::test_native_scope_loads_all_heaps_before_indexes_and_exposure \
     tests/test_provider_directory_cms_preparation.py::test_native_cleanup_preserves_replacement_oid
+  HLTHPRT_OPENADDRESSES_BATCH_POSTGRES_DSN=$dsn run_available_cms_postgres owned \
+    tests/test_openaddresses_native_batch_postgres.py \
+    tests/test_provider_directory_dataset_rehydrate_db.py \
+    tests/test_provider_directory_proof_store_db.py \
+    tests/test_provider_directory_dataset_resource_mutation_fence_db.py
+  run_available_cms_postgres owned \
+    tests/test_provider_directory_semantic_proof_v3_db.py \
+    tests/test_provider_directory_semantic_proof_v3_fences_db.py \
+    tests/test_provider_directory_semantic_candidate_proof_v3_db.py
+  run_available_cms_postgres owned \
+    tests/test_provider_directory_organization_union_v4_db.py \
+    tests/test_provider_directory_organization_candidate_proof_v4_db.py \
+    tests/test_provider_directory_organization_partition_v4_db.py \
+    tests/test_provider_directory_organization_partition_v4_fences_db.py
   env "${common_env[@]}" timeout --foreground 295s python -m pytest -q \
     -o asyncio_default_test_loop_scope=session \
     -o asyncio_default_fixture_loop_scope=session \
     --durations=20 \
     tests/test_address_canonical_db.py \
-    tests/test_openaddresses_native_batch_postgres.py \
     tests/test_address_format_db.py \
     tests/test_address_formatted_serving_db.py \
     tests/test_address_numeric_grid_alias_db.py \
@@ -3166,17 +3187,7 @@ run_provider_directory_postgres() {
     tests/test_npi_provider_directory_role_evidence_db.py \
     tests/test_provider_directory_dataset_serving_relations_db.py \
     tests/test_provider_directory_contra_affiliation.py \
-    tests/test_provider_directory_dataset_rehydrate_db.py \
-    tests/test_provider_directory_proof_store_db.py \
     tests/test_provider_directory_content_proof_keyset_db.py \
-    tests/test_provider_directory_dataset_resource_mutation_fence_db.py \
-    tests/test_provider_directory_semantic_proof_v3_db.py \
-    tests/test_provider_directory_semantic_proof_v3_fences_db.py \
-    tests/test_provider_directory_semantic_candidate_proof_v3_db.py \
-    tests/test_provider_directory_organization_union_v4_db.py \
-    tests/test_provider_directory_organization_candidate_proof_v4_db.py \
-    tests/test_provider_directory_organization_partition_v4_db.py \
-    tests/test_provider_directory_organization_partition_v4_fences_db.py \
     tests/test_provider_directory_two_phase_publication.py \
     tests/test_provider_directory_contract_identity_cutover.py \
     tests/test_provider_directory_retry_cleanup.py \
@@ -3353,10 +3364,20 @@ run_provider_profile_postgres() {
   if [[ "$lane" = profile-publication || "$lane" = all ]]; then
   run_profile_control_maintenance_postgres
   run_available_cms_postgres owned \
-    tests/test_cms_doctors_preparation_postgres.py \
-    tests/test_cms_doctors_preparation_seal_postgres.py \
-    tests/test_cms_doctors_source_provenance_postgres.py \
+    tests/test_cms_doctors_preparation_postgres.py
+  run_available_cms_postgres owned \
+    tests/test_cms_doctors_preparation_seal_postgres.py
+  run_available_cms_postgres owned \
+    tests/test_cms_doctors_source_provenance_postgres.py
+  run_available_cms_postgres owned \
+    tests/test_entity_address_prepared_doctors_postgres.py::test_source_ranges_and_geo_use_prepared_doctors_until_exact_native_apply
+  run_available_cms_postgres owned \
     tests/test_entity_address_prepared_doctors_postgres.py \
+    --deselect=tests/test_entity_address_prepared_doctors_postgres.py::test_source_ranges_and_geo_use_prepared_doctors_until_exact_native_apply \
+    --deselect=tests/test_entity_address_prepared_doctors_postgres.py::test_source_backend_rejects_replacement_and_releases_locks_after_cancellation
+  run_available_cms_postgres owned \
+    tests/test_entity_address_prepared_doctors_postgres.py::test_source_backend_rejects_replacement_and_releases_locks_after_cancellation
+  run_available_cms_postgres owned \
     tests/test_provider_profile_detail_load_postgres.py
   run_available_cms_postgres owned \
     tests/test_cms_archive_publication_postgres.py \
@@ -3467,7 +3488,7 @@ run_postgres() {
     printf '%s\n' 'Full PostgreSQL execution required: native preparation, owned databases and required reports share this stage'
   fi
   case "$shard" in
-    core|provider-directory|provider-profile|core-services|core-services-2|core-imports|core-imports-2|core-snapshots|core-snapshots-2|core-ptg|registry-[0-9]|registry-1[0-5]|directory-source|directory-storage|directory-address|profile-storage|profile-publication) ;;
+    core|provider-directory|provider-profile|core-services|core-services-2|core-imports|core-imports-2|core-snapshots|core-snapshots-2|core-ptg|registry-[0-9]|registry-[12][0-9]|registry-3[01]|directory-source|directory-storage|directory-address|profile-storage|profile-publication) ;;
     *) usage ;;
   esac
   if [ "${CI_DEPS_READY:-0}" = 1 ]; then
@@ -3509,7 +3530,7 @@ run_postgres() {
   elif [[ "$shard" = registry-* ]]; then
     run_network_registry_postgres "${shard#registry-}"
   fi
-  if [[ "$shard" = directory-source || "$shard" = provider-directory ]]; then
+  if [[ "$shard" = directory-source || "$shard" = directory-address || "$shard" = profile-publication || "$shard" = provider-directory || "$shard" = provider-profile ]]; then
     install_address_canon_wheel
   fi
   ci_phase_begin postgres-tests
