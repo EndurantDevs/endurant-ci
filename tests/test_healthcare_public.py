@@ -683,6 +683,11 @@ run_scoped_archive_postgres_body() { run_scoped_archive_postgres "$@"; }
 prepare_debug_rust_binaries() { :; }
 wait_for_service() { :; }
 prepare_postgres() { :; }
+create_test_database() { :; }
+drop_test_database() { :; }
+createdb() { return 97; }
+dropdb() { return 97; }
+psql() { return 97; }
 require_base_sha() { :; }
 run_postgres "$ROUTE_LANE"
 '''
@@ -823,13 +828,13 @@ def _stop_import_family_workers(root):
 
 
 class HealthcarePublicChecks(unittest.TestCase):
-    def test_registry_dispatch_accepts_exactly_sixteen_native_workers(self):
+    def test_registry_dispatch_accepts_exactly_thirty_two_native_workers(self):
         script = CHECK_FUNCTIONS + "\n" + (
             "prepare_debug_rust_binaries() { printf 'admitted\\n'; exit 73; }\n"
             'run_postgres "$TEST_SHARD"\n'
         )
-        accepted = tuple(f"registry-{index}" for index in range(16))
-        rejected = ("registry-16", "registry-17", "registry-100", "registry-01", "registry--1", "registry-1x")
+        accepted = tuple(f"registry-{index}" for index in range(32))
+        rejected = ("registry-32", "registry-33", "registry-100", "registry-01", "registry--1", "registry-1x")
         for shard in (*accepted, *rejected):
             with self.subTest(shard=shard):
                 result = subprocess.run(["bash", "-eu"], input=script, text=True, capture_output=True,
@@ -896,11 +901,11 @@ class HealthcarePublicChecks(unittest.TestCase):
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         setup = next(step for step in workflow["jobs"]["address-canonical-db-tests"]["steps"]
                      if step["name"] == "Prepare source and toolchain")
-        self.assertEqual(setup["with"], {"rust": "${{ (matrix.shard == 'core-services' || matrix.shard == 'core-services-2') || matrix.shard == 'core-snapshots' || matrix.shard == 'core-snapshots-2' || matrix.shard == 'core-ptg' || matrix.shard == 'directory-source' || startsWith(matrix.shard, 'registry-') }}"})
+        self.assertEqual(setup["with"], {"rust": "${{ (matrix.shard == 'core-services' || matrix.shard == 'core-services-2') || matrix.shard == 'core-snapshots' || matrix.shard == 'core-snapshots-2' || matrix.shard == 'core-ptg' || matrix.shard == 'directory-source' || matrix.shard == 'directory-address' || matrix.shard == 'profile-publication' || startsWith(matrix.shard, 'registry-') }}"})
         cases = [(lane, "", "") for lane in (
             "core-services", "core-services-2", "core", "core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", "core-ptg", "directory-source", "directory-storage",
             "directory-address", "profile-storage", "profile-publication",
-            *(f"registry-{index}" for index in range(16)),
+            *(f"registry-{index}" for index in range(32)),
         )]
         cases += [("core", path, "") for path in paths]
         cases += [("core", "only:" + path, "") for path in paths]
@@ -1066,7 +1071,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     report_paths[0].unlink()
                 self.assertEqual(list(runner.iterdir()), [])
                 if not selected or missing or failure == "rust-version":
-                    if lane == "directory-source":
+                    if lane in ("directory-source", "directory-address", "profile-publication"):
                         self.assertEqual(len(calls), 3)
                         self.assertTrue(calls[0].startswith("build\t-m maturin build "))
                         self.assertTrue(calls[1].startswith("uv\t--no-config pip install "))
@@ -1101,7 +1106,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     if lane.startswith("registry-"):
                         collection = next(call for call in calls if call.startswith("collection\t"))
                         collected = shlex.split(collection.split("\t", 1)[1])
-                        self.assertEqual(collected[:5], ["scripts/ci/shard_pytest_nodeids.py", "--shard-count", "16",
+                        self.assertEqual(collected[:5], ["scripts/ci/shard_pytest_nodeids.py", "--shard-count", "32",
                                                         "--shard-index", lane.removeprefix("registry-")])
                         self.assertEqual(collected[collected.index("--") + 1:], list(paths))
                         if not failure:
@@ -1343,7 +1348,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                 cases += [("complete", "", stage, "") for stage in ("manual-location-exports", "cancel")]
 
             if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"}:
-                cases += [("complete", "", "", str(index)) for index in range(16)]
+                cases += [("complete", "", "", str(index)) for index in range(32)]
             else:
                 cases += [("complete", "", "", "publication")]
             for layout, changed, stage, shard in cases:
@@ -1506,7 +1511,7 @@ PYSHARD
                         extensions = [c for c in calls if c.startswith("extensions:")]
                         selected_modules = (*registry_roster, COMPANY_ASSERTION_CAPABILITY[-1], capability[-1])
                         if shard:
-                            selected_modules = selected_modules[int(shard)::16]
+                            selected_modules = selected_modules[int(shard)::32]
                         extension_count = sum("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public" in c for c in extensions)
                         self.assertEqual(extension_count, int(layout == "complete" and capability[-1] in selected_modules))
                         if shard and not stage:
@@ -1522,7 +1527,7 @@ PYSHARD
                         self.assertFalse(leftovers)
             shard_members_by_kind[kind] = shard_members
         if only_kinds is None or "manual-swaps" in only_kinds:
-            self.assertEqual(len(manual_swap_shard_extensions), 16)
+            self.assertEqual(len(manual_swap_shard_extensions), 32)
             self.assertEqual(sum(manual_swap_shard_extensions), 1)
         for kind, extras in (("company", (COMPANY_ASSERTION_CAPABILITY[-1],)),
                              ("company-groups", (COMPANY_ASSERTION_CAPABILITY[-1], *COMPANY_GROUP_HOST_TESTS)),
@@ -2104,6 +2109,17 @@ test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
                 "tests/test_provider_directory_cms_overlay_projection_postgres.py",
                 "tests/test_provider_directory_cms_preparation.py::test_native_scope_loads_all_heaps_before_indexes_and_exposure",
                 "tests/test_provider_directory_cms_preparation.py::test_native_cleanup_preserves_replacement_oid",
+                "tests/test_openaddresses_native_batch_postgres.py",
+                "tests/test_provider_directory_dataset_rehydrate_db.py",
+                "tests/test_provider_directory_proof_store_db.py",
+                "tests/test_provider_directory_dataset_resource_mutation_fence_db.py",
+                "tests/test_provider_directory_semantic_proof_v3_db.py",
+                "tests/test_provider_directory_semantic_proof_v3_fences_db.py",
+                "tests/test_provider_directory_semantic_candidate_proof_v3_db.py",
+                "tests/test_provider_directory_organization_union_v4_db.py",
+                "tests/test_provider_directory_organization_candidate_proof_v4_db.py",
+                "tests/test_provider_directory_organization_partition_v4_db.py",
+                "tests/test_provider_directory_organization_partition_v4_fences_db.py",
             ),
             "profile-storage": (
                 "tests/test_provider_directory_capacity_reservation_snapshot_postgres.py",
@@ -2120,7 +2136,9 @@ test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
                 "tests/test_cms_doctors_preparation_postgres.py",
                 "tests/test_cms_doctors_preparation_seal_postgres.py",
                 "tests/test_cms_doctors_source_provenance_postgres.py",
+                "tests/test_entity_address_prepared_doctors_postgres.py::test_source_ranges_and_geo_use_prepared_doctors_until_exact_native_apply",
                 "tests/test_entity_address_prepared_doctors_postgres.py",
+                "tests/test_entity_address_prepared_doctors_postgres.py::test_source_backend_rejects_replacement_and_releases_locks_after_cancellation",
                 "tests/test_provider_profile_detail_load_postgres.py",
                 "tests/test_cms_archive_publication_postgres.py",
                 "tests/test_cms_serving_publication_postgres.py",
@@ -2189,6 +2207,7 @@ if selected:
               "override": os.environ.get("HLTHPRT_DB_DATABASE_OVERRIDE"),
               "dsn": os.environ.get("HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN"),
               "entities_dsn": os.environ.get("HLTHPRT_DIRECTORY_ENTITIES_TEST_DSN"),
+              "openaddresses_dsn": os.environ.get("HLTHPRT_OPENADDRESSES_BATCH_POSTGRES_DSN"),
               "schema_alias": os.environ.get("DB_SCHEMA"),
               "schema": os.environ.get("HLTHPRT_DB_SCHEMA"),
               "allow_schema": os.environ.get("HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS"),
@@ -2217,6 +2236,7 @@ if selected:
                     }
                     for name in ("HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN", "HLTHPRT_CMS_NPD_ADMISSION_TEST_ARTIFACT_ROOT",
                                  "HLTHPRT_DIRECTORY_ENTITIES_TEST_DSN",
+                                 "HLTHPRT_OPENADDRESSES_BATCH_POSTGRES_DSN",
                                  "HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS"):
                         environment.pop(name, None)
                     function = "run_provider_profile_postgres" if lane.startswith("profile") else "run_provider_directory_postgres"
@@ -2237,6 +2257,7 @@ test "$HLTHPRT_DB_DATABASE" = native_directory_test_runner
 test -z "${HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN:-}"
 test -z "${HLTHPRT_CMS_NPD_ADMISSION_TEST_ARTIFACT_ROOT:-}"
 test -z "${HLTHPRT_DIRECTORY_ENTITIES_TEST_DSN:-}"
+test -z "${HLTHPRT_OPENADDRESSES_BATCH_POSTGRES_DSN:-}"
 test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
 '''
                     result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True, timeout=30)
@@ -2259,6 +2280,19 @@ test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
                                       f"{environment['HLTHPRT_DB_PASSWORD']}@{environment['HLTHPRT_DB_HOST']}:"
                                       f"{environment['HLTHPRT_DB_PORT']}/")
                         selected = set(call["selected"])
+                        heavy_prefix = "tests/test_entity_address_prepared_doctors_postgres.py"
+                        exclusions = [argument for argument in call["arguments"] if argument.startswith("--deselect=")]
+                        if heavy_prefix in selected:
+                            self.assertEqual(exclusions, [
+                                f"--deselect={heavy_prefix}::test_source_ranges_and_geo_use_prepared_doctors_until_exact_native_apply",
+                                f"--deselect={heavy_prefix}::test_source_backend_rejects_replacement_and_releases_locks_after_cancellation",
+                            ])
+                        else:
+                            self.assertFalse(exclusions)
+                        if "tests/test_openaddresses_native_batch_postgres.py" in selected:
+                            self.assertEqual(
+                                call["openaddresses_dsn"], "postgresql://synthetic/native_directory_test_runner",
+                            )
                         if selected & cms_paths:
                             self.assertTrue(selected <= cms_paths)
                             self.assertRegex(call["database"], r"^hc_cms_admission_test_[0-9a-f]{32}$")
@@ -2293,14 +2327,20 @@ test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
                         self.assertFalse(leftovers)
 
     def test_directory_native_wheel_install_order(self):
-        for lane, failure in (("directory-source", ""), ("provider-directory", ""),
-                              ("directory-source", "build"), ("directory-source", "install")):
+        suites = {
+            "directory-source": "test_cms_npd_admission_postgres.py",
+            "provider-directory": "test_cms_npd_admission_postgres.py",
+            "directory-address": "test_provider_directory_dataset_resource_mutation_fence_db.py",
+            "profile-publication": "test_cms_doctors_preparation_postgres.py",
+            "provider-profile": "test_cms_doctors_preparation_postgres.py",
+        }
+        for lane, failure in ((lane, failure) for lane in suites for failure in ("", "build", "install")):
             with self.subTest(lane=lane, failure=failure), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 source_root, runner = root / "source", root / "runner"
                 (source_root / "support/ptg2_scanner").mkdir(parents=True)
                 (source_root / "tests").mkdir()
-                (source_root / "tests/test_cms_npd_admission_postgres.py").touch()
+                (source_root / "tests" / suites[lane]).touch()
                 runner.mkdir()
                 calls_path = root / "calls"
                 environment_by_name = {
@@ -2332,7 +2372,7 @@ test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
                 self.assertEqual(sum(call.startswith("build\t") for call in calls), 1)
                 self.assertTrue(calls[0].startswith("build\t-m maturin build --locked --features python-extension --out "))
                 self.assertNotIn("--release", calls[0])
-                native_runs = [call for call in calls if "tests/test_cms_npd_admission_postgres.py" in call]
+                native_runs = [call for call in calls if f"tests/{suites[lane]}" in call]
                 if failure:
                     self.assertFalse(native_runs)
                     self.assertFalse(any(call.startswith("tests\t") for call in calls))
@@ -3963,7 +4003,7 @@ RUNTIME_BASE_IMAGE=synthetic
                             uploads.extend(line.strip().replace("${{ matrix.shard }}", row.get("shard", ""))
                                            for line in step["with"]["path"].splitlines() if line.strip())
                             freezes.append(validation[validation.index("git diff --exit-code"):])
-            self.assertEqual(len(uploads), 71)  # Thirty-five Python pairs plus the Rust directory.
+            self.assertEqual(len(uploads), 103)  # Fifty-one Python pairs plus the Rust directory.
             script = CHECK_FUNCTIONS
             for upload in uploads:
                 prefix = "${{ runner.temp }}/healthcare-artifacts/"
@@ -3977,7 +4017,7 @@ RUNTIME_BASE_IMAGE=synthetic
             subprocess.run(["bash", "-eus"], input=script, text=True, cwd=source, env=env, check=True)
             for upload in uploads:
                 self.assertTrue(Path(upload.replace("${{ runner.temp }}", str(runner))).exists())
-            self.assertEqual(len(freezes), 36)
+            self.assertEqual(len(freezes), 52)
             self.assertEqual(len(set(freezes)), 1)
             def freeze():
                 return subprocess.run(["bash", "-euc", freezes[0]], cwd=source, capture_output=True).returncode
