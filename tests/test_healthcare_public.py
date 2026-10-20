@@ -7,11 +7,13 @@ import os
 import py_compile
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from importlib import metadata
 from pathlib import Path
 
@@ -828,13 +830,13 @@ def _stop_import_family_workers(root):
 
 
 class HealthcarePublicChecks(unittest.TestCase):
-    def test_registry_dispatch_accepts_exactly_thirty_two_native_workers(self):
+    def test_registry_dispatch_accepts_exactly_forty_eight_native_workers(self):
         script = CHECK_FUNCTIONS + "\n" + (
             "prepare_debug_rust_binaries() { printf 'admitted\\n'; exit 73; }\n"
             'run_postgres "$TEST_SHARD"\n'
         )
-        accepted = tuple(f"registry-{index}" for index in range(32))
-        rejected = ("registry-32", "registry-33", "registry-100", "registry-01", "registry--1", "registry-1x")
+        accepted = tuple(f"registry-{index}" for index in range(48))
+        rejected = ("registry-48", "registry-49", "registry-100", "registry-01", "registry--1", "registry-1x")
         for shard in (*accepted, *rejected):
             with self.subTest(shard=shard):
                 result = subprocess.run(["bash", "-eu"], input=script, text=True, capture_output=True,
@@ -905,7 +907,7 @@ class HealthcarePublicChecks(unittest.TestCase):
         cases = [(lane, "", "") for lane in (
             "core-services", "core-services-2", "core", "core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", "core-ptg", "directory-source", "directory-storage",
             "directory-address", "profile-storage", "profile-publication",
-            *(f"registry-{index}" for index in range(32)),
+            *(f"registry-{index}" for index in range(48)),
         )]
         cases += [("core", path, "") for path in paths]
         cases += [("core", "only:" + path, "") for path in paths]
@@ -1106,7 +1108,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     if lane.startswith("registry-"):
                         collection = next(call for call in calls if call.startswith("collection\t"))
                         collected = shlex.split(collection.split("\t", 1)[1])
-                        self.assertEqual(collected[:5], ["scripts/ci/shard_pytest_nodeids.py", "--shard-count", "32",
+                        self.assertEqual(collected[:5], ["scripts/ci/shard_pytest_nodeids.py", "--shard-count", "48",
                                                         "--shard-index", lane.removeprefix("registry-")])
                         self.assertEqual(collected[collected.index("--") + 1:], list(paths))
                         if not failure:
@@ -1293,6 +1295,41 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
     def test_registry_source_lifecycle_native_routes_fail_closed(self):
         self._check_optional_native_routes(only_kinds={"source-lifecycle"})
 
+    def _run_optional_native_shards(self, script, environment, source, timeout):
+        """Share a closed source fixture across isolated positive shard routes."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        shared_source = root / "source"
+        shutil.copytree(source, shared_source)
+        shutil.copy2(timeout, root / "timeout")
+        inventory = {str(path.relative_to(shared_source)): path.read_bytes()
+                     for path in shared_source.rglob("*") if path.is_file()}
+
+        def run(shard):
+            case_root = root / str(shard)
+            runner, log = case_root / "runner", case_root / "calls"
+            runner.mkdir(parents=True)
+            case_environment = {
+                **environment, "SOURCE_ROOT": str(shared_source), "RUNNER_TEMP": str(runner),
+                "CALL_LOG": str(log), "SELECTION_LOG": str(case_root / "selections"),
+                "PATH": str(root) + os.pathsep + os.environ["PATH"],
+            }
+            try:
+                result = subprocess.run(
+                    ["bash", "-eu"], input=script + f"\nrun_network_registry_postgres {shard}",
+                    env=case_environment, cwd=shared_source, capture_output=True, text=True,
+                    timeout=30, check=False)
+            except (OSError, subprocess.SubprocessError) as error:
+                result = error
+            return case_root, shared_source, runner, log, result
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = dict(zip(map(str, range(48)), pool.map(run, range(48)), strict=True))
+        observed = {str(path.relative_to(shared_source)): path.read_bytes()
+                    for path in shared_source.rglob("*") if path.is_file()}
+        return results, inventory, observed
+
     def _check_optional_native_routes(self, only_kinds=None):
         registry_roster = tuple(shlex.split(CHECK_FUNCTIONS.split(
             "run_network_registry_postgres() (\n", 1)[1].split("  local registry_tests=(\n", 1)[1].split("\n  )", 1)[0]))
@@ -1322,6 +1359,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
             if only_kinds is not None and kind not in only_kinds:
                 continue
             shard_members = []
+            shard_results = None
             cases = [("legacy", "", "", ""), ("complete", "", "", "")]
             required = dependencies if kind in {"pricing", "canonical-cutover"} else (*capability, *dependencies)
             if kind == "manual-location-commands":
@@ -1348,49 +1386,52 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                 cases += [("complete", "", stage, "") for stage in ("manual-location-exports", "cancel")]
 
             if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"}:
-                cases += [("complete", "", "", str(index)) for index in range(32)]
+                cases += [("complete", "", "", str(index)) for index in range(48)]
             else:
                 cases += [("complete", "", "", "publication")]
             for layout, changed, stage, shard in cases:
                 with self.subTest(kind=kind, layout=layout, changed=changed, stage=stage, shard=shard), tempfile.TemporaryDirectory() as temporary:
-                    root = Path(temporary)
-                    source, runner, log = root / "source", root / "runner", root / "calls"
-                    source.mkdir()
-                    runner.mkdir()
-                    for path in registry_roster if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"} else ():
-                        target = source / path
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        target.touch()
-                    if kind == "manual-swaps" and layout == "complete":
-                        for path in (*COMPANY_ASSERTION_CAPABILITY, *COMPANY_ASSERTION_DEPENDENCIES):
-                            if path == changed and not stage:
+                    if shard.isdecimal() and shard_results is not None:
+                        root, source, runner, log, result = shard_results[shard]
+                    else:
+                        root = Path(temporary)
+                        source, runner, log = root / "source", root / "runner", root / "calls"
+                        source.mkdir()
+                        runner.mkdir()
+                        for path in registry_roster if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"} else ():
+                            target = source / path
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            target.touch()
+                        if kind == "manual-swaps" and layout == "complete":
+                            for path in (*COMPANY_ASSERTION_CAPABILITY, *COMPANY_ASSERTION_DEPENDENCIES):
+                                if path == changed and not stage:
+                                    continue
+                                target = source / path
+                                target.parent.mkdir(parents=True, exist_ok=True)
+                                target.touch()
+                        if kind in {"publication-ptg-runtime", "benefit-plans", "source-lifecycle"} and layout == "complete":
+                            for path in (*PUBLICATION_WORKER_CAPABILITY, *PUBLICATION_WORKER_DEPENDENCIES):
+                                if path == changed and not stage:
+                                    continue
+                                target = source / path
+                                target.parent.mkdir(parents=True, exist_ok=True)
+                                target.touch()
+                        selected = (capability[:1] if kind == "manual-location-commands" else ()) if layout == "legacy" else (changed,) if layout == "only" else (*capability, *dependencies)
+                        for path in selected:
+                            if path == changed and not stage and layout != "only":
                                 continue
                             target = source / path
                             target.parent.mkdir(parents=True, exist_ok=True)
                             target.touch()
-                    if kind in {"publication-ptg-runtime", "benefit-plans", "source-lifecycle"} and layout == "complete":
-                        for path in (*PUBLICATION_WORKER_CAPABILITY, *PUBLICATION_WORKER_DEPENDENCIES):
-                            if path == changed and not stage:
-                                continue
-                            target = source / path
-                            target.parent.mkdir(parents=True, exist_ok=True)
-                            target.touch()
-                    selected = (capability[:1] if kind == "manual-location-commands" else ()) if layout == "legacy" else (changed,) if layout == "only" else (*capability, *dependencies)
-                    for path in selected:
-                        if path == changed and not stage and layout != "only":
-                            continue
-                        target = source / path
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        target.touch()
-                    if kind in {"completion", "pricing", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"} and layout == "complete" and changed in registry_roster and not stage:
-                        (source / changed).unlink()
-                    if stage in ("symlink", "dangling"):
-                        target = source / changed
-                        target.unlink()
-                        live = registry_roster[0] if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"} else dependencies[0]
-                        target.symlink_to(source / (live if stage == "symlink" else "absent"))
-                    timeout = root / "timeout"
-                    timeout.write_text(f"#!{sys.executable}\n" + r'''
+                        if kind in {"completion", "pricing", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"} and layout == "complete" and changed in registry_roster and not stage:
+                            (source / changed).unlink()
+                        if stage in ("symlink", "dangling"):
+                            target = source / changed
+                            target.unlink()
+                            live = registry_roster[0] if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"} else dependencies[0]
+                            target.symlink_to(source / (live if stage == "symlink" else "absent"))
+                        timeout = root / "timeout"
+                        timeout.write_text(f"#!{sys.executable}\n" + r'''
 import json, os, pathlib, signal, sys, xml.etree.ElementTree as ET
 arguments = sys.argv[1:]
 assert arguments[:6] == ["--foreground", "295s", "python", "-m", "pytest", "-q"]
@@ -1422,19 +1463,19 @@ if os.environ["FAIL_STAGE"] == "duplicate":
     suite.set("tests", str(len(modules) + 1))
 path.write_bytes(ET.tostring(report))
 ''')
-                    timeout.chmod(0o755)
-                    environment = {
-                        **os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT), "RUNNER_TEMP": str(runner),
-                        "CALL_LOG": str(log), "SELECTION_LOG": str(root / "selections"), "FAIL_STAGE": stage, "CHANGED_PATH": changed,
-                        "NEW_NATIVE_TEST": capability[-1], "PATH": str(root) + os.pathsep + os.environ["PATH"],
-                        "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "synthetic",
-                        "HLTHPRT_DB_HOST": "127.0.0.1", "HLTHPRT_DB_PORT": "5432",
-                        "HLTHPRT_DB_DATABASE": "base_test", "HLTHPRT_DB_DATABASE_OVERRIDE": "wrong",
-                        "DB_SCHEMA": "stale", "HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST": "0",
-                        "HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN": "unchanged",
-                        "HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN": "unchanged-cms",
-                    }
-                    script = CHECK_FUNCTIONS + r'''
+                        timeout.chmod(0o755)
+                        environment = {
+                            **os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT), "RUNNER_TEMP": str(runner),
+                            "CALL_LOG": str(log), "SELECTION_LOG": str(root / "selections"), "FAIL_STAGE": stage, "CHANGED_PATH": changed,
+                            "NEW_NATIVE_TEST": capability[-1], "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                            "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "synthetic",
+                            "HLTHPRT_DB_HOST": "127.0.0.1", "HLTHPRT_DB_PORT": "5432",
+                            "HLTHPRT_DB_DATABASE": "base_test", "HLTHPRT_DB_DATABASE_OVERRIDE": "wrong",
+                            "DB_SCHEMA": "stale", "HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST": "0",
+                            "HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN": "unchanged",
+                            "HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN": "unchanged-cms",
+                        }
+                        script = CHECK_FUNCTIONS + r'''
 git() { [[ "$FAIL_STAGE" != dirty && "$FAIL_STAGE" != untracked ]] || [[ "${!#}" != "$CHANGED_PATH" ]]; }
 rustc() { echo 'rustc 1.98.1'; }
 verify_registry_native_wheel() {
@@ -1461,13 +1502,21 @@ PYSHARD
   else command python3 "$@"; fi
 }
 '''
-                    call = (f"run_network_registry_postgres {shard}" if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"} else
-                            "run_provider_profile_postgres postgresql://synthetic/runtime_test profile-publication"
-                            if shard == "publication" else "run_profile_control_maintenance_postgres")
-                    if changed:
-                        call = "if " + call + "; then exit 9; else exit 1; fi"
-                    result = subprocess.run(["bash", "-eu"], input=script + "\n" + call, env=environment,
-                                            cwd=source, capture_output=True, text=True, timeout=30, check=False)
+                        call = (f"run_network_registry_postgres {shard}" if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"} else
+                                "run_provider_profile_postgres postgresql://synthetic/runtime_test profile-publication"
+                                if shard == "publication" else "run_profile_control_maintenance_postgres")
+                        if changed:
+                            call = "if " + call + "; then exit 9; else exit 1; fi"
+                        if shard.isdecimal():
+                            shard_results, inventory, observed = self._run_optional_native_shards(
+                                script, environment, source, timeout)
+                            self.assertEqual(observed, inventory)
+                            root, source, runner, log, result = shard_results[shard]
+                        else:
+                            result = subprocess.run(["bash", "-eu"], input=script + "\n" + call, env=environment,
+                                                    cwd=source, capture_output=True, text=True, timeout=30, check=False)
+                    if isinstance(result, (OSError, subprocess.SubprocessError)):
+                        raise result
                     expected = 143 if stage == "cancel" else 17 if stage in {"pytest", "runtime-exports", "worker-exports", "manual-location-exports"} else 1 if changed or stage else 0
                     self.assertEqual(result.returncode, expected, result.stderr)
                     calls = log.read_text().splitlines() if log.exists() else []
@@ -1511,7 +1560,7 @@ PYSHARD
                         extensions = [c for c in calls if c.startswith("extensions:")]
                         selected_modules = (*registry_roster, COMPANY_ASSERTION_CAPABILITY[-1], capability[-1])
                         if shard:
-                            selected_modules = selected_modules[int(shard)::32]
+                            selected_modules = selected_modules[int(shard)::48]
                         extension_count = sum("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public" in c for c in extensions)
                         self.assertEqual(extension_count, int(layout == "complete" and capability[-1] in selected_modules))
                         if shard and not stage:
@@ -1527,7 +1576,7 @@ PYSHARD
                         self.assertFalse(leftovers)
             shard_members_by_kind[kind] = shard_members
         if only_kinds is None or "manual-swaps" in only_kinds:
-            self.assertEqual(len(manual_swap_shard_extensions), 32)
+            self.assertEqual(len(manual_swap_shard_extensions), 48)
             self.assertEqual(sum(manual_swap_shard_extensions), 1)
         for kind, extras in (("company", (COMPANY_ASSERTION_CAPABILITY[-1],)),
                              ("company-groups", (COMPANY_ASSERTION_CAPABILITY[-1], *COMPANY_GROUP_HOST_TESTS)),
@@ -4003,7 +4052,7 @@ RUNTIME_BASE_IMAGE=synthetic
                             uploads.extend(line.strip().replace("${{ matrix.shard }}", row.get("shard", ""))
                                            for line in step["with"]["path"].splitlines() if line.strip())
                             freezes.append(validation[validation.index("git diff --exit-code"):])
-            self.assertEqual(len(uploads), 103)  # Fifty-one Python pairs plus the Rust directory.
+            self.assertEqual(len(uploads), 135)  # Sixty-seven Python pairs plus the Rust directory.
             script = CHECK_FUNCTIONS
             for upload in uploads:
                 prefix = "${{ runner.temp }}/healthcare-artifacts/"
@@ -4017,7 +4066,7 @@ RUNTIME_BASE_IMAGE=synthetic
             subprocess.run(["bash", "-eus"], input=script, text=True, cwd=source, env=env, check=True)
             for upload in uploads:
                 self.assertTrue(Path(upload.replace("${{ runner.temp }}", str(runner))).exists())
-            self.assertEqual(len(freezes), 52)
+            self.assertEqual(len(freezes), 68)
             self.assertEqual(len(set(freezes)), 1)
             def freeze():
                 return subprocess.run(["bash", "-euc", freezes[0]], cwd=source, capture_output=True).returncode

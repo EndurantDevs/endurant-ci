@@ -96,7 +96,7 @@ class PublicWorkflowPermissions(unittest.TestCase):
                                                 ("core-imports-2", "imports 2"), ("core-snapshots", "snapshot imports"),
                                                 ("core-snapshots-2", "snapshot imports 2"),
                                                 ("core-ptg", "PTG"),
-                                                *((f"registry-{index}", f"registry {index + 1}") for index in range(32)),
+                                                *((f"registry-{index}", f"registry {index + 1}") for index in range(48)),
                                                 ("directory-source", "directory source"),
                                                 ("directory-storage", "directory storage"),
                                                 ("directory-address", "directory address"),
@@ -130,9 +130,9 @@ class PublicWorkflowPermissions(unittest.TestCase):
         download = next(step for step in jobs["measurement"]["steps"]
                         if step.get("name") == "Download immutable measurement artifacts")
         self.assertEqual(set(download["with"]["artifact-ids"].split(",")), set(artifact_ids))
-        self.assertEqual(len(download["with"]["artifact-ids"].split(",")), 52)
+        self.assertEqual(len(download["with"]["artifact-ids"].split(",")), 68)
         self.assertEqual(sum(len(job.get("strategy", {}).get("matrix", {}).get("include", [None]))
-                             for job in jobs.values()), 61)
+                             for job in jobs.values()), 77)
         self.assertEqual(jobs["python-tests"]["timeout-minutes"], 20)
 
     def test_cheap_lint_blocks_heavy_jobs_without_changing_measurement_producers(self):
