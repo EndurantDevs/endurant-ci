@@ -675,7 +675,6 @@ registry_source_lifecycle_native_test_paths() {
     tests/test_registry_cms_source_consumer_initial_postgres.py
     tests/test_registry_cms_source_consumer_race_postgres.py
     tests/test_registry_cms_source_mixed_postgres.py
-    tests/test_registry_composition_session_bridge_postgres.py
   )
   local source_path present=0
   for source_path in "${capability[@]}"; do
@@ -683,6 +682,7 @@ registry_source_lifecycle_native_test_paths() {
   done
   [ "$present" = 1 ] || return 0
   require_native_source_files "${capability[@]}" \
+    tests/test_registry_composition_session_bridge_postgres.py \
     tests/cms_npd_admission_postgres_support.py \
     tests/cms_registry_recipe_postgres_support.py \
     tests/cms_registry_complete_publication_postgres_support.py \
