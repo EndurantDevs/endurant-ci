@@ -168,6 +168,32 @@ run_quality() {
   ci_phase_end
 }
 
+custom_import_verification_native_test_paths() {
+  local migration suffix source_path present
+  local capability=()
+  for migration in \
+    20261020150000_custom_import_staged_verification \
+    20261020180000_custom_import_verification_arms \
+    20261020190000_custom_import_verification_root_ranges \
+    20261020200000_custom_import_manual_acceptance; do
+    suffix=${migration#*_}
+    capability=(
+      "alembic/versions/${migration}.py"
+      "tests/test_${suffix}.py"
+      "tests/test_${suffix}_postgres.py"
+    )
+    present=0
+    for source_path in "${capability[@]}"; do
+      if [ -e "$repository_root/$source_path" ] || [ -L "$repository_root/$source_path" ]; then
+        present=1
+      fi
+    done
+    [ "$present" = 1 ] || continue
+    require_native_source_files "${capability[@]}" || return 1
+    printf '%s\n' "${capability[2]}"
+  done
+}
+
 company_group_native_test_paths() {
   local capability=(
     process/registry_approved_company_groups.py
@@ -688,6 +714,8 @@ registry_source_lifecycle_native_test_paths() {
 run_python_main() {
   local shard=${1:-}
   case "$shard" in 0|1|2|3|4|5) ;; *) usage ;; esac
+  local custom_import_verification_tests
+  custom_import_verification_tests=$(custom_import_verification_native_test_paths) || return 1
   local company_group_tests
   company_group_tests=$(company_group_native_test_paths) || return 1
   local manual_source_swap_tests
@@ -776,6 +804,9 @@ run_python_main() {
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
   done <<< "$benefit_plan_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
+  done <<< "$custom_import_verification_tests"
   for test_path in "${capacity_tests[@]}"; do
     collection_args+=(--ignore "$test_path")
   done
@@ -1589,7 +1620,7 @@ drop_test_database() {
 
 create_test_database() {
   local database=$1
-  drop_test_database "$database"
+  drop_test_database "$database" || return "$?"
   PGPASSWORD="$HLTHPRT_DB_PASSWORD" createdb \
     --host "$HLTHPRT_DB_HOST" \
     --port "$HLTHPRT_DB_PORT" \
@@ -1629,14 +1660,14 @@ run_scoped_archive_postgres_body() {
   trap cleanup_scoped_archive EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  create_test_database "$scoped_archive_database"
+  create_test_database "$scoped_archive_database" || exit "$?"
   export "$variable=$url_prefix/$scoped_archive_database"
   export PGHOST=127.0.0.1 PGPORT=5440 PGUSER="$HLTHPRT_DB_USER"
   export PGPASSWORD="$HLTHPRT_DB_PASSWORD" PGDATABASE="$scoped_archive_database"
   psql --no-psqlrc --set=ON_ERROR_STOP=1 \
     --command 'CREATE EXTENSION IF NOT EXISTS intarray WITH SCHEMA public' \
     --command 'CREATE EXTENSION IF NOT EXISTS btree_gin WITH SCHEMA public' \
-    --command 'CREATE EXTENSION IF NOT EXISTS postgis WITH SCHEMA public'
+    --command 'CREATE EXTENSION IF NOT EXISTS postgis WITH SCHEMA public' || exit "$?"
   local manual_source_swap_selected=0 test_path
   for test_path in "$@"; do
     case "$test_path" in
@@ -1650,12 +1681,12 @@ run_scoped_archive_postgres_body() {
   done
   if [[ "$manual_source_swap_selected" = 1 ]]; then
     psql --no-psqlrc --set=ON_ERROR_STOP=1 \
-      --command 'CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public'
+      --command 'CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public' || exit "$?"
   fi
   if [[ "$1" = tests/test_custom_import_installed_operator_postgres.py ||
         "$1" = tests/test_custom_import_identical_children_postgres.py ||
         "$1" = tests/test_custom_import_grouped_child_read_postgres.py ]]; then
-    scoped_archive_drain_file=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-installed-drain.XXXXXX")
+    scoped_archive_drain_file=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-installed-drain.XXXXXX") || exit "$?"
     stop_scoped_archive() {
       trap '' INT TERM
       local pid
@@ -1666,9 +1697,9 @@ run_scoped_archive_postgres_body() {
     trap 'stop_scoped_archive 130' INT
     trap 'stop_scoped_archive 143' TERM
     python "$CI_ROOT/scripts/healthcare/supervise_installed.py" "$scoped_archive_drain_file" "$@" &
-    wait "$!"
+    wait "$!" || exit "$?"
   else
-    timeout --foreground 295s python -m pytest -q "$@"
+    timeout --foreground 295s python -m pytest -q "$@" || exit "$?"
   fi
   exit 0
 }
@@ -1710,6 +1741,33 @@ run_import_family_postgres() (
   timeout --foreground 295s python -m coverage combine --append \
     "$family_coverage_directory/test_custom_import_identical_children_postgres.py" \
     "$family_coverage_directory/test_custom_import_grouped_child_read_postgres.py"
+)
+
+run_custom_import_verification_postgres() (
+  local archive_url=$1 verification_tests test_path report
+  verification_tests=$(custom_import_verification_native_test_paths) || exit 1
+  [ -n "$verification_tests" ] || exit 0
+  local verification_test_paths=()
+  while IFS= read -r test_path; do
+    verification_test_paths+=("$test_path")
+  done <<< "$verification_tests"
+  verification_report_directory=
+  cleanup_verification_reports() {
+    local status=$?
+    trap - EXIT
+    if [[ -n "$verification_report_directory" ]] && ! rm -rf -- "$verification_report_directory"; then
+      [ "$status" -ne 0 ] || status=1
+    fi
+    exit "$status"
+  }
+  trap cleanup_verification_reports EXIT
+  verification_report_directory=$(mktemp -d "${RUNNER_TEMP:-/tmp}/healthcare-import-verification.XXXXXX") || exit 1
+  report="$verification_report_directory/native.xml"
+  run_scoped_archive_postgres \
+    "hc_custom_import_test_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')" \
+    HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN "$archive_url" \
+    "${verification_test_paths[@]}" --junitxml "$report" || exit "$?"
+  validate_registry_native_report "$report" "" "${verification_test_paths[@]}" || exit "$?"
 )
 
 validate_registry_native_report() {
@@ -2635,6 +2693,8 @@ run_core_postgres() {
       HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN "$archive_url" \
       "${custom_import_postgres_tests[@]}"
   fi
+
+  run_custom_import_verification_postgres "$archive_url" || return "$?"
 
   fi
 

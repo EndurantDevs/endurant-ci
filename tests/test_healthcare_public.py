@@ -32,6 +32,19 @@ REQUIRED_IMPORT_NATIVE_TESTS = (
     "tests/test_custom_import_identical_children_postgres.py",
     "tests/test_custom_import_grouped_child_read_postgres.py",
 )
+CUSTOM_IMPORT_VERIFICATION_CAPABILITIES = tuple(
+    (
+        f"alembic/versions/{revision}_{name}.py",
+        f"tests/test_{name}.py",
+        f"tests/test_{name}_postgres.py",
+    )
+    for revision, name in (
+        ("20261020150000", "custom_import_staged_verification"),
+        ("20261020180000", "custom_import_verification_arms"),
+        ("20261020190000", "custom_import_verification_root_ranges"),
+        ("20261020200000", "custom_import_manual_acceptance"),
+    )
+)
 REGISTRY_SOURCE_CUSTODY_TESTS = (
     "tests/test_network_cms_registry_source_pair_postgres.py",
     "tests/test_network_cms_registry_complete_publication_postgres.py",
@@ -806,7 +819,7 @@ def _import_family_signal_hook(functions, location, signum):
         )
         hook = '    if [[ "$test_path" = *grouped_child_read_postgres.py ]]; then\n' + hook + '    fi\n'
     else:
-        anchor = '    wait "$!"\n'
+        anchor = '    wait "$!" || exit "$?"\n'
         hook = hook.replace('${test_path##*/}', '${1##*/}')
     assert functions.count(anchor) == 1
     dispatch = '    family_test_pids+=("$!")\n'
@@ -2608,6 +2621,23 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-servic
                         self.assertFalse(any(name in call for call in calls), name)
                 log.unlink()
 
+    def test_guarded_database_creation_stops_after_initial_drop_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "calls"
+            script = CHECK_FUNCTIONS + r'''
+drop_test_database() { printf 'drop %s\n' "$1" >> "$CALL_LOG"; return 13; }
+createdb() { printf 'unexpected create\n' >> "$CALL_LOG"; }
+create_test_database hc_custom_import_test_0123456789abcdef0123456789abcdef || exit "$?"
+'''
+            result = subprocess.run(
+                ["bash", "-eu"], input=script, capture_output=True, text=True, timeout=5,
+                env={**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT), "CALL_LOG": str(log)},
+                check=False,
+            )
+            self.assertEqual(result.returncode, 13, result.stderr)
+            self.assertEqual(log.read_text().splitlines(),
+                             ["drop hc_custom_import_test_0123456789abcdef0123456789abcdef"])
+
     def test_scoped_archive_uses_disposable_port_and_cleans_exact_database(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         postgres = workflow["jobs"]["address-canonical-db-tests"]["services"]["postgres"]
@@ -2637,7 +2667,7 @@ timeout() {
 }
 run_scoped_archive_postgres hc_florida_projection_0123456789abcdef0123456789abcdef \
   FLORIDA_SNAPSHOT_TEST_DATABASE_URL postgresql+asyncpg://postgres@127.0.0.1:5440 \
-  tests/test_florida_projection_archive_postgres.py
+  tests/test_florida_projection_archive_postgres.py || exit "$?"
 test -z "${FLORIDA_SNAPSHOT_TEST_DATABASE_URL:-}"
 test "$PGDATABASE" = sentinel
 test "$HLTHPRT_DB_DATABASE:$HLTHPRT_DB_DATABASE_OVERRIDE" = sentinel:sentinel
@@ -2710,7 +2740,7 @@ if [ "$BACKGROUND" = 1 ]; then
   wait "$!"
 else
   run_scoped_archive_postgres hc_custom_import_test_0123456789abcdef0123456789abcdef \
-    HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN postgresql://postgres@127.0.0.1:5440 "$@"
+    HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN postgresql://postgres@127.0.0.1:5440 "$@" || exit "$?"
 fi
 '''
             paths = ("tests/test_custom_import_installed_operator_postgres.py", *REQUIRED_IMPORT_NATIVE_TESTS[1:])
@@ -4663,6 +4693,180 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                     self.assertTrue(ignored[0].startswith("\t\t"))
                     prefix = f"{dsn}\t\t" if index == 0 else f"\t{dsn}\t"
                     self.assertEqual(executed, [f"{prefix}-m pytest -q {test_path}"])
+
+    def test_custom_import_verification_requires_complete_clean_trios(self):
+        complete = tuple(path for capability in CUSTOM_IMPORT_VERIFICATION_CAPABILITIES for path in capability)
+        layouts = [(), ("alembic/versions/20261019010000_custom_import_build_continuation.py",)]
+        layouts += list(CUSTOM_IMPORT_VERIFICATION_CAPABILITIES)
+        layouts += [complete[:6], complete[:9], complete]
+        cases = [(paths, "", "") for paths in layouts]
+        for capability in CUSTOM_IMPORT_VERIFICATION_CAPABILITIES:
+            cases += [((path,), path, "partial") for path in capability]
+            cases += [(tuple(path for path in capability if path != missing), missing, "partial")
+                      for missing in capability]
+        cases += [(complete, path, stage) for path in complete
+                  for stage in ("symlink", "dangling", "dirty", "staged", "untracked")]
+        for paths, changed, stage in cases:
+            with self.subTest(paths=paths, changed=changed, stage=stage), tempfile.TemporaryDirectory() as temporary:
+                source = Path(temporary)
+                for name in paths:
+                    path = source / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.touch()
+                if stage in {"symlink", "dangling"}:
+                    path = source / changed
+                    path.unlink()
+                    target = source / ("absent" if stage == "dangling" else "target")
+                    if stage == "symlink":
+                        target.touch()
+                    path.symlink_to(target)
+                script = CHECK_FUNCTIONS + r'''
+git() {
+  if [[ "$1" = -C ]]; then shift 2; fi
+  case "$1" in
+    diff) [[ "$FAIL_STAGE" != dirty && "$FAIL_STAGE" != staged ]] || [[ "${!#}" != "$CHANGED_PATH" ]] ;;
+    ls-files) [[ "$FAIL_STAGE" != untracked ]] || [[ "${!#}" != "$CHANGED_PATH" ]] ;;
+    *) return 99 ;;
+  esac
+}
+custom_import_verification_native_test_paths
+'''
+                result = subprocess.run(
+                    ["bash", "-eu"], input=script, cwd=source, capture_output=True, text=True, timeout=10,
+                    env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                         "FAIL_STAGE": stage, "CHANGED_PATH": changed}, check=False)
+                self.assertEqual(result.returncode, int(bool(stage)), result.stderr)
+                if not stage:
+                    expected = [capability[-1] for capability in CUSTOM_IMPORT_VERIFICATION_CAPABILITIES
+                                if all(path in paths for path in capability)]
+                    self.assertEqual(result.stdout.splitlines(), expected)
+                else:
+                    expected_error = ("not clean tracked source" if stage in {"dirty", "staged", "untracked"}
+                                      else "Missing or invalid native capability")
+                    self.assertIn(expected_error, result.stderr)
+
+    def test_custom_import_verification_routes_native_families_and_checks_reports(self):
+        native_paths = tuple(capability[-1] for capability in CUSTOM_IMPORT_VERIFICATION_CAPABILITIES)
+        cases = [(lane, 4, "") for lane in
+                 ("core-services", "core-services-2", "core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", "core-ptg", "all", "legacy")]
+        cases += [("core-snapshots-2", count, "") for count in (0, 1, 2, 3)]
+        cases += [("core-snapshots-2", 4, stage)
+                  for stage in ("create", "setup", "pytest", "empty", "skipped", "error", "failure", "duplicate", "wrong-family", "missing-family")]
+        for lane, count, stage in cases:
+            with self.subTest(lane=lane, count=count, stage=stage), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source, runner, log = root / "source", root / "runner", root / "calls"
+                runner.mkdir()
+                selected = CUSTOM_IMPORT_VERIFICATION_CAPABILITIES[:count]
+                for name in (*REQUIRED_IMPORT_NATIVE_TESTS, *(path for capability in selected for path in capability)):
+                    path = source / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.touch()
+                environment = {
+                    **os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                    "CI_DEPS_READY": "1", "COVERAGE_BASE_SHA": "a" * 40,
+                    "RUNNER_TEMP": str(runner), "CALL_LOG": str(log), "PYTHON_BIN": sys.executable,
+                    "COVERAGE_FILE": str(root / "coverage"), "HLTHPRT_DB_USER": "synthetic",
+                    "HLTHPRT_DB_PASSWORD": "synthetic", "HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN": "",
+                    "ROUTE_LANE": lane, "FAIL_STAGE": stage, "FAILURE_PATH": native_paths[1],
+                }
+                script = CHECK_FUNCTIONS + r'''
+git() { return 0; }
+mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
+prepare_debug_rust_binaries() { :; }
+run_import_family_postgres() { :; }
+create_test_database() {
+  printf 'create\t%s\n' "$1" >> "$CALL_LOG"
+  if [[ "$FAIL_STAGE" = create ]]; then return 19; fi
+}
+drop_test_database() { printf 'drop\t%s\n' "$1" >> "$CALL_LOG"; }
+psql() {
+  if [[ "$FAIL_STAGE" = setup ]]; then return 23; fi
+}
+timeout() {
+  [ "$1" = --foreground ] || return 97
+  export ACTIVE_TIMEOUT=$2
+  shift 2
+  "$@"
+}
+python() {
+  if [ "$1" = - ]; then "$PYTHON_BIN" "$@"; return "$?"; fi
+  if [[ "$1:${2:-}:${3:-}" = '-m:pytest:-q' && " $* " = *' --junitxml '* ]]; then
+    shift 3
+    local test_paths=()
+    while [ "$#" -gt 0 ] && [ "$1" != --junitxml ]; do
+      test_paths+=("$1")
+      shift
+    done
+    [ "$#" = 2 ] || return 97
+    local report=$2
+    printf 'native\t%s\t%s\t%s\t%s' "$HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN" \
+      "$HLTHPRT_DB_DATABASE" "$ACTIVE_TIMEOUT" "$report" >> "$CALL_LOG"
+    printf '\t%s' "${test_paths[@]}" >> "$CALL_LOG"
+    printf '\n' >> "$CALL_LOG"
+    if [[ "$FAIL_STAGE" = pytest ]]; then return 17; fi
+    "$PYTHON_BIN" - "$report" "$FAIL_STAGE" "$FAILURE_PATH" "${test_paths[@]}" <<'PY'
+from pathlib import Path
+import sys
+import xml.etree.ElementTree as ET
+
+report, stage, failure_path, *test_paths = sys.argv[1:]
+suite = ET.Element("testsuite")
+if stage != "empty":
+    for test_path in test_paths:
+        failure = stage if test_path == failure_path else ""
+        if failure == "missing-family":
+            continue
+        classname = "tests.unrelated" if failure == "wrong-family" else test_path.removesuffix(".py").replace("/", ".")
+        case = ET.SubElement(suite, "testcase", classname=classname, name="test_native")
+        if failure in {"skipped", "error", "failure"}:
+            ET.SubElement(case, failure)
+        if failure == "duplicate":
+            ET.SubElement(suite, "testcase", classname=classname, name="test_native")
+suite.set("tests", str(len(suite)))
+Path(report).write_text(ET.tostring(suite, encoding="unicode"))
+PY
+  else
+    printf 'portable\t%s\n' "$*" >> "$CALL_LOG"
+  fi
+}
+for shard in 0 1 2 3 4 5; do run_python_main "$shard" || exit "$?"; done
+if [ "$ROUTE_LANE" = legacy ]; then
+  run_core_postgres postgresql://synthetic || exit "$?"
+else
+  run_core_postgres postgresql://synthetic "$ROUTE_LANE" || exit "$?"
+fi
+'''
+                result = subprocess.run(["bash", "-eu"], input=script, cwd=source, env=environment,
+                                        capture_output=True, text=True, timeout=30, check=False)
+                expected_status = {"create": 19, "setup": 23, "pytest": 17}.get(stage, 1 if stage else 0)
+                self.assertEqual(result.returncode, expected_status, result.stderr)
+                calls = log.read_text().splitlines()
+                portable = [call for call in calls if "--ci-shard-count 6" in call]
+                self.assertEqual(len(portable), 6)
+                for call in portable:
+                    for capability in CUSTOM_IMPORT_VERIFICATION_CAPABILITIES:
+                        self.assertEqual(call.split().count(capability[-1]), int(capability in selected))
+                        if capability in selected:
+                            self.assertIn("--ignore " + capability[-1], call)
+                        self.assertNotIn("--ignore " + capability[1] + " ", call + " ")
+                native = [call.split("\t") for call in calls if call.startswith("native\t")]
+                expected = list(native_paths[:count]) if lane in {"core-snapshots-2", "all", "legacy"} else []
+                expected_calls = [expected] if expected and stage not in {"create", "setup"} else []
+                self.assertEqual([call[5:] for call in native], expected_calls)
+                created = [call.removeprefix("create\t") for call in calls if call.startswith("create\t")]
+                dropped = [call.removeprefix("drop\t") for call in calls if call.startswith("drop\t")]
+                self.assertEqual(dropped, created)
+                if lane == "core-snapshots-2":
+                    self.assertEqual(len(created), int(bool(expected)))
+                for _, dsn, database, deadline, report, *_paths in native:
+                    self.assertRegex(database, r"^hc_custom_import_test_[0-9a-f]{32}$")
+                    self.assertEqual(dsn, "postgresql://synthetic:synthetic@127.0.0.1:5440/" + database)
+                    self.assertEqual(deadline, "295s")
+                    self.assertEqual(calls.count("create\t" + database), 1)
+                    self.assertEqual(calls.count("drop\t" + database), 1)
+                    self.assertFalse(Path(report).exists())
+                self.assertEqual(list(runner.iterdir()), [])
 
     def test_custom_import_postgres_tests_use_bounded_scoped_databases(self):
         """Route all import suites through bounded native groups, not skipped shards."""
