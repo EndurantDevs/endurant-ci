@@ -32,6 +32,17 @@ REQUIRED_IMPORT_NATIVE_TESTS = (
     "tests/test_custom_import_identical_children_postgres.py",
     "tests/test_custom_import_grouped_child_read_postgres.py",
 )
+PROVIDER_CANDIDATE_TESTS = (
+    "tests/test_practitioner_migration_boundaries_postgres.py",
+    "tests/test_practitioner_online_migration_postgres.py",
+    "tests/test_practitioner_publication_candidates_postgres.py",
+    "tests/test_practitioner_set_validation_postgres.py",
+    "tests/test_provider_dataset_candidates_postgres.py",
+    "tests/test_provider_dataset_online_postgres.py",
+    "tests/test_provider_directory_rooted_graph_bulk_postgres.py",
+    "tests/test_provider_materialization_set_validation_postgres.py",
+    "tests/test_rooted_graph_online_migration_postgres.py",
+)
 CUSTOM_IMPORT_VERIFICATION_CAPABILITIES = tuple(
     (
         f"alembic/versions/{revision}_{name}.py",
@@ -2591,14 +2602,60 @@ run_source_routes postgresql://synthetic/test "$ROUTE_LANE"
                 self.assertEqual(result.returncode, 0, result.stderr)
                 calls_by_lane[lane] = [line.rstrip("\0").split("\0") for line in call_log.read_text().splitlines()]
         first, second = (calls_by_lane[lane] for lane in ("directory-source", "directory-source-2"))
-        self.assertEqual((len(first), len(second)), (4, 5))
+        self.assertEqual((len(first), len(second)), (4, 6))
         self.assertEqual(first + second, calls_by_lane["all"])
         selectors = [argument for call in first + second for argument in call if argument.startswith("tests/")]
         self.assertEqual(len(selectors), len(set(selectors)))
         self.assertEqual(set(selectors), available_paths)
+        self.assertEqual(second[-2][9:], list(PROVIDER_CANDIDATE_TESTS[:6]))
+        self.assertEqual(second[-1][9:], list(PROVIDER_CANDIDATE_TESTS[6:]))
+        for call in second[-2:]:
+            self.assertEqual(call[:2], ["", "postgresql://synthetic/test"])
         for call in first + second:
             if call[2] == "timeout":
                 self.assertEqual(call[3:9], ["--foreground", "295s", "python", "-m", "pytest", "-q"])
+
+    def test_provider_candidate_batches_keep_optional_modules_and_failures(self):
+        body = "  local provider_candidate_tests=()" + CHECK_FUNCTIONS.split(
+            "  local provider_candidate_tests=()", 1
+        )[1].split("\n  fi\n\n  local common_env=", 1)[0]
+        variants = [(), PROVIDER_CANDIDATE_TESTS, PROVIDER_CANDIDATE_TESTS[:6],
+                    PROVIDER_CANDIDATE_TESTS[6:], PROVIDER_CANDIDATE_TESTS[::2]]
+        cases = [(present, 0) for present in variants] + [(PROVIDER_CANDIDATE_TESTS, failed) for failed in (1, 2)]
+        for present, failed in cases:
+            with self.subTest(present=present, failed=failed), tempfile.TemporaryDirectory() as temporary:
+                source = Path(temporary) / "source"
+                (source / "tests").mkdir(parents=True)
+                for path in present:
+                    (source / path).touch()
+                call_log = Path(temporary) / "calls"
+                script = CHECK_FUNCTIONS + "\nrun_candidates() { local dsn=$1\n" + body + "\n}\n" + r'''
+calls=0
+timeout() {
+  calls=$((calls + 1))
+  printf '%s\t%s\t%s\t%s\n' "$HLTHPRT_FHIR_FORMULARY_MIGRATION_POSTGRES_DSN" \
+    "$COVERAGE_FILE" "$PYTEST_ADDOPTS" "$*" >> "$CALL_LOG"
+  [ "$calls" -ne "$FAIL_CALL" ] || return 17
+}
+run_candidates postgresql://synthetic/test
+'''
+                environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                               "CALL_LOG": str(call_log), "FAIL_CALL": str(failed),
+                               "COVERAGE_FILE": ".coverage.postgres.directory-source-2",
+                               "PYTEST_ADDOPTS": "--cov=process --cov-branch --cov-append --cov-report="}
+                result = subprocess.run(["bash", "-eu"], input=script, env=environment,
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 17 if failed else 0, result.stderr)
+                calls = [line.split("\t", 3) for line in call_log.read_text().splitlines()] if call_log.exists() else []
+                batches = [present[offset:offset + 6] for offset in range(0, len(present), 6)]
+                if failed:
+                    batches = batches[:failed]
+                self.assertEqual(len(calls), len(batches))
+                for call, batch in zip(calls, batches):
+                    self.assertEqual(call[:3], ["postgresql://synthetic/test", environment["COVERAGE_FILE"],
+                                               environment["PYTEST_ADDOPTS"]])
+                    self.assertEqual(shlex.split(call[3]),
+                                     ["--foreground", "295s", "python", "-m", "pytest", "-q", *batch])
 
     def test_services_primary_shards_keep_the_same_corpus_and_single_optional_routes(self):
         core_body = CHECK_FUNCTIONS.split("run_core_postgres() {", 1)[1].split("\nrun_postgres() {", 1)[0]

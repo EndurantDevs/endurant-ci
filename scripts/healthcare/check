@@ -3179,10 +3179,14 @@ run_provider_directory_postgres() {
       provider_candidate_tests+=("$test_path")
     fi
   done
-  if [ "${#provider_candidate_tests[@]}" -gt 0 ]; then
-    HLTHPRT_FHIR_FORMULARY_MIGRATION_POSTGRES_DSN=$dsn \
-      timeout --foreground 295s python -m pytest -q "${provider_candidate_tests[@]}"
-  fi
+  local candidate_offset
+  for ((candidate_offset=0; candidate_offset<${#provider_candidate_tests[@]}; candidate_offset+=6)); do
+    local provider_candidate_batch=("${provider_candidate_tests[@]:candidate_offset:6}")
+    if [ "${#provider_candidate_batch[@]}" -gt 0 ]; then
+      HLTHPRT_FHIR_FORMULARY_MIGRATION_POSTGRES_DSN=$dsn \
+        timeout --foreground 295s python -m pytest -q "${provider_candidate_batch[@]}"
+    fi
+  done
   fi
 
   local common_env=(
