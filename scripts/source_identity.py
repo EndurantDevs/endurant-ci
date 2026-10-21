@@ -47,11 +47,25 @@ def api(repository, path, method="GET"):
 
 def pages(repository, path, key=None):
     separator = "&" if "?" in path else "?"
+    page_size = 30 if key == "jobs" else 100
+    total, collected = None, 0
     for page in range(1, 101):
-        result = api(repository, f"{path}{separator}per_page=100&page={page}")
-        values = result[key] if key else result
+        result = api(repository, f"{path}{separator}per_page={page_size}&page={page}")
+        if key == "jobs":
+            values = result.get("jobs") if isinstance(result, dict) else None
+            count = result.get("total_count") if isinstance(result, dict) else None
+            if (type(count) is not int or count < 0 or (total is not None and count != total)
+                    or not isinstance(values, list) or len(values) > page_size
+                    or any(not isinstance(value, dict) for value in values)):
+                raise ValueError("GitHub job inventory has invalid or changing pagination metadata")
+            total = count
+            collected += len(values)
+            if collected > total or (len(values) < page_size and collected != total):
+                raise ValueError("GitHub job inventory is incomplete or exceeds its declared count")
+        else:
+            values = result[key] if key else result
         yield from values
-        if len(values) < 100:
+        if len(values) < page_size:
             return
     raise ValueError("GitHub result exceeds the bounded pagination limit")
 

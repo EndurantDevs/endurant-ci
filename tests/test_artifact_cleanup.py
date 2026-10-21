@@ -54,6 +54,96 @@ def completed_run(identifier, sha, branch, event="pull_request", conclusion="suc
             "repository": {"full_name": repository}, "head_repository": {"full_name": repository}}
 
 
+class JobPaginationChecks(unittest.TestCase):
+    def setUp(self):
+        self.run = run()
+        self.repository = self.run["repository"]["full_name"]
+        self.path = "actions/runs/123/attempts/2/jobs"
+        self.jobs = [{**jobs()[0], "id": index + 1, "name": f"check-{index}"} for index in range(80)]
+
+    def test_job_pages_use_thirty_rows_including_exact_multiples(self):
+        for count in (0, 30, 60, 80):
+            rows = self.jobs[:count]
+            responses = [{"total_count": count, "jobs": rows[start:start + 30]}
+                         for start in range(0, count + 1, 30)]
+            with self.subTest(count=count), patch.object(cleanup.github, "api", side_effect=responses) as api:
+                self.assertEqual(cleanup.attempt_jobs(self.repository, self.run, 2), rows)
+            self.assertEqual([call.args for call in api.call_args_list], [
+                (self.repository, f"{self.path}?per_page=30&page={page}")
+                for page in range(1, len(responses) + 1)
+            ])
+
+    def test_later_job_pages_require_a_stable_integer_count_and_complete_schema(self):
+        first = {"total_count": 80, "jobs": self.jobs[:30]}
+        invalid = [None, [], {}, {"total_count": 80}, {"jobs": self.jobs[30:60]},
+                   *({"total_count": value, "jobs": self.jobs[30:60]}
+                     for value in (None, True, "80", 80.0, -1, 79, 81)),
+                   *({"total_count": 80, "jobs": value}
+                     for value in (None, {}, "jobs", [None] * 30, self.jobs[30:61], self.jobs[30:50], []))]
+        for response in invalid:
+            with self.subTest(response=response), patch.object(
+                    cleanup.github, "api", side_effect=[first, response]) as api, \
+                    self.assertRaisesRegex(ValueError, "job inventory"):
+                cleanup.attempt_jobs(self.repository, self.run, 2)
+            self.assertEqual(api.call_count, 2)
+
+    def test_job_count_must_match_the_complete_last_page(self):
+        for total, last in ((80, self.jobs[60:79]), (79, self.jobs[60:80]),
+                            (60, [self.jobs[60]]), (80, [])):
+            responses = [{"total_count": total, "jobs": values}
+                         for values in (self.jobs[:30], self.jobs[30:60], last)]
+            with self.subTest(total=total, last=len(last)), patch.object(
+                    cleanup.github, "api", side_effect=responses), \
+                    self.assertRaisesRegex(ValueError, "job inventory"):
+                cleanup.attempt_jobs(self.repository, self.run, 2)
+
+    def test_later_job_page_failure_prevents_artifact_access_and_deletion(self):
+        failure = OSError("synthetic later page failure")
+        responses = [self.run, self.run, {"total_count": 80, "jobs": self.jobs[:30]}, failure]
+        with patch.object(cleanup.github, "api", side_effect=responses) as api, \
+                patch.object(cleanup.time, "sleep") as sleep, self.assertRaises(OSError) as raised:
+            cleanup.cleanup(self.repository, self.run)
+        self.assertIs(raised.exception, failure)
+        self.assertEqual([call.args for call in api.call_args_list], [
+            (self.repository, "actions/runs/123"), (self.repository, "actions/runs/123"),
+            (self.repository, f"{self.path}?per_page=30&page=1"),
+            (self.repository, f"{self.path}?per_page=30&page=2"),
+        ])
+        sleep.assert_not_called()
+
+    def test_last_job_page_cannot_duplicate_or_substitute_provenance(self):
+        for change in ({"id": 1}, {"name": "check-0"}, {"run_id": 999}, {"run_attempt": 1},
+                       {"run_attempt": 2.0}, {"head_sha": "b" * 40}):
+            rows = deepcopy(self.jobs)
+            rows[-1].update(change)
+            responses = [{"total_count": 80, "jobs": rows[start:start + 30]} for start in (0, 30, 60)]
+            with self.subTest(change=change), patch.object(cleanup.github, "api", side_effect=responses), \
+                    self.assertRaisesRegex(ValueError, "ambiguous run-attempt provenance"):
+                cleanup.attempt_jobs(self.repository, self.run, 2)
+
+    def test_job_pagination_still_stops_after_one_hundred_full_pages(self):
+        with patch.object(cleanup.github, "api", return_value={
+                "total_count": 3000, "jobs": self.jobs[:30]}) as api, \
+                self.assertRaisesRegex(ValueError, "bounded pagination limit"):
+            list(cleanup.github.pages(self.repository, self.path, "jobs"))
+        self.assertEqual(api.call_count, 100)
+        self.assertEqual(api.call_args.args, (self.repository, f"{self.path}?per_page=30&page=100"))
+
+    def test_non_job_pagination_keeps_one_hundred_row_pages(self):
+        rows = [{"id": index} for index in range(120)]
+        for path, key in (("actions/runs/123/artifacts", "artifacts"),
+                          ("pulls?state=open", None), ("compare/example...change", "commits")):
+            responses = [rows[:100], rows[100:]]
+            if key:
+                responses = [{key: values} for values in responses]
+            with self.subTest(key=key), patch.object(cleanup.github, "api", side_effect=responses) as api:
+                self.assertEqual(list(cleanup.github.pages(self.repository, path, key)), rows)
+            separator = "&" if "?" in path else "?"
+            self.assertEqual([call.args for call in api.call_args_list], [
+                (self.repository, f"{path}{separator}per_page=100&page={page}") for page in (1, 2)
+            ])
+
+
 class ArtifactCleanupChecks(unittest.TestCase):
     def test_postgres_workflow_measurement_and_cleanup_inventories_match(self):
         spec = importlib.util.spec_from_file_location("measurement", ROOT / "scripts/healthcare/measurement.py")
@@ -122,7 +212,7 @@ class ArtifactCleanupChecks(unittest.TestCase):
                     current = job_snapshots[min(job_reads - 1, len(job_snapshots) - 1)]
                 if job_reads > 3 and refreshed_jobs is not None:
                     current = refreshed_jobs
-                return {"jobs": deepcopy(current)}
+                return {"total_count": len(current), "jobs": deepcopy(current)}
             if "per_page=100&page=" in path:
                 self.assertFalse(deleted, "pagination must finish before deleting")
                 page = int(path.rsplit("=", 1)[1])
