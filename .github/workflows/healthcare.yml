@@ -943,6 +943,10 @@ jobs:
         digest-mismatch: error
         path: ${{ runner.temp }}/healthcare-coverage-staging
         merge-multiple: false
+    - name: Install pinned coverage combiner
+      run: >-
+        uv --no-config pip install --require-hashes --only-binary=:all:
+        -r "$CI_ROOT/scripts/healthcare/requirements-coverage.lock"
     - name: Validate and bind public measurement
       run: python3 ci/scripts/healthcare/measurement.py
     - name: Upload public measurement
