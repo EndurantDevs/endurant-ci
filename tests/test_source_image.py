@@ -189,6 +189,49 @@ class AdmissionChecks(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.admit({**run, "event": "pull_request"}, changed, items)
 
+    def test_authenticated_pr_noop_finds_publisher_on_third_job_page(self):
+        run, jobs, _ = self.fixtures()
+        jobs = jobs[:-1] + [{**jobs[2], "id": index + 5, "name": f"check-{index}"}
+                           for index in range(76)] + jobs[-1:]
+        pr = {"number": 7, "state": "open", "title": "fix: example",
+              "head": {"sha": "a" * 40, "ref": "fix/example", "repo": {"full_name": REPOSITORY}},
+              "base": {"sha": "b" * 40, "ref": "dev", "repo": {"full_name": REPOSITORY}}}
+        run.update(event="pull_request", head_branch="fix/example", path=".github/workflows/ci.yml",
+                   status="in_progress", conclusion=None, repository={"full_name": REPOSITORY},
+                   head_repository={"full_name": REPOSITORY})
+
+        def api(repository, path):
+            self.assertEqual(repository, REPOSITORY)
+            if path == "pulls/7":
+                return deepcopy(pr)
+            if path == "actions/runs/123":
+                return deepcopy(run)
+            for page in (1, 2, 3):
+                if path == f"actions/runs/123/attempts/2/jobs?per_page=30&page={page}":
+                    return {"total_count": 80, "jobs": deepcopy(jobs[(page - 1) * 30:page * 30])}
+            raise AssertionError(path)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            event = Path(temporary) / "event.json"
+            event.write_text(json.dumps({"repository": {"full_name": REPOSITORY, "private": False},
+                                        "pull_request": pr}))
+            environment = {"GITHUB_REPOSITORY": REPOSITORY, "CI_REVISION": "d" * 40,
+                           "GITHUB_EVENT_NAME": "pull_request", "GITHUB_EVENT_PATH": str(event),
+                           "GITHUB_SHA": "c" * 40, "GITHUB_REF": "refs/pull/7/merge",
+                           "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
+                           "GITHUB_JOB": "dev-image-publication"}
+            with patch.dict(os.environ, environment), patch.object(transfer, "command", return_value=b"d" * 40) as command, \
+                    patch.object(transfer.github, "api", side_effect=api) as calls, \
+                    patch.object(transfer, "registry_read") as registry, patch.object(transfer, "package_api") as package:
+                self.assertIsNone(transfer.admit())
+        self.assertEqual([call.args[1] for call in calls.call_args_list], [
+            "pulls/7", "actions/runs/123",
+            *(f"actions/runs/123/attempts/2/jobs?per_page=30&page={page}" for page in (1, 2, 3)),
+        ])
+        command.assert_called_once_with("git", "-C", str(transfer.ROOT), "rev-parse", "HEAD")
+        registry.assert_not_called()
+        package.assert_not_called()
+
     def test_current_run_and_checkout_cannot_be_substituted_in_context(self):
         with tempfile.TemporaryDirectory() as temporary:
             event = Path(temporary) / "event.json"
