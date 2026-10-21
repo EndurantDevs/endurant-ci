@@ -45,6 +45,18 @@ CUSTOM_IMPORT_VERIFICATION_CAPABILITIES = tuple(
         ("20261020200000", "custom_import_manual_acceptance"),
     )
 )
+CUSTOM_IMPORT_REJECTION_CAPABILITY = (
+    "process/custom_import/rejection_evidence.py",
+    "tests/test_custom_import_rejection_evidence.py",
+    "tests/test_custom_import_rejection_evidence_postgres.py",
+)
+CUSTOM_IMPORT_SNAPSHOT_READ_TESTS = (
+    "tests/test_custom_import_snapshot_storage_postgres.py",
+    "tests/test_custom_import_snapshot_reads_postgres.py",
+    "tests/test_custom_import_source_homes_postgres.py",
+    "tests/test_custom_import_retained_homes_postgres.py",
+    "tests/test_custom_import_revision_home_postgres.py",
+)
 REGISTRY_SOURCE_CUSTODY_TESTS = (
     "tests/test_network_cms_registry_source_pair_postgres.py",
     "tests/test_network_cms_registry_complete_publication_postgres.py",
@@ -4703,17 +4715,25 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                     self.assertEqual(executed, [f"{prefix}-m pytest -q {test_path}"])
 
     def test_custom_import_verification_requires_complete_clean_trios(self):
-        complete = tuple(path for capability in CUSTOM_IMPORT_VERIFICATION_CAPABILITIES for path in capability)
+        self._check_custom_import_native_capabilities(
+            CUSTOM_IMPORT_VERIFICATION_CAPABILITIES, "custom_import_verification_native_test_paths")
+
+    def test_custom_import_rejection_requires_complete_clean_source(self):
+        self._check_custom_import_native_capabilities(
+            (CUSTOM_IMPORT_REJECTION_CAPABILITY,), "custom_import_rejection_native_test_path")
+
+    def _check_custom_import_native_capabilities(self, capabilities, selector):
+        complete = tuple(path for capability in capabilities for path in capability)
         layouts = [(), ("alembic/versions/20261019010000_custom_import_build_continuation.py",)]
-        layouts += list(CUSTOM_IMPORT_VERIFICATION_CAPABILITIES)
-        layouts += [complete[:6], complete[:9], complete]
+        layouts += list(capabilities)
+        layouts += [complete[:3 * count] for count in range(2, len(capabilities) + 1)]
         cases = [(paths, "", "") for paths in layouts]
-        for capability in CUSTOM_IMPORT_VERIFICATION_CAPABILITIES:
+        for capability in capabilities:
             cases += [((path,), path, "partial") for path in capability]
             cases += [(tuple(path for path in capability if path != missing), missing, "partial")
                       for missing in capability]
         cases += [(complete, path, stage) for path in complete
-                  for stage in ("symlink", "dangling", "dirty", "staged", "untracked")]
+                  for stage in ("symlink", "dangling", "directory", "dirty", "staged", "untracked")]
         for paths, changed, stage in cases:
             with self.subTest(paths=paths, changed=changed, stage=stage), tempfile.TemporaryDirectory() as temporary:
                 source = Path(temporary)
@@ -4728,6 +4748,10 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                     if stage == "symlink":
                         target.touch()
                     path.symlink_to(target)
+                elif stage == "directory":
+                    path = source / changed
+                    path.unlink()
+                    path.mkdir()
                 script = CHECK_FUNCTIONS + r'''
 git() {
   if [[ "$1" = -C ]]; then shift 2; fi
@@ -4737,15 +4761,16 @@ git() {
     *) return 99 ;;
   esac
 }
-custom_import_verification_native_test_paths
+"$CAPABILITY_SELECTOR"
 '''
                 result = subprocess.run(
                     ["bash", "-eu"], input=script, cwd=source, capture_output=True, text=True, timeout=10,
                     env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
-                         "FAIL_STAGE": stage, "CHANGED_PATH": changed}, check=False)
+                         "FAIL_STAGE": stage, "CHANGED_PATH": changed,
+                         "CAPABILITY_SELECTOR": selector}, check=False)
                 self.assertEqual(result.returncode, int(bool(stage)), result.stderr)
                 if not stage:
-                    expected = [capability[-1] for capability in CUSTOM_IMPORT_VERIFICATION_CAPABILITIES
+                    expected = [capability[-1] for capability in capabilities
                                 if all(path in paths for path in capability)]
                     self.assertEqual(result.stdout.splitlines(), expected)
                 else:
@@ -4754,19 +4779,27 @@ custom_import_verification_native_test_paths
                     self.assertIn(expected_error, result.stderr)
 
     def test_custom_import_verification_routes_native_families_and_checks_reports(self):
-        native_paths = tuple(capability[-1] for capability in CUSTOM_IMPORT_VERIFICATION_CAPABILITIES)
-        cases = [(lane, 4, "") for lane in
+        self._check_reported_custom_import_routes(CUSTOM_IMPORT_VERIFICATION_CAPABILITIES)
+
+    def test_custom_import_rejection_routes_with_snapshot_readers_and_checks_reports(self):
+        self._check_reported_custom_import_routes(
+            (CUSTOM_IMPORT_REJECTION_CAPABILITY,), CUSTOM_IMPORT_SNAPSHOT_READ_TESTS)
+
+    def _check_reported_custom_import_routes(self, capabilities, reader_paths=()):
+        native_paths = tuple(capability[-1] for capability in capabilities)
+        cases = [(lane, len(capabilities), "") for lane in
                  ("core-services", "core-services-2", "core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", "core-ptg", "all", "legacy")]
-        cases += [("core-snapshots-2", count, "") for count in (0, 1, 2, 3)]
-        cases += [("core-snapshots-2", 4, stage)
-                  for stage in ("create", "setup", "pytest", "empty", "skipped", "error", "failure", "duplicate", "wrong-family", "missing-family")]
+        cases += [("core-snapshots-2", count, "") for count in range(len(capabilities))]
+        cases += [("core-snapshots-2", len(capabilities), stage)
+                  for stage in ("create", "setup", "pytest", "missing-report", "empty", "skipped", "error", "failure", "duplicate", "wrong-family", "missing-family")]
         for lane, count, stage in cases:
             with self.subTest(lane=lane, count=count, stage=stage), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 source, runner, log = root / "source", root / "runner", root / "calls"
                 runner.mkdir()
-                selected = CUSTOM_IMPORT_VERIFICATION_CAPABILITIES[:count]
-                for name in (*REQUIRED_IMPORT_NATIVE_TESTS, *(path for capability in selected for path in capability)):
+                selected = capabilities[:count]
+                for name in (*REQUIRED_IMPORT_NATIVE_TESTS, *(reader_paths if count else ()),
+                             *(path for capability in selected for path in capability)):
                     path = source / name
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.touch()
@@ -4776,7 +4809,7 @@ custom_import_verification_native_test_paths
                     "RUNNER_TEMP": str(runner), "CALL_LOG": str(log), "PYTHON_BIN": sys.executable,
                     "COVERAGE_FILE": str(root / "coverage"), "HLTHPRT_DB_USER": "synthetic",
                     "HLTHPRT_DB_PASSWORD": "synthetic", "HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN": "",
-                    "ROUTE_LANE": lane, "FAIL_STAGE": stage, "FAILURE_PATH": native_paths[1],
+                    "ROUTE_LANE": lane, "FAIL_STAGE": stage, "FAILURE_PATH": native_paths[-1],
                 }
                 script = CHECK_FUNCTIONS + r'''
 git() { return 0; }
@@ -4813,6 +4846,7 @@ python() {
     printf '\t%s' "${test_paths[@]}" >> "$CALL_LOG"
     printf '\n' >> "$CALL_LOG"
     if [[ "$FAIL_STAGE" = pytest ]]; then return 17; fi
+    if [[ "$FAIL_STAGE" = missing-report ]]; then return 0; fi
     "$PYTHON_BIN" - "$report" "$FAIL_STAGE" "$FAILURE_PATH" "${test_paths[@]}" <<'PY'
 from pathlib import Path
 import sys
@@ -4853,13 +4887,13 @@ fi
                 portable = [call for call in calls if "--ci-shard-count 6" in call]
                 self.assertEqual(len(portable), 6)
                 for call in portable:
-                    for capability in CUSTOM_IMPORT_VERIFICATION_CAPABILITIES:
+                    for capability in capabilities:
                         self.assertEqual(call.split().count(capability[-1]), int(capability in selected))
                         if capability in selected:
                             self.assertIn("--ignore " + capability[-1], call)
                         self.assertNotIn("--ignore " + capability[1] + " ", call + " ")
                 native = [call.split("\t") for call in calls if call.startswith("native\t")]
-                expected = list(native_paths[:count]) if lane in {"core-snapshots-2", "all", "legacy"} else []
+                expected = list(reader_paths) + list(native_paths[:count]) if count and lane in {"core-snapshots-2", "all", "legacy"} else []
                 expected_calls = [expected] if expected and stage not in {"create", "setup"} else []
                 self.assertEqual([call[5:] for call in native], expected_calls)
                 created = [call.removeprefix("create\t") for call in calls if call.startswith("create\t")]
@@ -4927,13 +4961,7 @@ fi
             "tests/test_custom_import_provider_hydration_postgres.py",
         ) + mixed_test_paths
         family_test_paths = required_test_paths[1:]
-        snapshot_test_paths = (
-            "tests/test_custom_import_snapshot_storage_postgres.py",
-            "tests/test_custom_import_snapshot_reads_postgres.py",
-            "tests/test_custom_import_source_homes_postgres.py",
-            "tests/test_custom_import_retained_homes_postgres.py",
-            "tests/test_custom_import_revision_home_postgres.py",
-        )
+        snapshot_test_paths = (*CUSTOM_IMPORT_SNAPSHOT_READ_TESTS, CUSTOM_IMPORT_REJECTION_CAPABILITY[-1])
         bulk_test_paths = (
             "tests/test_custom_import_bulk_snapshot_writers_postgres.py",
             "tests/test_custom_import_legacy_snapshot_writers_postgres.py",
@@ -4991,11 +5019,14 @@ fi
         for lane, present_paths, failure_path, missing_path in cases:
             if acquisition_test_path in present_paths:
                 present_paths = tuple(dict.fromkeys((*present_paths, *acquisition_dependencies)))
+            if CUSTOM_IMPORT_REJECTION_CAPABILITY[-1] in present_paths:
+                present_paths = tuple(dict.fromkeys((*present_paths, *CUSTOM_IMPORT_REJECTION_CAPABILITY)))
             with self.subTest(lane=lane, present_paths=present_paths, failure=failure_path), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 source = root / "source"
                 (source / "tests").mkdir(parents=True)
                 for test_path in present_paths:
+                    (source / test_path).parent.mkdir(parents=True, exist_ok=True)
                     (source / test_path).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
                 if missing_path in acquisition_dependencies:
                     (source / missing_path).unlink()
@@ -5016,8 +5047,10 @@ fi
                     "CALL_LOG": str(call_log),
                     "FAILURE_PATH": failure_path,
                     "ROUTE_LANE": lane,
+                    "PYTHON_BIN": sys.executable,
                 }
                 script = CHECK_FUNCTIONS + r'''
+git() { return 0; }
 mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
 prepare_debug_rust_binaries() { :; }
 create_test_database() { :; }
@@ -5027,9 +5060,24 @@ run_scoped_archive_postgres() {
   for test_path in "$@"; do
     if [ "$test_path" = "$FAILURE_PATH" ]; then return 17; fi
   done
+  if [[ " $* " = *' --junitxml '* ]]; then
+    "$PYTHON_BIN" - "$@" <<'PY'
+from pathlib import Path
+import sys
+import xml.etree.ElementTree as ET
+
+paths = sys.argv[4:-2]
+assert sys.argv[-2] == "--junitxml"
+suite = ET.Element("testsuite", tests=str(len(paths)))
+for path in paths:
+    ET.SubElement(suite, "testcase", classname=path.removesuffix(".py").replace("/", "."), name="test_native")
+Path(sys.argv[-1]).write_text(ET.tostring(suite, encoding="unicode"))
+PY
+  fi
 }
 run_scoped_archive_postgres_body() { run_scoped_archive_postgres "$@"; }
 python() {
+  if [ "$1" = - ]; then "$PYTHON_BIN" "$@"; return "$?"; fi
   printf '%s\t%s\n' "${HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN:-}" "$*" >> "$CALL_LOG"
 }
 timeout() {
@@ -5068,6 +5116,12 @@ fi
                     and any(test_path in call for test_path in test_paths)
                 ]
                 routes = [call for call in calls if call.startswith("hc_custom_import_test_")]
+                for index, route in enumerate(routes):
+                    arguments = route.split()
+                    if CUSTOM_IMPORT_REJECTION_CAPABILITY[-1] in arguments:
+                        self.assertEqual(arguments[-2], "--junitxml")
+                        self.assertFalse(Path(arguments[-1]).exists())
+                        routes[index] = " ".join(arguments[:-2])
                 expected_groups = [
                     [path for path in group if path in present_paths]
                     for group in groups_by_lane.get(lane, ()) if any(path in present_paths for path in group)
