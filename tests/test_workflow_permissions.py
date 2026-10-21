@@ -123,6 +123,7 @@ class PublicWorkflowPermissions(unittest.TestCase):
                                                 ("core-ptg", "PTG"),
                                                 *((f"registry-{index}", f"registry {index + 1}") for index in range(48)),
                                                 ("directory-source", "directory source"),
+                                                ("directory-source-2", "directory source 2"),
                                                 ("directory-storage", "directory storage"),
                                                 ("directory-address", "directory address"),
                                                 ("profile-storage", "profile storage"),
@@ -155,9 +156,9 @@ class PublicWorkflowPermissions(unittest.TestCase):
         download = next(step for step in jobs["measurement"]["steps"]
                         if step.get("name") == "Download immutable measurement artifacts")
         self.assertEqual(set(download["with"]["artifact-ids"].split(",")), set(artifact_ids))
-        self.assertEqual(len(download["with"]["artifact-ids"].split(",")), 68)
+        self.assertEqual(len(download["with"]["artifact-ids"].split(",")), 69)
         self.assertEqual(sum(len(job.get("strategy", {}).get("matrix", {}).get("include", [None]))
-                             for job in jobs.values()), 77)
+                             for job in jobs.values()), 78)
         self.assertEqual(jobs["python-tests"]["timeout-minutes"], 20)
 
     def test_cheap_lint_blocks_heavy_jobs_without_changing_measurement_producers(self):
