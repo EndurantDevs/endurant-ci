@@ -4781,19 +4781,21 @@ git() {
     def test_custom_import_verification_routes_native_families_and_checks_reports(self):
         self._check_reported_custom_import_routes(CUSTOM_IMPORT_VERIFICATION_CAPABILITIES)
 
-    def test_custom_import_rejection_routes_with_snapshot_readers_and_checks_reports(self):
+    def test_custom_import_rejection_runs_separately_from_snapshot_readers_and_checks_both_reports(self):
         self._check_reported_custom_import_routes(
             (CUSTOM_IMPORT_REJECTION_CAPABILITY,), CUSTOM_IMPORT_SNAPSHOT_READ_TESTS)
 
     def _check_reported_custom_import_routes(self, capabilities, reader_paths=()):
         native_paths = tuple(capability[-1] for capability in capabilities)
-        cases = [(lane, len(capabilities), "") for lane in
+        cases = [(lane, len(capabilities), "", native_paths[-1]) for lane in
                  ("core-services", "core-services-2", "core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", "core-ptg", "all", "legacy")]
-        cases += [("core-snapshots-2", count, "") for count in range(len(capabilities))]
-        cases += [("core-snapshots-2", len(capabilities), stage)
-                  for stage in ("create", "setup", "pytest", "missing-report", "empty", "skipped", "error", "failure", "duplicate", "wrong-family", "missing-family")]
-        for lane, count, stage in cases:
-            with self.subTest(lane=lane, count=count, stage=stage), tempfile.TemporaryDirectory() as temporary:
+        cases += [("core-snapshots-2", count, "", native_paths[-1]) for count in range(len(capabilities))]
+        cases += [("core-snapshots-2", len(capabilities), stage, native_paths[-1]) for stage in ("create", "setup")]
+        cases += [("core-snapshots-2", len(capabilities), stage, failure_path)
+                  for failure_path in (*reader_paths[:1], native_paths[-1])
+                  for stage in ("pytest", "missing-report", "empty", "skipped", "error", "failure", "duplicate", "wrong-family", "missing-family")]
+        for lane, count, stage, failure_path in cases:
+            with self.subTest(lane=lane, count=count, stage=stage, failure=failure_path), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 source, runner, log = root / "source", root / "runner", root / "calls"
                 runner.mkdir()
@@ -4809,7 +4811,7 @@ git() {
                     "RUNNER_TEMP": str(runner), "CALL_LOG": str(log), "PYTHON_BIN": sys.executable,
                     "COVERAGE_FILE": str(root / "coverage"), "HLTHPRT_DB_USER": "synthetic",
                     "HLTHPRT_DB_PASSWORD": "synthetic", "HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN": "",
-                    "ROUTE_LANE": lane, "FAIL_STAGE": stage, "FAILURE_PATH": native_paths[-1],
+                    "ROUTE_LANE": lane, "FAIL_STAGE": stage, "FAILURE_PATH": failure_path,
                 }
                 script = CHECK_FUNCTIONS + r'''
 git() { return 0; }
@@ -4840,14 +4842,15 @@ python() {
       shift
     done
     [ "$#" = 2 ] || return 97
-    local report=$2
+    local report=$2 report_stage=
+    if [[ " ${test_paths[*]} " = *" $FAILURE_PATH "* ]]; then report_stage=$FAIL_STAGE; fi
     printf 'native\t%s\t%s\t%s\t%s' "$HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN" \
       "$HLTHPRT_DB_DATABASE" "$ACTIVE_TIMEOUT" "$report" >> "$CALL_LOG"
     printf '\t%s' "${test_paths[@]}" >> "$CALL_LOG"
     printf '\n' >> "$CALL_LOG"
-    if [[ "$FAIL_STAGE" = pytest ]]; then return 17; fi
-    if [[ "$FAIL_STAGE" = missing-report ]]; then return 0; fi
-    "$PYTHON_BIN" - "$report" "$FAIL_STAGE" "$FAILURE_PATH" "${test_paths[@]}" <<'PY'
+    if [[ "$report_stage" = pytest ]]; then return 17; fi
+    if [[ "$report_stage" = missing-report ]]; then return 0; fi
+    "$PYTHON_BIN" - "$report" "$report_stage" "$FAILURE_PATH" "${test_paths[@]}" <<'PY'
 from pathlib import Path
 import sys
 import xml.etree.ElementTree as ET
@@ -4878,6 +4881,7 @@ if [ "$ROUTE_LANE" = legacy ]; then
 else
   run_core_postgres postgresql://synthetic "$ROUTE_LANE" || exit "$?"
 fi
+printf 'complete\n' >> "$CALL_LOG"
 '''
                 result = subprocess.run(["bash", "-eu"], input=script, cwd=source, env=environment,
                                         capture_output=True, text=True, timeout=30, check=False)
@@ -4893,14 +4897,24 @@ fi
                             self.assertIn("--ignore " + capability[-1], call)
                         self.assertNotIn("--ignore " + capability[1] + " ", call + " ")
                 native = [call.split("\t") for call in calls if call.startswith("native\t")]
-                expected = list(reader_paths) + list(native_paths[:count]) if count and lane in {"core-snapshots-2", "all", "legacy"} else []
-                expected_calls = [expected] if expected and stage not in {"create", "setup"} else []
+                expected_groups = []
+                if count and lane in {"core-snapshots-2", "all", "legacy"}:
+                    expected_groups = ([list(reader_paths)] if reader_paths else []) + [list(native_paths[:count])]
+                expected_calls = expected_groups
+                if stage in {"create", "setup"}:
+                    expected_calls = []
+                elif stage:
+                    failed_group = next(index for index, group in enumerate(expected_groups) if failure_path in group)
+                    expected_calls = expected_groups[:failed_group + 1]
                 self.assertEqual([call[5:] for call in native], expected_calls)
                 created = [call.removeprefix("create\t") for call in calls if call.startswith("create\t")]
                 dropped = [call.removeprefix("drop\t") for call in calls if call.startswith("drop\t")]
                 self.assertEqual(dropped, created)
                 if lane == "core-snapshots-2":
-                    self.assertEqual(len(created), int(bool(expected)))
+                    self.assertEqual(len(created), 1 if stage in {"create", "setup"} else len(expected_calls))
+                self.assertEqual(calls.count("complete"), int(not stage))
+                self.assertEqual(len({call[2] for call in native}), len(native))
+                self.assertEqual(len({call[4] for call in native}), len(native))
                 for _, dsn, database, deadline, report, *_paths in native:
                     self.assertRegex(database, r"^hc_custom_import_test_[0-9a-f]{32}$")
                     self.assertEqual(dsn, "postgresql://synthetic:synthetic@127.0.0.1:5440/" + database)
@@ -4961,7 +4975,8 @@ fi
             "tests/test_custom_import_provider_hydration_postgres.py",
         ) + mixed_test_paths
         family_test_paths = required_test_paths[1:]
-        snapshot_test_paths = (*CUSTOM_IMPORT_SNAPSHOT_READ_TESTS, CUSTOM_IMPORT_REJECTION_CAPABILITY[-1])
+        snapshot_test_paths = CUSTOM_IMPORT_SNAPSHOT_READ_TESTS
+        rejection_test_paths = (CUSTOM_IMPORT_REJECTION_CAPABILITY[-1],)
         bulk_test_paths = (
             "tests/test_custom_import_bulk_snapshot_writers_postgres.py",
             "tests/test_custom_import_legacy_snapshot_writers_postgres.py",
@@ -4973,7 +4988,7 @@ fi
         test_groups = (lifecycle_test_paths, materialization_test_paths, capture_test_paths,
                        build_test_paths[:4], operator_test_paths[:4], operator_test_paths[4:],
                        build_test_paths[4:], (installed_test_path, acquisition_test_path), family_test_paths,
-                       snapshot_test_paths, bulk_test_paths)
+                       snapshot_test_paths, rejection_test_paths, bulk_test_paths)
         groups_by_lane = {"core-imports": test_groups[:2] + test_groups[3:4],
                           "core-imports-2": test_groups[4:6],
                           "core-services": (capture_test_paths,), "core-snapshots": test_groups[6:9],
@@ -4993,7 +5008,7 @@ fi
         optional_capture_paths = lifecycle_test_paths + materialization_test_paths + capture_test_paths[:-1]
         optional_build_paths = build_test_paths + operator_test_paths
         optional_test_paths = (optional_capture_paths + optional_build_paths + (installed_test_path, acquisition_test_path)
-                               + snapshot_test_paths + bulk_test_paths)
+                               + snapshot_test_paths + rejection_test_paths + bulk_test_paths)
         legacy_optional_paths = tuple(path for path in optional_test_paths if path not in (installed_test_path, acquisition_test_path))
         dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
         archive_url = "postgresql://postgres:postgres@127.0.0.1:5440"
@@ -5015,6 +5030,7 @@ fi
                   for lane in ("core-snapshots", "all") for missing in acquisition_dependencies]
         cases += [(lane, test_paths, "", "") for lane in ("core-imports", "core-imports-2", "core-services", "all", "legacy")]
         cases += [("all", required_test_paths, "", "")]
+        cases += [(lane, (*required_test_paths, *snapshot_test_paths), "", "") for lane in ("all", "legacy")]
         complete_routes_by_lane = {}
         for lane, present_paths, failure_path, missing_path in cases:
             if acquisition_test_path in present_paths:
@@ -5118,7 +5134,7 @@ fi
                 routes = [call for call in calls if call.startswith("hc_custom_import_test_")]
                 for index, route in enumerate(routes):
                     arguments = route.split()
-                    if CUSTOM_IMPORT_REJECTION_CAPABILITY[-1] in arguments:
+                    if "--junitxml" in arguments:
                         self.assertEqual(arguments[-2], "--junitxml")
                         self.assertFalse(Path(arguments[-1]).exists())
                         routes[index] = " ".join(arguments[:-2])
@@ -5134,7 +5150,7 @@ fi
                 self.assertEqual(len(routes), expected_route_count)
                 if not failure_path and all(path in present_paths for path in test_paths):
                     if lane in ("core-snapshots", "core-snapshots-2"):
-                        self.assertEqual(len(routes), 4 if lane == "core-snapshots" else 2)
+                        self.assertEqual(len(routes), 4 if lane == "core-snapshots" else 3)
                 databases = [route.split()[0] for route in routes]
                 self.assertEqual(len(databases), len(set(databases)))
                 for route in routes:
