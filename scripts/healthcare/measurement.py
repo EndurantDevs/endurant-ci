@@ -17,7 +17,7 @@ MAX_TOTAL_BYTES = 128 * 1024 * 1024 - 64 * 1024  # Reserve ZIP headers below the
 POSTGRES_SHARDS = (
     "core-services", "core-services-2", "core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", "core-ptg",
     *(f"registry-{index}" for index in range(48)),
-    "directory-source", "directory-storage", "directory-address",
+    "directory-source", "directory-source-2", "directory-storage", "directory-address",
     "profile-storage", "profile-publication",
 )
 POSTGRES_COHORT_FILENAME = ".coverage-postgres-cohort.json"

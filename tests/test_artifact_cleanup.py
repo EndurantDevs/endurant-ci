@@ -165,7 +165,7 @@ class ArtifactCleanupChecks(unittest.TestCase):
                         if step.get("name") == "Download immutable measurement artifacts")
         self.assertEqual(set(re.findall(r"needs\.address-canonical-db-tests\.outputs\.([a-z_0-9]+)", download)), outputs)
         self.assertEqual(measurement.POSTGRES_SHARDS, shards)
-        self.assertEqual(len(measurement.producer_files()), 68)
+        self.assertEqual(len(measurement.producer_files()), 69)
         expected_run = run()
         names = cleanup.temporary_names("healthcare", expected_run)
         main_shards = tuple(row["shard"] for row in workflow["jobs"]["python-tests"]["strategy"]["matrix"]["include"])

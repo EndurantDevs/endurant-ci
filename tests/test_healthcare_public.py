@@ -928,9 +928,9 @@ class HealthcarePublicChecks(unittest.TestCase):
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         setup = next(step for step in workflow["jobs"]["address-canonical-db-tests"]["steps"]
                      if step["name"] == "Prepare source and toolchain")
-        self.assertEqual(setup["with"], {"rust": "${{ (matrix.shard == 'core-services' || matrix.shard == 'core-services-2') || matrix.shard == 'core-snapshots' || matrix.shard == 'core-snapshots-2' || matrix.shard == 'core-ptg' || matrix.shard == 'directory-source' || matrix.shard == 'directory-address' || matrix.shard == 'profile-publication' || startsWith(matrix.shard, 'registry-') }}"})
+        self.assertEqual(setup["with"], {"rust": "${{ (matrix.shard == 'core-services' || matrix.shard == 'core-services-2') || matrix.shard == 'core-snapshots' || matrix.shard == 'core-snapshots-2' || matrix.shard == 'core-ptg' || startsWith(matrix.shard, 'directory-source') || matrix.shard == 'directory-address' || matrix.shard == 'profile-publication' || startsWith(matrix.shard, 'registry-') }}"})
         cases = [(lane, "", "") for lane in (
-            "core-services", "core-services-2", "core", "core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", "core-ptg", "directory-source", "directory-storage",
+            "core-services", "core-services-2", "core", "core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", "core-ptg", "directory-source", "directory-source-2", "directory-storage",
             "directory-address", "profile-storage", "profile-publication",
             *(f"registry-{index}" for index in range(48)),
         )]
@@ -1098,7 +1098,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     report_paths[0].unlink()
                 self.assertEqual(list(runner.iterdir()), [])
                 if not selected or missing or failure == "rust-version":
-                    if lane in ("directory-source", "directory-address", "profile-publication"):
+                    if lane in ("directory-source", "directory-source-2", "directory-address", "profile-publication"):
                         self.assertEqual(len(calls), 3)
                         self.assertTrue(calls[0].startswith("build\t-m maturin build "))
                         self.assertTrue(calls[1].startswith("uv\t--no-config pip install "))
@@ -2053,7 +2053,7 @@ timeout() {
 
     def test_registry_address_equivalence_owns_database_and_admits_exact_bounded_report(self):
         cases = [(lane, present, "") for lane in (
-            "directory-address", "directory-source", "directory-storage", "all",
+            "directory-address", "directory-source", "directory-source-2", "directory-storage", "all",
         ) for present in (False, True)]
         cases += [("directory-address", True, stage) for stage in (
             "create", "pytest", "drop", "report-cleanup", "skipped", "error", "failure", "summary-skipped",
@@ -2174,6 +2174,8 @@ test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
         routes = {
             "directory-source": (
                 "tests/test_cms_npd_admission_postgres.py",
+            ),
+            "directory-source-2": (
                 "tests/test_cms_npd_candidate_coverage_postgres.py",
                 "tests/test_cms_npd_intake_postgres.py",
                 "tests/test_provider_directory_cms_retained_relations_postgres.py",
@@ -2248,7 +2250,7 @@ test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
             ),
         }
         all_paths = tuple(path for paths in routes.values() for path in paths)
-        cms_paths = set(routes["directory-source"] + routes["profile-publication"]
+        cms_paths = set(routes["directory-source"] + routes["directory-source-2"] + routes["profile-publication"]
                         + routes["directory-address"][7:] + routes["profile-storage"][:4])
         entities_paths = set(routes["profile-storage"][4:6])
         cases = [
@@ -2423,6 +2425,7 @@ test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
     def test_directory_native_wheel_install_order(self):
         suites = {
             "directory-source": "test_cms_npd_admission_postgres.py",
+            "directory-source-2": "test_cms_npd_intake_postgres.py",
             "provider-directory": "test_cms_npd_admission_postgres.py",
             "directory-address": "test_provider_directory_dataset_resource_mutation_fence_db.py",
             "profile-publication": "test_cms_doctors_preparation_postgres.py",
@@ -2527,6 +2530,7 @@ install_address_canon_wheel() { :; }
 create_test_database() { printf 'create:%s\n' "$1" >> "$LIFECYCLE"; }
 drop_test_database() { printf 'drop:%s\n' "$1" >> "$LIFECYCLE"; }
 run_provider_directory_postgres postgresql://synthetic/test directory-source
+run_provider_directory_postgres postgresql://synthetic/test directory-source-2
 '''
                 result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
                 expected = 4 if missing else 17 if failure else 0
@@ -2556,6 +2560,45 @@ run_provider_directory_postgres postgresql://synthetic/test directory-source
                     [event.removeprefix("drop:") for event in events if event.startswith("drop:")],
                 )
                 self.assertEqual(set(root.iterdir()), {source, command, calls_path, lifecycle})
+
+    def test_directory_source_shards_preserve_all_invocations_and_fixture_inputs(self):
+        body = CHECK_FUNCTIONS.split("run_provider_directory_postgres() {", 1)[1].split("  local common_env=(", 1)[0]
+        available_paths = set(re.findall(r"tests/[a-z0-9_]+\.py", body))
+        calls_by_lane = {}
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source"
+            (source / "tests").mkdir(parents=True)
+            for relative in available_paths:
+                (source / relative).touch()
+            for lane in ("directory-source", "directory-source-2", "all"):
+                call_log = Path(temporary) / lane
+                script = CHECK_FUNCTIONS + "\nrun_source_routes() {" + body + "}\n" + r'''
+log_call() {
+  printf '%s\0' "${HLTHPRT_TIN_NPI_CONNECTOR_POSTGRES_DSN-}" \
+    "${HLTHPRT_FHIR_FORMULARY_MIGRATION_POSTGRES_DSN-}" "$@" >> "$CALL_LOG"
+  printf '\n' >> "$CALL_LOG"
+}
+timeout() { log_call timeout "$@"; }
+run_owned_provider_directory_postgres() { log_call owned "$@"; }
+run_available_cms_postgres() { log_call cms "$@"; }
+run_source_routes postgresql://synthetic/test "$ROUTE_LANE"
+'''
+                result = subprocess.run(
+                    ["bash", "-eu"], input=script, cwd=source, capture_output=True, text=True,
+                    env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                         "CALL_LOG": str(call_log), "ROUTE_LANE": lane},
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls_by_lane[lane] = [line.rstrip("\0").split("\0") for line in call_log.read_text().splitlines()]
+        first, second = (calls_by_lane[lane] for lane in ("directory-source", "directory-source-2"))
+        self.assertEqual((len(first), len(second)), (4, 5))
+        self.assertEqual(first + second, calls_by_lane["all"])
+        selectors = [argument for call in first + second for argument in call if argument.startswith("tests/")]
+        self.assertEqual(len(selectors), len(set(selectors)))
+        self.assertEqual(set(selectors), available_paths)
+        for call in first + second:
+            if call[2] == "timeout":
+                self.assertEqual(call[3:9], ["--foreground", "295s", "python", "-m", "pytest", "-q"])
 
     def test_services_primary_shards_keep_the_same_corpus_and_single_optional_routes(self):
         core_body = CHECK_FUNCTIONS.split("run_core_postgres() {", 1)[1].split("\nrun_postgres() {", 1)[0]
@@ -4114,7 +4157,7 @@ RUNTIME_BASE_IMAGE=synthetic
                             uploads.extend(line.strip().replace("${{ matrix.shard }}", row.get("shard", ""))
                                            for line in step["with"]["path"].splitlines() if line.strip())
                             freezes.append(validation[validation.index("git diff --exit-code"):])
-            self.assertEqual(len(uploads), 135)  # Sixty-seven Python pairs plus the Rust directory.
+            self.assertEqual(len(uploads), 137)  # Sixty-eight Python pairs plus the Rust directory.
             script = CHECK_FUNCTIONS
             for upload in uploads:
                 prefix = "${{ runner.temp }}/healthcare-artifacts/"
@@ -4128,7 +4171,7 @@ RUNTIME_BASE_IMAGE=synthetic
             subprocess.run(["bash", "-eus"], input=script, text=True, cwd=source, env=env, check=True)
             for upload in uploads:
                 self.assertTrue(Path(upload.replace("${{ runner.temp }}", str(runner))).exists())
-            self.assertEqual(len(freezes), 68)
+            self.assertEqual(len(freezes), 69)
             self.assertEqual(len(set(freezes)), 1)
             def freeze():
                 return subprocess.run(["bash", "-euc", freezes[0]], cwd=source, capture_output=True).returncode
