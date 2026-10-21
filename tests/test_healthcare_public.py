@@ -2672,6 +2672,8 @@ run_candidates postgresql://synthetic/test
 log_call() { printf '%s\0' "$@" >> "$CALL_LOG"; printf '\n' >> "$CALL_LOG"; }
 timeout() { log_call "$@"; }
 run_scoped_archive_postgres() { log_call archive "$@"; }
+geo_reference_native_test_path() { printf '%s\n' tests/test_geo_reference_family_postgres.py; }
+run_geo_reference_postgres() { log_call "$@"; }
 create_test_database() { :; }
 drop_test_database() { :; }
 python3() { printf '%s\n' synthetic; }
@@ -2700,6 +2702,7 @@ run_core_postgres postgresql://postgres:postgres@localhost:5432/test "$ROUTE_LAN
                           for argument in call if argument.startswith("tests/")]
         self.assertEqual(len(optional_paths), 27)
         self.assertEqual(len(set(optional_paths)), 27)
+        self.assertEqual(optional_paths.count("tests/test_geo_reference_family_postgres.py"), 1)
 
     def test_available_archive_suites_route_into_database_lane(self):
         names = (
