@@ -2691,8 +2691,7 @@ run_core_postgres() {
     tests/test_custom_import_snapshot_reads_postgres.py \
     tests/test_custom_import_source_homes_postgres.py \
     tests/test_custom_import_retained_homes_postgres.py \
-    tests/test_custom_import_revision_home_postgres.py \
-    tests/test_custom_import_rejection_evidence_postgres.py; do
+    tests/test_custom_import_revision_home_postgres.py; do
     if [ -f "$repository_root/$custom_import_test_path" ]; then
       custom_import_postgres_tests+=("$custom_import_test_path")
     fi
@@ -2706,6 +2705,9 @@ run_core_postgres() {
         HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN "$archive_url" \
         "${custom_import_postgres_tests[@]}"
     fi
+  fi
+  if [ -n "$rejection_test" ]; then
+    run_reported_custom_import_postgres "$archive_url" "$rejection_test" || return "$?"
   fi
 
   custom_import_postgres_tests=()
