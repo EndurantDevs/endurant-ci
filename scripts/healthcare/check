@@ -2734,6 +2734,8 @@ run_core_postgres() {
   fi
 
   if [[ "$lane" = core-services || "$lane" = all ]]; then
+  local geo_reference_test
+  geo_reference_test=$(geo_reference_native_test_path) || return "$?"
   local reference_family_postgres_tests=()
   for test_path in \
     tests/test_reference_family_archive_postgres.py \
@@ -2749,7 +2751,7 @@ run_core_postgres() {
     tests/test_clinical_reference_bootstrap_postgres.py \
     tests/test_places_zcta_handoff_postgres.py \
     tests/test_places_zcta_cancel_postgres.py; do
-    if [ -f "$repository_root/$test_path" ]; then
+    if [ "$test_path" != "$geo_reference_test" ] && [ -f "$repository_root/$test_path" ]; then
       reference_family_postgres_tests+=("$test_path")
     fi
   done
@@ -2762,6 +2764,9 @@ run_core_postgres() {
       return 1
     fi
     drop_test_database "$database"
+  fi
+  if [ -n "$geo_reference_test" ]; then
+    run_geo_reference_postgres "$geo_reference_test"
   fi
 
   if [ -f "$repository_root/tests/test_entity_address_result_generation_postgres.py" ]; then
@@ -3009,6 +3014,39 @@ run_owned_provider_directory_postgres() (
   env -u DB_SCHEMA -u HLTHPRT_DB_DATABASE_OVERRIDE \
     "$variable=$dsn" HLTHPRT_DB_DATABASE="$owned_directory_database" \
     timeout --foreground 295s python -m pytest -q "$@"
+)
+
+geo_reference_native_test_path() {
+  local fixture=tests/geo_source_postgres_support.py
+  if [ ! -e "$repository_root/$fixture" ] && [ ! -L "$repository_root/$fixture" ]; then
+    return 0
+  fi
+  require_native_source_files "$fixture" tests/test_geo_reference_family_postgres.py \
+    process/geo_source_archive.py process/geo_source_storage.py \
+    tests/provider_directory_source_postgres_support.py tests/cms_npd_admission_postgres_support.py || return 1
+  printf '%s\n' tests/test_geo_reference_family_postgres.py
+}
+
+run_geo_reference_postgres() (
+  local test_node="${1}::test_geo_replacement_keeps_indexes_and_fences_generation_and_failure" report="" selection=""
+  cleanup_geo_reference_report() {
+    local status=$?
+    trap - EXIT
+    if [[ -n "$report" ]] && ! rm -f -- "$report"; then
+      [ "$status" -ne 0 ] || status=1
+    fi
+    if [[ -n "$selection" ]] && ! rm -f -- "$selection"; then
+      [ "$status" -ne 0 ] || status=1
+    fi
+    exit "$status"
+  }
+  trap cleanup_geo_reference_report EXIT
+  report=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-geo-reference-report.XXXXXX")
+  selection=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-geo-reference-selection.XXXXXX")
+  printf '%s\n' "$test_node" > "$selection"
+  run_owned_provider_directory_postgres hc_cms_admission_test HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN \
+    "$test_node" --junitxml "$report"
+  validate_registry_native_report "$report" "$selection"
 )
 
 run_registry_address_equivalence_postgres() (
