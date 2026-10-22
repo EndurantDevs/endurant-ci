@@ -3392,6 +3392,127 @@ run_profile_control_maintenance_postgres() (
     tests/test_provider_directory_profile_control_maintenance_postgres.py
 )
 
+profile_wal_container_identity() {
+  local target=$1 errors=$2 identity status
+  if identity=$(timeout --foreground 10s docker inspect --type container \
+    --format '{{.Id}} {{index .Config.Labels "public-ci-profile-wal"}}' "$target" 2>"$errors"); then
+    printf '%s\n' "$identity"
+  else
+    status=$?
+    if [[ "$status" != 1 ]] || ! grep -Eq 'No such (object|container)' "$errors"; then
+      cat "$errors" >&2
+      return 1
+    fi
+  fi
+}
+
+run_profile_wal_postgres() (
+  set -e
+  local test_node=$1 resource_root="" container_name="" owner="" creation_attempted=0
+  local service_id=${CI_POSTGRES_SERVICE_ID:-} image_id service_identity service_reference actual_service_id
+  local expected_image=postgis/postgis:18-3.6@sha256:60f6ad1d21ea86a67d47780b9a0d1e1d200500f62b19293fa834d0dea80b8677
+  [[ "$service_id" =~ ^[0-9a-f]{64}$ ]] || { printf 'An exact PostgreSQL service container is required.\n' >&2; exit 1; }
+  service_identity=$(timeout --foreground 10s docker inspect --type container \
+    --format '{{.Id}} {{.Image}} {{.Config.Image}}' "$service_id")
+  read -r actual_service_id image_id service_reference <<< "$service_identity"
+  [[ "$actual_service_id" = "$service_id" && "$image_id" =~ ^sha256:[0-9a-f]{64}$ && "$service_reference" = "$expected_image" ]] || exit 1
+  cleanup_profile_wal_cluster() {
+    local status=$? identity owned_id label volume_names volume volume_status
+    trap - EXIT
+    trap '' INT TERM
+    if [[ "$creation_attempted" = 1 ]]; then
+      if identity=$(profile_wal_container_identity "$container_name" "$resource_root/cleanup-errors"); then
+        if [[ -n "$identity" ]]; then
+          read -r owned_id label <<< "$identity"
+          if [[ "$owned_id" =~ ^[0-9a-f]{64}$ && "$owned_id" != "$service_id" && "$label" = "$owner" ]]; then
+            volume_names=$(timeout --foreground 10s docker inspect --type container \
+              --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\n"}}{{end}}{{end}}' "$owned_id") || status=1
+            if ! timeout --foreground 30s docker rm --force --volumes "$owned_id" >/dev/null; then status=1; fi
+            if ! identity=$(profile_wal_container_identity "$owned_id" "$resource_root/cleanup-errors") || [[ -n "$identity" ]]; then status=1; fi
+            while IFS= read -r volume; do
+              [[ -n "$volume" ]] || continue
+              if [[ ! "$volume" =~ ^[0-9a-f]{64}$ ]] || \
+                timeout --foreground 10s docker volume inspect "$volume" >"$resource_root/volume-result" 2>"$resource_root/volume-errors"; then
+                status=1
+              else
+                volume_status=$?
+                if [[ "$volume_status" != 1 ]] || ! grep -Eiq 'no such volume' "$resource_root/volume-errors"; then status=1; fi
+              fi
+            done <<< "$volume_names"
+          else
+            printf 'Owned WAL container identity changed; cleanup refused.\n' >&2
+            status=1
+          fi
+        fi
+      else
+        status=1
+      fi
+    fi
+    if [[ -n "$resource_root" ]] && ! rm -rf -- "$resource_root"; then status=1; fi
+    exit "$status"
+  }
+  trap cleanup_profile_wal_cluster EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  resource_root=$(mktemp -d "${RUNNER_TEMP:-/tmp}/healthcare-profile-wal.XXXXXX")
+  owner=$(python -c 'import uuid; print(uuid.uuid4().hex)')
+  container_name="healthcare-profile-wal-$owner"
+  local identity container_id port deadline parameter
+  identity=$(profile_wal_container_identity "$container_name" "$resource_root/inspect-errors")
+  [[ -z "$identity" ]] || { printf 'WAL container name already exists.\n' >&2; exit 1; }
+  creation_attempted=1
+  POSTGRES_USER="$HLTHPRT_DB_USER" POSTGRES_PASSWORD="$HLTHPRT_DB_PASSWORD" \
+  POSTGRES_DB="profile_wal_test_$owner" \
+    timeout --foreground 30s docker create --name "$container_name" --cidfile "$resource_root/cid" \
+      --label "public-ci-profile-wal=$owner" --publish 127.0.0.1::5432 \
+      --env POSTGRES_USER --env POSTGRES_PASSWORD --env POSTGRES_DB \
+      --env 'POSTGRES_INITDB_ARGS=--auth-local=scram-sha-256 --auth-host=scram-sha-256' \
+      "$image_id" postgres -c autovacuum=off -c checkpoint_timeout=1h -c timezone=UTC >/dev/null
+  container_id=$(cat "$resource_root/cid")
+  identity=$(profile_wal_container_identity "$container_name" "$resource_root/inspect-errors")
+  [[ "$identity" = "$container_id $owner" && "$container_id" =~ ^[0-9a-f]{64}$ && "$container_id" != "$service_id" ]] || exit 1
+  timeout --foreground 30s docker start "$container_id" >/dev/null
+  port=$(timeout --foreground 10s docker inspect --type container \
+    --format '{{with index .NetworkSettings.Ports "5432/tcp"}}{{(index . 0).HostIp}} {{(index . 0).HostPort}}{{end}}' "$container_id")
+  [[ "$port" =~ ^127\.0\.0\.1\ ([0-9]+)$ ]] || exit 1
+  port=${BASH_REMATCH[1]}
+  [[ "$port" -ge 1 && "$port" -le 65535 ]] || exit 1
+  deadline=$((SECONDS + 60))
+  until timeout --foreground 5s pg_isready --host 127.0.0.1 --port "$port" \
+    --username "$HLTHPRT_DB_USER" --dbname "profile_wal_test_$owner" --timeout=1 >/dev/null; do
+    [[ "$SECONDS" -lt "$deadline" ]] || exit 1
+    sleep 1
+  done
+  local settings
+  settings=$(PGPASSWORD="$HLTHPRT_DB_PASSWORD" timeout --foreground 10s psql -XAt --set ON_ERROR_STOP=1 \
+    --host 127.0.0.1 --port "$port" --username "$HLTHPRT_DB_USER" --dbname "profile_wal_test_$owner" \
+    --command "SELECT current_setting('autovacuum') = 'off' AND current_setting('checkpoint_timeout') = '1h' AND current_setting('fsync') = 'on' AND current_setting('full_page_writes') = 'on' AND current_setting('wal_level') IN ('replica','logical') AND current_setting('TimeZone') = 'UTC';")
+  [[ "$settings" = t ]] || exit 1
+  for parameter in None bulk metadata final; do printf '%s[%s]\n' "$test_node" "$parameter"; done > "$resource_root/selection"
+  env -u DB_SCHEMA -u HLTHPRT_DB_DATABASE_OVERRIDE \
+    HLTHPRT_DB_HOST=127.0.0.1 HLTHPRT_DB_PORT="$port" HLTHPRT_DB_DATABASE="profile_wal_test_$owner" \
+    HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS=1 \
+    timeout --foreground 295s python -m pytest -q "$test_node" --junitxml "$resource_root/report.xml"
+  validate_registry_native_report "$resource_root/report.xml" "$resource_root/selection"
+)
+
+run_profile_liveness_postgres() {
+  local test_path=tests/test_provider_directory_publication_liveness_postgres.py
+  local test_name=test_profile_projection_counts_both_spans_and_final_budget_counts_intervening_writes
+  local isolated=0
+  local selection=(
+    tests/test_provider_directory_profile_selection_desired_db.py
+    tests/test_provider_directory_profile_desired_snapshot_postgres.py
+    "$test_path"
+  )
+  if [[ -f "$repository_root/$test_path" ]] && grep -Eq "^async def $test_name\\(" "$repository_root/$test_path"; then
+    selection+=("--deselect=$test_path::$test_name")
+    isolated=1
+  fi
+  HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS=1 run_available_cms_postgres runtime "${selection[@]}"
+  if [[ "$isolated" = 1 ]]; then run_profile_wal_postgres "$test_path::$test_name"; fi
+}
+
 run_provider_profile_postgres() {
   local dsn=$1
   local lane=${2:-all}
@@ -3494,11 +3615,7 @@ run_provider_profile_postgres() {
     run_owned_provider_directory_postgres hc_directory_entities HLTHPRT_DIRECTORY_ENTITIES_TEST_DSN \
       "${profile_snapshot_tests[@]}"
   fi
-  HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS=1 \
-    run_available_cms_postgres runtime \
-      tests/test_provider_directory_profile_selection_desired_db.py \
-      tests/test_provider_directory_profile_desired_snapshot_postgres.py \
-      tests/test_provider_directory_publication_liveness_postgres.py
+  run_profile_liveness_postgres
   fi
 
   if [[ "$lane" = profile-publication || "$lane" = all ]]; then
