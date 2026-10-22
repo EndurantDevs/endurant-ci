@@ -3,11 +3,11 @@
 
 import json
 import os
-from pathlib import Path
 import re
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 REPOSITORIES = {"EndurantDevs/drug-api", "EndurantDevs/healthcare-mrf-api"}
 SHA = re.compile(r"[0-9a-f]{40}\Z")
@@ -47,9 +47,9 @@ def api(repository, path, method="GET"):
 
 def pages(repository, path, key=None):
     separator = "&" if "?" in path else "?"
-    page_size = 30 if key == "jobs" else 100
+    page_size = 50 if key == "jobs" else 100
     total, collected = None, 0
-    for page in range(1, 101):
+    for page in range(1, 61 if key == "jobs" else 101):
         result = api(repository, f"{path}{separator}per_page={page_size}&page={page}")
         if key == "jobs":
             values = result.get("jobs") if isinstance(result, dict) else None
