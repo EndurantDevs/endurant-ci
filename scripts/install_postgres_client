@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+setup_directory=''
+cleanup() {
+  local status=$?
+  trap - EXIT
+  if [ -n "$setup_directory" ] && ! sudo rm -rf -- "$setup_directory"; then
+    echo 'Unable to remove PostgreSQL client setup files' >&2
+    [ "$status" -ne 0 ] || status=1
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+setup_directory=$(mktemp -d "${RUNNER_TEMP:?}/postgres-client.XXXXXX")
+
+# The root-owned timeout can terminate every apt descendant before cleanup.
+sudo timeout --signal=TERM --kill-after=5s 180s bash -euo pipefail -s -- "$setup_directory" <<'INSTALL'
+setup_directory=$1
+export DEBIAN_FRONTEND=noninteractive
+. /etc/os-release
+[[ "$ID" = ubuntu && "$VERSION_CODENAME" =~ ^[a-z][a-z0-9]*$ ]]
+architecture=$(dpkg --print-architecture)
+case "$architecture" in
+  amd64) archive=http://archive.ubuntu.com/ubuntu; security=http://security.ubuntu.com/ubuntu ;;
+  arm64) archive=http://ports.ubuntu.com/ubuntu-ports; security=$archive ;;
+  *) echo 'Unsupported Ubuntu client architecture' >&2; exit 1 ;;
+esac
+test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
+chmod 0755 "$setup_directory"
+mkdir -p "$setup_directory/sources" "$setup_directory/lists/partial" "$setup_directory/archives/partial"
+touch "$setup_directory/empty.list"
+cat > "$setup_directory/sources/ubuntu.sources" <<SOURCES
+Types: deb
+URIs: $archive
+Suites: $VERSION_CODENAME ${VERSION_CODENAME}-updates
+Components: main
+Architectures: $architecture
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb
+URIs: $security
+Suites: ${VERSION_CODENAME}-security
+Components: main
+Architectures: $architecture
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+SOURCES
+apt_options=(
+  -o "Dir::Etc::sourcelist=$setup_directory/empty.list"
+  -o "Dir::Etc::sourceparts=$setup_directory/sources"
+  -o "Dir::State::lists=$setup_directory/lists"
+  -o "Dir::Cache::archives=$setup_directory/archives"
+  -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache=
+  -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
+  -o DPkg::Lock::Timeout=30 -o APT::Update::Error-Mode=any
+)
+if ! curl --version >/dev/null 2>&1 || [ ! -s /etc/ssl/certs/ca-certificates.crt ]; then
+  apt-get "${apt_options[@]}" update -qq </dev/null
+  apt-get "${apt_options[@]}" install --yes --no-install-recommends ca-certificates curl </dev/null
+fi
+curl --fail --location --silent --show-error --retry 3 --retry-delay 2 --retry-all-errors \
+  --connect-timeout 15 --max-time 60 \
+  --output "$setup_directory/pgdg.asc" https://www.postgresql.org/media/keys/ACCC4CF8.asc
+cat > "$setup_directory/sources/pgdg.sources" <<SOURCES
+Types: deb
+URIs: https://apt.postgresql.org/pub/repos/apt
+Suites: ${VERSION_CODENAME}-pgdg
+Components: main
+Architectures: $architecture
+Signed-By: $setup_directory/pgdg.asc B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
+SOURCES
+apt-get "${apt_options[@]}" update -qq </dev/null
+apt-get "${apt_options[@]}" install --yes --no-install-recommends postgresql-client-18 </dev/null
+for tool in psql pg_dump pg_restore; do
+  "/usr/lib/postgresql/18/bin/$tool" --version | grep -Eq "^$tool \\(PostgreSQL\\) 18\\."
+done
+INSTALL
+test -n "${GITHUB_PATH:?}"
+printf '%s\n' /usr/lib/postgresql/18/bin >> "$GITHUB_PATH"
