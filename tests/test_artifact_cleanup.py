@@ -1,16 +1,19 @@
 """Exercise the privileged cleanup boundary with synthetic GitHub responses only."""
 
-from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+import hashlib
 import importlib.util
 import io
 import json
-from pathlib import Path
 import re
 import sys
 import tempfile
+import threading
 import unittest
-from unittest.mock import patch
+import zipfile
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import Mock, patch
 
 import yaml
 
@@ -180,16 +183,26 @@ class ArtifactCleanupChecks(unittest.TestCase):
         self.assertEqual({name for name in names if name.startswith("mrf-python-coverage-postgres-")}, expected)
 
     def exercise(self, items, expected=None, refresh=None, changed_artifact=None, delete_error=False,
-                 job_inventory=None, refreshed_jobs=None, job_snapshots=None, settle_waits=2):
+                  job_inventory=None, refreshed_jobs=None, job_snapshots=None, settle_waits=2,
+                  missing_artifacts=(), publication_payload=None, publication_reader=None):
         expected = expected or run()
         kind = cleanup.KINDS[expected["repository"]["full_name"]]
         measurement = next((item for item in items if f"{kind}-public-measurement-" in item.get("name", "")), None)
         image = next((item for item in items if f"{kind}-public-image-staging-" in item.get("name", "")), None)
         receipt = next((item for item in items if f"{kind}-public-image-" in item.get("name", "")
                         and "-staging-" not in item.get("name", "")), None)
-        expected = {**expected, "measurement_artifact_id": measurement["id"] if measurement else 9999,
-                    **({"image_artifact_id": image["id"]} if image else {}),
+        expected = {**expected, "measurement_artifact_id": expected.get(
+                        "measurement_artifact_id", measurement["id"] if measurement else 9999),
+                    **({"image_artifact_id": expected.get("image_artifact_id", image["id"])} if image else {}),
                     **({"image_receipt_artifact_id": receipt["id"]} if receipt else {})}
+        payload = publication_payload or {
+            "schema": "public-source-image-v1", "repository": expected["repository"]["full_name"],
+            "source_sha": expected["head_sha"], "source_branch": expected["head_branch"],
+            "run_id": str(expected["id"]), "run_attempt": expected["run_attempt"],
+            "producer_run_attempt": expected["run_attempt"],
+            "measurement_run_attempt": expected["run_attempt"],
+            "producer_artifact": {key: image[key] for key in ("id", "name", "digest")} if image else {},
+        }
         calls, deleted = [], []
         run_reads = job_reads = 0
 
@@ -212,12 +225,15 @@ class ArtifactCleanupChecks(unittest.TestCase):
                     current = job_snapshots[min(job_reads - 1, len(job_snapshots) - 1)]
                 if job_reads > 3 and refreshed_jobs is not None:
                     current = refreshed_jobs
-                return {"total_count": len(current), "jobs": deepcopy(current)}
+                page = int(path.rsplit("=", 1)[1])
+                return {"total_count": len(current), "jobs": deepcopy(current[(page - 1) * 30:page * 30])}
             if "per_page=100&page=" in path:
                 self.assertFalse(deleted, "pagination must finish before deleting")
                 page = int(path.rsplit("=", 1)[1])
                 return {"artifacts": deepcopy(items[(page - 1) * 100:page * 100])}
             identifier = int(path.rsplit("/", 1)[1])
+            if identifier in missing_artifacts:
+                raise cleanup.urllib.error.HTTPError("https://api.github.test", 404, "missing", {}, None)
             result = deepcopy(next(item for item in items if item["id"] == identifier))
             result["workflow_run"] = {"id": expected["id"], "head_sha": expected["head_sha"]}
             if changed_artifact and identifier == changed_artifact[0]:
@@ -225,7 +241,8 @@ class ArtifactCleanupChecks(unittest.TestCase):
             return result
 
         with patch.object(cleanup.github, "api", side_effect=api), patch("sys.stdout", new=io.StringIO()), \
-                patch.object(cleanup.time, "sleep") as sleep:
+                patch.object(cleanup.time, "sleep") as sleep, \
+                patch.object(cleanup, "publication_record", return_value=payload, side_effect=publication_reader):
             try:
                 count = cleanup.cleanup(expected["repository"]["full_name"], expected)
             except (ValueError, OSError):
@@ -235,6 +252,206 @@ class ArtifactCleanupChecks(unittest.TestCase):
             self.assertEqual(sleep.call_args_list, [((2,),)] * settle_waits + [((1,),)] * len(deleted))
         self.assertEqual(count, len(deleted))
         return deleted, calls
+
+    def test_per_delete_reads_are_bounded_parallel_and_complete_before_delete(self):
+        barrier = threading.Barrier(4, timeout=3)
+        workers, finished = set(), []
+        lock = threading.Lock()
+
+        def read(value):
+            with lock:
+                workers.add(threading.get_ident())
+            barrier.wait()
+            with lock:
+                finished.append(value)
+            return value
+
+        with cleanup.ThreadPoolExecutor(max_workers=4) as executor, \
+                patch.object(cleanup, "completed_consumers", side_effect=lambda *args: read("jobs")), \
+                patch.object(cleanup.github, "api", side_effect=lambda repo, path: read(path)):
+            values = cleanup.deletion_snapshot(executor, "repository", {}, {"id": 1}, [{"id": 2}, {"id": 3}])
+        self.assertEqual(len(workers), 4)
+        self.assertEqual(len(finished), 4)
+        self.assertEqual(values, ["jobs", "actions/artifacts/1", "actions/artifacts/2", "actions/artifacts/3"])
+
+    def test_parallel_read_failure_drains_all_reads_without_deletion(self):
+        failure = OSError("synthetic proof read failure")
+        futures = [Mock(), Mock(), Mock(), Mock()]
+        for future in futures:
+            future.exception.return_value = None
+        futures[0].exception.return_value = failure
+        executor = Mock()
+        executor.submit.side_effect = futures
+        with patch.object(cleanup, "wait") as wait, self.assertRaises(OSError) as raised:
+            cleanup.deletion_snapshot(executor, "repository", {}, {"id": 1}, [{"id": 2}, {"id": 3}])
+        self.assertIs(raised.exception, failure)
+        wait.assert_called_once_with(futures)
+        for future in futures:
+            future.exception.assert_called_once_with()
+        futures[0].result.assert_not_called()
+        for future in futures[1:]:
+            future.result.assert_called_once_with()
+        self.assertEqual(executor.submit.call_count, 4)
+
+    def test_eighty_one_jobs_keep_all_per_delete_json_calls_and_pacing(self):
+        expected = {**run(), "event": "push", "head_branch": "dev"}
+        inventory = [{**jobs()[0], "id": index + 1, "name": f"check-{index}"} for index in range(80)]
+        inventory.append({**jobs()[-1], "id": 81})
+        items = [artifact(1, "healthcare-public-image-staging-123-2"),
+                 artifact(2, "mrf-rust-coverage-123-2"),
+                 artifact(3, "healthcare-public-measurement-123-2"),
+                 artifact(4, "healthcare-public-image-123-2", 90)]
+        deleted, calls = self.exercise(items, expected, job_inventory=inventory)
+        self.assertEqual(deleted, [1, 2])
+        self.assertEqual(len(calls), 14 + 2 * 8)
+        self.assertEqual(sum("/jobs?" in path for _, path in calls), 9 + 2 * 3)
+
+    def test_missing_tested_archive_resumes_only_with_bound_publication_receipt(self):
+        expected = {**run(), "event": "push", "head_branch": "dev", "image_artifact_id": 1}
+        image = artifact(1, "healthcare-public-image-staging-123-2")
+        payload = {"schema": "public-source-image-v1", "repository": expected["repository"]["full_name"],
+                   "source_sha": expected["head_sha"], "source_branch": "dev", "run_id": "123",
+                   "run_attempt": 2, "producer_run_attempt": 2, "measurement_run_attempt": 2,
+                   "producer_artifact": {key: image[key] for key in ("id", "name", "digest")}}
+        items = [artifact(2, "mrf-rust-coverage-123-2"),
+                 artifact(3, "healthcare-public-measurement-123-2"),
+                 artifact(4, "healthcare-public-image-123-2", 90)]
+        deleted, _ = self.exercise(items, expected, missing_artifacts=(1,), publication_payload=payload)
+        self.assertEqual(deleted, [2])
+        later_attempt = {**expected, "run_attempt": 3}
+        missing = cleanup.urllib.error.HTTPError("https://api.github.test", 404, "missing", {}, None)
+        with patch.object(cleanup, "publication_record", return_value=payload), \
+                patch.object(cleanup.github, "api", side_effect=missing):
+            cleanup.require_tested_archive(expected["repository"]["full_name"], later_attempt,
+                                           items, items[1], items[2])
+        for field, replacement in (("repository", "Other/service"), ("source_sha", "c" * 40),
+                                   ("run_id", "999"), ("run_attempt", 1), ("producer_run_attempt", 1),
+                                   ("measurement_run_attempt", 1)):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "does not bind"):
+                self.exercise(items, expected, missing_artifacts=(1,),
+                              publication_payload={**payload, field: replacement})
+        for changes in ({"id": 999}, {"name": "healthcare-public-image-staging-999-2"}, {"digest": "invalid"}):
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "does not bind"):
+                self.exercise(items, expected, missing_artifacts=(1,),
+                              publication_payload={**payload, "producer_artifact": {**payload["producer_artifact"], **changes}})
+        with self.assertRaisesRegex(ValueError, "current publication"):
+            self.exercise(items[:-1], expected, missing_artifacts=(1,), publication_payload=payload)
+        for changes in ({"expired": True}, {"size_in_bytes": 0}):
+            with self.subTest(proof=changes), self.assertRaisesRegex(ValueError, "current publication"):
+                self.exercise([*items[:-1], {**items[-1], **changes}], expected,
+                              missing_artifacts=(1,), publication_payload=payload)
+        with self.assertRaisesRegex(ValueError, "publication changed"):
+            self.exercise(items, expected, missing_artifacts=(1,), publication_payload=payload,
+                          changed_artifact=(4, {"digest": "sha256:" + "c" * 64}))
+
+    def test_present_archive_conflict_is_not_treated_as_absence(self):
+        expected = {**run(), "event": "push", "head_branch": "dev"}
+        image = artifact(1, "healthcare-public-image-staging-123-2")
+        measurement = artifact(3, "healthcare-public-measurement-123-2")
+        receipt = artifact(4, "healthcare-public-image-123-2", 90)
+        payload = {"schema": "public-source-image-v1", "repository": expected["repository"]["full_name"],
+                   "source_sha": expected["head_sha"], "source_branch": "dev", "run_id": "123",
+                   "run_attempt": 2, "producer_run_attempt": 2, "measurement_run_attempt": 2,
+                   "producer_artifact": {key: image[key] for key in ("id", "name", "digest")}}
+        for changes in ({"id": 2}, {"digest": "sha256:" + "c" * 64}, {"expired": True}):
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "conflicts"):
+                self.exercise([{**image, **changes}, measurement, receipt],
+                              {**expected, "image_artifact_id": 1}, publication_payload=payload)
+        with patch.object(cleanup, "publication_record", return_value=payload), \
+                patch.object(cleanup.github, "api", return_value=image), \
+                self.assertRaisesRegex(ValueError, "outside the exact run"):
+            cleanup.require_tested_archive(expected["repository"]["full_name"],
+                                           {**expected, "image_artifact_id": 1}, [], measurement, receipt)
+
+    def test_already_observed_missing_candidate_is_idempotent(self):
+        temporary = artifact(1, "mrf-rust-coverage-123-2")
+        final = artifact(2, "healthcare-public-measurement-123-2")
+        self.assertEqual(self.exercise([temporary, final], missing_artifacts=(1,))[0], [])
+        with self.assertRaises(cleanup.urllib.error.HTTPError) as raised:
+            self.exercise([temporary, final], missing_artifacts=(2,))
+        raised.exception.close()
+
+    def test_publication_zip_requires_exact_digest_and_single_bounded_record(self):
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as archive:
+            archive.writestr("image.json", '{"schema":"synthetic"}')
+        raw = output.getvalue()
+        proof = {**artifact(1, "healthcare-public-image-123-2", 90),
+                 "digest": "sha256:" + hashlib.sha256(raw).hexdigest()}
+        with patch.object(cleanup.subprocess, "run", return_value=cleanup.subprocess.CompletedProcess([], 0, raw)):
+            self.assertEqual(cleanup.publication_record("EndurantDevs/healthcare-mrf-api", proof), {"schema": "synthetic"})
+            with self.assertRaisesRegex(ValueError, "bytes changed"):
+                cleanup.publication_record("EndurantDevs/healthcare-mrf-api", {**proof, "digest": "sha256:" + "c" * 64})
+        for name, payload in (("foreign.json", "{}"), ("image.json", "x" * 65537)):
+            output = io.BytesIO()
+            with zipfile.ZipFile(output, "w") as archive:
+                archive.writestr(name, payload)
+            raw = output.getvalue()
+            changed = {**proof, "digest": "sha256:" + hashlib.sha256(raw).hexdigest()}
+            with self.subTest(name=name), patch.object(cleanup.subprocess, "run", return_value=
+                    cleanup.subprocess.CompletedProcess([], 0, raw)), self.assertRaisesRegex(ValueError, "unexpected files"):
+                cleanup.publication_record("EndurantDevs/healthcare-mrf-api", changed)
+        for kind in ("duplicate", "symlink", "malformed", "oversized"):
+            output = io.BytesIO()
+            with zipfile.ZipFile(output, "w") as archive:
+                entry = zipfile.ZipInfo("image.json")
+                if kind == "symlink":
+                    entry.external_attr = 0o120777 << 16
+                archive.writestr(entry, "{}")
+                if kind == "duplicate":
+                    with self.assertWarns(UserWarning):
+                        archive.writestr("image.json", "{}")
+            raw = b"not a zip" if kind == "malformed" else output.getvalue()
+            if kind == "oversized":
+                raw += b"x" * 131072
+            changed = {**proof, "digest": "sha256:" + hashlib.sha256(raw).hexdigest()}
+            with self.subTest(kind=kind), patch.object(cleanup.subprocess, "run", return_value=
+                    cleanup.subprocess.CompletedProcess([], 0, raw)), \
+                    self.assertRaises((ValueError, zipfile.BadZipFile)):
+                cleanup.publication_record("EndurantDevs/healthcare-mrf-api", changed)
+        with patch.object(cleanup.subprocess, "run") as command, self.assertRaises(ValueError):
+            cleanup.publication_record("EndurantDevs/healthcare-mrf-api", {**proof, "size_in_bytes": 131073})
+        command.assert_not_called()
+        with patch.object(cleanup.subprocess, "run", side_effect=cleanup.subprocess.CalledProcessError(1, ["gh"])), \
+                self.assertRaises(cleanup.subprocess.CalledProcessError):
+            cleanup.publication_record("EndurantDevs/healthcare-mrf-api", proof)
+
+    def test_actual_producer_receipt_roundtrip_authorizes_absent_prior_attempt_archive(self):
+        import source_image
+
+        expected = {**run(), "event": "push", "head_branch": "dev", "run_attempt": 3, "image_artifact_id": 1}
+        image = artifact(1, "healthcare-public-image-staging-123-1")
+        measurement = artifact(2, "healthcare-public-measurement-123-2")
+        identity = {"repository": expected["repository"]["full_name"], "source_sha": expected["head_sha"],
+                    "base_sha": "b" * 40, "source_branch": "dev", "pr_number": 0,
+                    "run_id": "123", "run_attempt": 2, "ci_revision": "c" * 40,
+                    "caller_workflow_blob_sha": "d" * 40}
+        publication = {"identity": identity, "producer_run_attempt": 1, "measurement_run_attempt": 2,
+                       "artifact": image, "image": "ghcr.io/example/service:dev-example"}
+        producer = {"archive_sha256": "e" * 64, "config_digest": "sha256:" + "f" * 64}
+        record = source_image.publication_receipt(publication, producer, "sha256:" + "1" * 64)
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as archive:
+            archive.writestr("image.json", json.dumps(record))
+        raw = output.getvalue()
+        receipt = {**artifact(3, "healthcare-public-image-123-2", 90),
+                   "digest": "sha256:" + hashlib.sha256(raw).hexdigest()}
+        missing = cleanup.urllib.error.HTTPError("https://api.github.test", 404, "missing", {}, None)
+        with patch.object(cleanup.subprocess, "run", return_value=
+                cleanup.subprocess.CompletedProcess([], 0, raw)) as command, \
+                patch.object(cleanup.github, "api", side_effect=missing) as api:
+            cleanup.require_tested_archive(identity["repository"], expected, [measurement, receipt], measurement, receipt)
+        self.assertEqual(command.call_count, 1)
+        api.assert_called_once_with(identity["repository"], "actions/artifacts/1")
+        reader = cleanup.publication_record
+        remaining = [image, artifact(4, "mrf-rust-coverage-123-2"),
+                     artifact(5, "healthcare-rust-debug-123-2"), measurement, receipt]
+        with patch.object(cleanup.subprocess, "run", return_value=
+                cleanup.subprocess.CompletedProcess([], 0, raw)) as command:
+            deleted, _ = self.exercise(remaining, {**run(), "event": "push", "head_branch": "dev"},
+                                      publication_reader=reader)
+        self.assertEqual(deleted, [1, 4, 5])
+        self.assertEqual(command.call_count, 1)
 
     def test_only_known_exact_attempt_intermediates_are_deleted_after_complete_pagination(self):
         for repository, kind in cleanup.KINDS.items():
@@ -361,7 +578,7 @@ class ArtifactCleanupChecks(unittest.TestCase):
         expected = {**run("EndurantDevs/drug-api"), "event": "push", "head_branch": "dev",
                     "image_artifact_id": 77, "image_receipt_artifact_id": 78}
         measurement = artifact(2, "drug-public-measurement-123-2", 1)
-        with self.assertRaisesRegex(ValueError, "exact tested image"):
+        with self.assertRaisesRegex(ValueError, "current publication"):
             self.exercise([measurement], expected)
 
     def test_dev_archive_requires_current_publication_and_preserves_both_final_receipts(self):

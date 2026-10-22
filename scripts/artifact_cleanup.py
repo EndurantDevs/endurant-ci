@@ -2,15 +2,20 @@
 """Remove public CI intermediates and obsolete durable evidence."""
 
 import argparse
-from datetime import datetime, timedelta, timezone
+import hashlib
+import io
 import json
 import os
-from pathlib import Path
 import re
+import subprocess
 import time
+import urllib.error
+import zipfile
+from concurrent.futures import ThreadPoolExecutor, wait
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import source_identity as github
-
 
 KINDS = {"EndurantDevs/healthcare-mrf-api": "healthcare", "EndurantDevs/drug-api": "drug"}
 CLEANUP_JOB = "CI artifact cleanup"
@@ -353,6 +358,94 @@ def stale_cleanup(repository, expected):
     return deleted
 
 
+def publication_record(repository, artifact):
+    """Decode only the exact immutable, bounded publication receipt ZIP."""
+    if (not isinstance(artifact.get("digest"), str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", artifact["digest"])
+            or not 0 < artifact.get("size_in_bytes", 0) <= 131072):
+        raise ValueError("publication receipt has invalid immutable metadata")
+    raw = subprocess.run(
+        ["gh", "api", f"repos/{repository}/actions/artifacts/{artifact['id']}/zip"],
+        check=True, capture_output=True, timeout=30,
+    ).stdout
+    if len(raw) > 131072 or "sha256:" + hashlib.sha256(raw).hexdigest() != artifact["digest"]:
+        raise ValueError("publication receipt bytes changed")
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        entries = archive.infolist()
+        if (len(entries) != 1 or entries[0].filename != "image.json"
+                or not 0 < entries[0].file_size <= 65536
+                or (entries[0].external_attr >> 16) & 0o170000 == 0o120000):
+            raise ValueError("publication receipt has unexpected files")
+        return json.loads(archive.read(entries[0]))
+
+
+def require_tested_archive(repository, expected, artifacts, measurement, publication):
+    """A durable publication binds an absent archive; conflicting presence never does."""
+    record = publication_record(repository, publication)
+    producer = record.get("producer_artifact") if isinstance(record, dict) else None
+    if not isinstance(producer, dict):
+        raise ValueError("publication receipt does not bind the exact tested image")
+    kind = KINDS[repository]
+    producer_attempt = artifact_attempt(producer.get("name"), f"{kind}-public-image-staging", expected)
+    if (not isinstance(record, dict) or record.get("schema") != "public-source-image-v1"
+            or record.get("repository") != repository or record.get("source_sha") != expected["head_sha"]
+            or record.get("source_branch") != expected["head_branch"]
+            or record.get("run_id") != str(expected["id"])
+            or type(record.get("run_attempt")) is not int
+            or record["run_attempt"] != artifact_attempt(publication["name"], f"{kind}-public-image", expected)
+            or type(record.get("producer_run_attempt")) is not int
+            or record["producer_run_attempt"] != producer_attempt or producer_attempt is None
+            or type(record.get("measurement_run_attempt")) is not int
+            or record["measurement_run_attempt"] != artifact_attempt(
+                measurement["name"], f"{kind}-public-measurement", expected)
+            or set(producer) != {"id", "name", "digest"}
+            or type(producer.get("id")) is not int or producer["id"] != expected["image_artifact_id"]
+            or not isinstance(producer.get("digest"), str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", producer["digest"])):
+        raise ValueError("publication receipt does not bind the exact tested image")
+    matches = [item for item in artifacts
+               if item.get("id") == producer["id"] or item.get("name") == producer["name"]]
+    if matches:
+        if (len(matches) != 1 or not available(matches[0], expected)
+                or any(matches[0].get(key) != producer[key] for key in producer)):
+            raise ValueError("present tested image conflicts with its publication receipt")
+        return
+    try:
+        github.api(repository, f"actions/artifacts/{producer['id']}")
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
+        error.close()
+        return
+    raise ValueError("tested image is present outside the exact run artifact inventory")
+
+
+def deletion_snapshot(executor, repository, expected, artifact, proofs):
+    """Read independent mutable guards concurrently, inspecting every result before deletion."""
+    futures = [executor.submit(completed_consumers, repository, expected)]
+    futures.extend(executor.submit(github.api, repository, f"actions/artifacts/{item['id']}")
+                   for item in (artifact, *proofs))
+    wait(futures)
+    values, failures = [], []
+    for index, future in enumerate(futures):
+        error = future.exception()
+        if error is None:
+            values.append(future.result())
+        else:
+            if index == 1 and isinstance(error, urllib.error.HTTPError) and error.code == 404:
+                error.close()
+                values.append(None)  # This exact allowlisted ID was observed in the complete run inventory.
+            else:
+                values.append(None)
+                failures.append(error)
+    if failures:
+        for error in failures:
+            if isinstance(error, urllib.error.HTTPError):
+                error.close()
+        raise failures[0]
+    return values
+
+
 def cleanup(repository, expected):
     if repository not in KINDS or any(type(expected.get(key)) is not int or expected[key] <= 0
                                     for key in ("id", "run_attempt")):
@@ -385,7 +478,7 @@ def cleanup(repository, expected):
     image_candidates = [item for item in candidates
                         if artifact_attempt(item.get("name"), f"{kind}-public-image-staging", expected)]
     if expected.get("image_artifact_id"):
-        if sum(item.get("id") == expected.get("image_artifact_id") for item in image_candidates) != 1:
+        if not image_candidates and not (expected["event"] == "push" and expected["head_branch"] == "dev"):
             raise ValueError("retained image archive: exact tested image artifact is missing")
         receipts = [item for item in artifacts
                     if item.get("id") == expected.get("image_receipt_artifact_id")]
@@ -394,26 +487,29 @@ def cleanup(repository, expected):
                 or not current_evidence(receipts[0], expected)):
             raise ValueError("retained image archive: current publication receipt is missing or invalid")
         proofs.append(receipts[0])
+        require_tested_archive(repository, expected, artifacts, finals[0], receipts[0])
     if not candidates:
         print("No retained intermediates to remove.")
         return 0
     deleted = 0
-    for artifact in candidates:
-        # Refresh consumer completion, immutable artifacts, and run before each delete.
-        if completed_consumers(repository, expected) != consumers:
-            raise ValueError("retained intermediates: validation job inventory changed")
-        current = github.api(repository, f"actions/artifacts/{artifact['id']}")
-        if not available(current, expected) or any(current.get(key) != artifact.get(key) for key in ARTIFACT_FIELDS):
-            raise ValueError("retained intermediates: artifact identity changed")
-        for proof in proofs:
-            measurement = github.api(repository, f"actions/artifacts/{proof['id']}")
-            if not current_evidence(measurement, expected) or any(measurement.get(key) != proof.get(key) for key in ARTIFACT_FIELDS):
-                raise ValueError("retained intermediates: current measurement or publication changed")
-        if not current_run(github.api(repository, run_path), expected, repository):
-            raise ValueError(f"stopped after {deleted} deletions: producing run changed")
-        github.api(repository, f"actions/artifacts/{artifact['id']}", "DELETE")
-        deleted += 1
-        time.sleep(1)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        for artifact in candidates:
+            # Every guard remains fresh for each delete; only independent requests overlap.
+            jobs, current, *fresh_proofs = deletion_snapshot(executor, repository, expected, artifact, proofs)
+            if jobs != consumers:
+                raise ValueError("retained intermediates: validation job inventory changed")
+            if current is not None and (not available(current, expected)
+                    or any(current.get(key) != artifact.get(key) for key in ARTIFACT_FIELDS)):
+                raise ValueError("retained intermediates: artifact identity changed")
+            for proof, measurement in zip(proofs, fresh_proofs):
+                if not current_evidence(measurement, expected) or any(measurement.get(key) != proof.get(key) for key in ARTIFACT_FIELDS):
+                    raise ValueError("retained intermediates: current measurement or publication changed")
+            if not current_run(github.api(repository, run_path), expected, repository):
+                raise ValueError(f"stopped after {deleted} deletions: producing run changed")
+            if current is not None:
+                github.api(repository, f"actions/artifacts/{artifact['id']}", "DELETE")
+                deleted += 1
+                time.sleep(1)
     print(f"Deleted {deleted} validated intermediates; preserved final measurement and unknown artifacts.")
     return deleted
 
