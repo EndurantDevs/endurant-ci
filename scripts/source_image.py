@@ -209,7 +209,37 @@ def configure_containerd_store():
         raise ValueError("Docker did not activate the containerd image store")
 
 
-def context():
+def queued_transfer_job(repository, run, *, producer):
+    if producer:
+        key, step = ({"EndurantDevs/healthcare-mrf-api": ("container-package", "Run complete validation stage"),
+                      "EndurantDevs/drug-api": ("validate", "Run complete public source validation")}[repository])
+        name, steps = PRODUCERS[repository], {step}
+    else:
+        key, name = "dev-image-publication", JOB
+        steps = {"Authenticate DEV image input", "Stage DEV image publication intent",
+                 "Publish validated DEV image", "Reconcile DEV image publication"}
+    runner = os.environ.get("RUNNER_NAME", "")
+    if os.environ.get("GITHUB_JOB") != key or not runner.strip():
+        raise ValueError("queued image transfer requires its exact job and runner")
+    jobs = artifacts.effective_jobs(repository, run)
+    own = [job for job in jobs if job["name"] == name]
+    if len(own) != 1:
+        raise ValueError("queued image transfer requires one exact own job")
+    job = github.api(repository, f"actions/jobs/{own[0]['id']}")
+    expected = {"id": own[0]["id"], "name": name, "run_id": run["id"],
+                "run_attempt": run["run_attempt"], "head_sha": run["head_sha"],
+                "head_branch": run["head_branch"], "runner_name": runner}
+    active = [step for step in job.get("steps", []) if step.get("status") == "in_progress"]
+    if (any(type(job.get(field)) is not int for field in ("id", "run_id", "run_attempt"))
+            or any(job.get(field) != value for field, value in expected.items())
+            or job.get("status") != "in_progress" or job.get("conclusion") is not None
+            or not job.get("started_at") or job.get("completed_at") is not None
+            or len(active) != 1 or active[0].get("name") not in steps
+            or active[0].get("conclusion") is not None):
+        raise ValueError("queued image transfer requires its exact active job and trusted step")
+
+
+def context(*, producer=False):
     repository = os.environ["GITHUB_REPOSITORY"]
     revision = os.environ["CI_REVISION"]
     if (repository not in IMAGES or not github.SHA.fullmatch(revision) or set(revision) == {"0"}
@@ -231,12 +261,15 @@ def context():
         expected["head_branch"] = payload["pull_request"]["head"]["ref"]
         head_repository = payload["pull_request"]["head"]["repo"]["full_name"]
     run = github.api(repository, f"actions/runs/{identifiers[0]}")
-    if not (run.get("status") == "in_progress" and run.get("conclusion") is None
+    if not (run.get("status") in {"in_progress", "queued"} and run.get("conclusion") is None
             and type(run.get("workflow_id")) is int and run["workflow_id"] > 0
             and run.get("repository", {}).get("full_name") == repository
             and run.get("head_repository", {}).get("full_name") == head_repository
             and all(run.get(key) == value for key, value in expected.items())):
         raise ValueError("image transfer run, source, or attempt changed")
+    if run["status"] == "queued":
+        # A later matrix wave can queue the aggregate while this exact job is running.
+        queued_transfer_job(repository, run, producer=producer)
     return identity, run
 
 
@@ -251,7 +284,7 @@ def producer_identity(expected):
 def export_image(image):
     if not DIGEST.fullmatch(image):
         raise ValueError("export requires the immutable image ID captured before testing")
-    identity, run = context()
+    identity, run = context(producer=True)
     if run["event"] != "push" or identity["source_branch"] != "dev":
         raise ValueError("image export is restricted to DEV pushes")
     source = Path(os.environ["SOURCE_ROOT"])
