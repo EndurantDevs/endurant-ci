@@ -14,6 +14,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event, Lock
 
 import source_identity as github
 
@@ -492,24 +493,78 @@ def cleanup(repository, expected):
         print("No retained intermediates to remove.")
         return 0
     deleted = 0
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        for artifact in candidates:
-            # Every guard remains fresh for each delete; only independent requests overlap.
-            jobs, current, *fresh_proofs = deletion_snapshot(executor, repository, expected, artifact, proofs)
-            if jobs != consumers:
-                raise ValueError("retained intermediates: validation job inventory changed")
-            if current is not None and (not available(current, expected)
-                    or any(current.get(key) != artifact.get(key) for key in ARTIFACT_FIELDS)):
-                raise ValueError("retained intermediates: artifact identity changed")
-            for proof, measurement in zip(proofs, fresh_proofs):
-                if not current_evidence(measurement, expected) or any(measurement.get(key) != proof.get(key) for key in ARTIFACT_FIELDS):
-                    raise ValueError("retained intermediates: current measurement or publication changed")
-            if not current_run(github.api(repository, run_path), expected, repository):
-                raise ValueError(f"stopped after {deleted} deletions: producing run changed")
-            if current is not None:
-                github.api(repository, f"actions/artifacts/{artifact['id']}", "DELETE")
-                deleted += 1
-                time.sleep(1)
+    stopped, deletion_lock = Event(), Lock()
+    print(f"Validating {len(candidates)} cleanup candidates with two bounded workers.", flush=True)
+    futures, primary = [], None
+    try:
+        with ThreadPoolExecutor(max_workers=4) as executor, ThreadPoolExecutor(max_workers=2) as workers:
+            def remove(artifact):
+                nonlocal deleted
+                if stopped.is_set():
+                    return
+                try:
+                    remove_validated(artifact)
+                except BaseException:
+                    stopped.set()
+                    raise
+
+            def remove_validated(artifact):
+                nonlocal deleted
+                # Every guard remains fresh for each delete; only independent requests overlap.
+                jobs, current, *fresh_proofs = deletion_snapshot(executor, repository, expected, artifact, proofs)
+                if jobs != consumers:
+                    raise ValueError("retained intermediates: validation job inventory changed")
+                if current is not None and (not available(current, expected)
+                        or any(current.get(key) != artifact.get(key) for key in ARTIFACT_FIELDS)):
+                    raise ValueError("retained intermediates: artifact identity changed")
+                for proof, measurement in zip(proofs, fresh_proofs):
+                    if not current_evidence(measurement, expected) or any(measurement.get(key) != proof.get(key) for key in ARTIFACT_FIELDS):
+                        raise ValueError("retained intermediates: current measurement or publication changed")
+                with deletion_lock:
+                    if stopped.is_set():
+                        return
+                    if not current_run(github.api(repository, run_path), expected, repository):
+                        raise ValueError(f"stopped after {deleted} deletions: producing run changed")
+                    if current is not None and not stopped.is_set():
+                        github.api(repository, f"actions/artifacts/{artifact['id']}", "DELETE")
+                        deleted += 1
+                        print(f"Deleted {deleted} validated intermediates.", flush=True)
+                        time.sleep(1)
+
+            try:
+                for artifact in candidates:
+                    futures.append(workers.submit(remove, artifact))
+                for future in futures:
+                    if not future.cancelled():
+                        future.result()
+            except BaseException as error:
+                primary = error
+                raise
+            finally:
+                stopped.set()
+                for future in futures:
+                    try:
+                        future.cancel()
+                    except BaseException as error:
+                        if primary is None:
+                            primary = error
+    except BaseException as error:
+        stopped.set()
+        if primary is None:
+            primary = error
+    finally:
+        for future in futures:
+            while True:
+                try:
+                    future.result()
+                    break
+                except BaseException as error:
+                    if primary is None and not future.cancelled():
+                        primary = error
+                    if future.done():
+                        break
+    if primary is not None:
+        raise primary
     print(f"Deleted {deleted} validated intermediates; preserved final measurement and unknown artifacts.")
     return deleted
 

@@ -62,27 +62,27 @@ class JobPaginationChecks(unittest.TestCase):
         self.run = run()
         self.repository = self.run["repository"]["full_name"]
         self.path = "actions/runs/123/attempts/2/jobs"
-        self.jobs = [{**jobs()[0], "id": index + 1, "name": f"check-{index}"} for index in range(80)]
+        self.jobs = [{**jobs()[0], "id": index + 1, "name": f"check-{index}"} for index in range(120)]
 
-    def test_job_pages_use_thirty_rows_including_exact_multiples(self):
-        for count in (0, 30, 60, 80):
+    def test_job_pages_use_fifty_rows_including_exact_multiples(self):
+        for count in (0, 50, 100, 120):
             rows = self.jobs[:count]
-            responses = [{"total_count": count, "jobs": rows[start:start + 30]}
-                         for start in range(0, count + 1, 30)]
+            responses = [{"total_count": count, "jobs": rows[start:start + 50]}
+                         for start in range(0, count + 1, 50)]
             with self.subTest(count=count), patch.object(cleanup.github, "api", side_effect=responses) as api:
                 self.assertEqual(cleanup.attempt_jobs(self.repository, self.run, 2), rows)
             self.assertEqual([call.args for call in api.call_args_list], [
-                (self.repository, f"{self.path}?per_page=30&page={page}")
+                (self.repository, f"{self.path}?per_page=50&page={page}")
                 for page in range(1, len(responses) + 1)
             ])
 
     def test_later_job_pages_require_a_stable_integer_count_and_complete_schema(self):
-        first = {"total_count": 80, "jobs": self.jobs[:30]}
-        invalid = [None, [], {}, {"total_count": 80}, {"jobs": self.jobs[30:60]},
-                   *({"total_count": value, "jobs": self.jobs[30:60]}
+        first = {"total_count": 80, "jobs": self.jobs[:50]}
+        invalid = [None, [], {}, {"total_count": 80}, {"jobs": self.jobs[50:80]},
+                   *({"total_count": value, "jobs": self.jobs[50:80]}
                      for value in (None, True, "80", 80.0, -1, 79, 81)),
                    *({"total_count": 80, "jobs": value}
-                     for value in (None, {}, "jobs", [None] * 30, self.jobs[30:61], self.jobs[30:50], []))]
+                     for value in (None, {}, "jobs", [None] * 30, self.jobs[:51], self.jobs[50:70], []))]
         for response in invalid:
             with self.subTest(response=response), patch.object(
                     cleanup.github, "api", side_effect=[first, response]) as api, \
@@ -91,10 +91,10 @@ class JobPaginationChecks(unittest.TestCase):
             self.assertEqual(api.call_count, 2)
 
     def test_job_count_must_match_the_complete_last_page(self):
-        for total, last in ((80, self.jobs[60:79]), (79, self.jobs[60:80]),
-                            (60, [self.jobs[60]]), (80, [])):
+        for total, last in ((80, self.jobs[50:79]), (79, self.jobs[50:80]),
+                            (50, [self.jobs[50]]), (80, [])):
             responses = [{"total_count": total, "jobs": values}
-                         for values in (self.jobs[:30], self.jobs[30:60], last)]
+                         for values in (self.jobs[:50], last)]
             with self.subTest(total=total, last=len(last)), patch.object(
                     cleanup.github, "api", side_effect=responses), \
                     self.assertRaisesRegex(ValueError, "job inventory"):
@@ -102,35 +102,35 @@ class JobPaginationChecks(unittest.TestCase):
 
     def test_later_job_page_failure_prevents_artifact_access_and_deletion(self):
         failure = OSError("synthetic later page failure")
-        responses = [self.run, self.run, {"total_count": 80, "jobs": self.jobs[:30]}, failure]
+        responses = [self.run, self.run, {"total_count": 80, "jobs": self.jobs[:50]}, failure]
         with patch.object(cleanup.github, "api", side_effect=responses) as api, \
                 patch.object(cleanup.time, "sleep") as sleep, self.assertRaises(OSError) as raised:
             cleanup.cleanup(self.repository, self.run)
         self.assertIs(raised.exception, failure)
         self.assertEqual([call.args for call in api.call_args_list], [
             (self.repository, "actions/runs/123"), (self.repository, "actions/runs/123"),
-            (self.repository, f"{self.path}?per_page=30&page=1"),
-            (self.repository, f"{self.path}?per_page=30&page=2"),
+            (self.repository, f"{self.path}?per_page=50&page=1"),
+            (self.repository, f"{self.path}?per_page=50&page=2"),
         ])
         sleep.assert_not_called()
 
     def test_last_job_page_cannot_duplicate_or_substitute_provenance(self):
         for change in ({"id": 1}, {"name": "check-0"}, {"run_id": 999}, {"run_attempt": 1},
                        {"run_attempt": 2.0}, {"head_sha": "b" * 40}):
-            rows = deepcopy(self.jobs)
+            rows = deepcopy(self.jobs[:80])
             rows[-1].update(change)
-            responses = [{"total_count": 80, "jobs": rows[start:start + 30]} for start in (0, 30, 60)]
+            responses = [{"total_count": 80, "jobs": rows[start:start + 50]} for start in (0, 50)]
             with self.subTest(change=change), patch.object(cleanup.github, "api", side_effect=responses), \
                     self.assertRaisesRegex(ValueError, "ambiguous run-attempt provenance"):
                 cleanup.attempt_jobs(self.repository, self.run, 2)
 
-    def test_job_pagination_still_stops_after_one_hundred_full_pages(self):
+    def test_job_pagination_preserves_the_three_thousand_item_bound(self):
         with patch.object(cleanup.github, "api", return_value={
-                "total_count": 3000, "jobs": self.jobs[:30]}) as api, \
+                "total_count": 3000, "jobs": self.jobs[:50]}) as api, \
                 self.assertRaisesRegex(ValueError, "bounded pagination limit"):
             list(cleanup.github.pages(self.repository, self.path, "jobs"))
-        self.assertEqual(api.call_count, 100)
-        self.assertEqual(api.call_args.args, (self.repository, f"{self.path}?per_page=30&page=100"))
+        self.assertEqual(api.call_count, 60)
+        self.assertEqual(api.call_args.args, (self.repository, f"{self.path}?per_page=50&page=60"))
 
     def test_non_job_pagination_keeps_one_hundred_row_pages(self):
         rows = [{"id": index} for index in range(120)]
@@ -226,7 +226,7 @@ class ArtifactCleanupChecks(unittest.TestCase):
                 if job_reads > 3 and refreshed_jobs is not None:
                     current = refreshed_jobs
                 page = int(path.rsplit("=", 1)[1])
-                return {"total_count": len(current), "jobs": deepcopy(current[(page - 1) * 30:page * 30])}
+                return {"total_count": len(current), "jobs": deepcopy(current[(page - 1) * 50:page * 50])}
             if "per_page=100&page=" in path:
                 self.assertFalse(deleted, "pagination must finish before deleting")
                 page = int(path.rsplit("=", 1)[1])
@@ -293,6 +293,170 @@ class ArtifactCleanupChecks(unittest.TestCase):
             future.result.assert_called_once_with()
         self.assertEqual(executor.submit.call_count, 4)
 
+    def test_two_candidates_validate_concurrently_with_all_guards_and_serial_deletions(self):
+        barrier = threading.Barrier(2, timeout=3)
+        original = cleanup.deletion_snapshot
+        active = peak = 0
+        lock = threading.Lock()
+
+        def snapshot(*args):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            try:
+                barrier.wait()
+                return original(*args)
+            finally:
+                with lock:
+                    active -= 1
+
+        items = [artifact(1, "mrf-rust-coverage-123-2"),
+                 artifact(2, "healthcare-rust-debug-123-2"),
+                 artifact(3, "mrf-python-coverage-main-0-123-2"),
+                 artifact(4, "mrf-python-coverage-main-1-123-2"),
+                 artifact(5, "healthcare-public-measurement-123-2")]
+        with patch.object(cleanup, "deletion_snapshot", side_effect=snapshot):
+            deleted, calls = self.exercise(items)
+        self.assertCountEqual(deleted, [1, 2, 3, 4])
+        self.assertEqual(peak, 2)
+        self.assertEqual(active, 0)
+        self.assertEqual(sum("/jobs?" in path for _, path in calls), 3 + 4)
+        self.assertEqual(sum(path == "actions/artifacts/5" for _, path in calls), 4)
+        self.assertEqual(sum(path == "actions/runs/123" for _, path in calls), 4 + 4)
+
+    def test_guard_failure_stops_other_worker_before_delete_and_drains_it(self):
+        barrier = threading.Barrier(2, timeout=3)
+        stopped = threading.Event()
+        started, finished = [], []
+        failure = ValueError("synthetic artifact guard failure")
+
+        def snapshot(executor, repository, expected, item, proofs):
+            started.append(item["id"])
+            barrier.wait()
+            if item["id"] == 1:
+                raise failure
+            self.assertTrue(stopped.wait(3))
+            finished.append(item["id"])
+            return [sorted((job["id"], job["name"], job["run_attempt"], job["conclusion"]) for job in jobs()),
+                    item, *proofs]
+
+        items = [artifact(1, "mrf-rust-coverage-123-2"),
+                 artifact(2, "healthcare-rust-debug-123-2"),
+                 artifact(3, "mrf-python-coverage-main-0-123-2"),
+                 artifact(4, "mrf-python-coverage-main-1-123-2"),
+                 artifact(5, "healthcare-public-measurement-123-2")]
+        with patch.object(cleanup, "Event", return_value=stopped), \
+                patch.object(cleanup, "deletion_snapshot", side_effect=snapshot), \
+                self.assertRaises(ValueError) as raised:
+            self.exercise(items)
+        self.assertIs(raised.exception, failure)
+        self.assertCountEqual(started, [1, 2])
+        self.assertEqual(finished, [2])
+
+    def test_cleanup_progress_is_flushed_and_contains_no_artifact_payload(self):
+        items = [artifact(1, "mrf-rust-coverage-123-2"),
+                 artifact(2, "healthcare-public-measurement-123-2")]
+        with patch.object(cleanup, "print", create=True) as output:
+            self.assertEqual(self.exercise(items)[0], [1])
+        self.assertEqual(output.call_args_list[0].args,
+                         ("Validating 1 cleanup candidates with two bounded workers.",))
+        self.assertEqual(output.call_args_list[1].args, ("Deleted 1 validated intermediates.",))
+        self.assertTrue(all(call.kwargs == {"flush": True} for call in output.call_args_list[:2]))
+
+    def test_coordinator_failures_stop_before_shutdown_and_observe_started_workers(self):
+        real_pool = cleanup.ThreadPoolExecutor
+        for phase, failure_type in (("submit", RuntimeError), ("submit", KeyboardInterrupt),
+                                    ("submit-with-shutdown-error", RuntimeError),
+                                    ("collect", KeyboardInterrupt)):
+            with self.subTest(phase=phase, failure_type=failure_type):
+                failure = failure_type("synthetic coordinator failure")
+                stopped, release = threading.Event(), threading.Event()
+                started = threading.Barrier(3, timeout=3)
+                registered, stopped_at_exit, deleted = [], [], []
+                expected = {**run(), "measurement_artifact_id": 5}
+                consumers = sorted((job["id"], job["name"], job["run_attempt"], job["conclusion"])
+                                   for job in jobs())
+                items = [artifact(1, "mrf-rust-coverage-123-2"),
+                         artifact(2, "healthcare-rust-debug-123-2"),
+                         artifact(3, "mrf-python-coverage-main-0-123-2"),
+                         artifact(5, "healthcare-public-measurement-123-2")]
+
+                class TrackedFuture:
+                    def __init__(self, future, first):
+                        self.future, self.first, self.observed = future, first, 0
+
+                    def cancelled(self):
+                        if phase == "collect" and self.first:
+                            self.first = False
+                            started.wait()
+                            raise failure
+                        return self.future.cancelled()
+
+                    def cancel(self):
+                        return self.future.cancel()
+
+                    def done(self):
+                        return self.future.done()
+
+                    def result(self):
+                        self.observed += 1
+                        return self.future.result()
+
+                class CandidatePool:
+                    def __init__(self):
+                        self.pool, self.submitted = real_pool(max_workers=2), 0
+
+                    def __enter__(self):
+                        self.pool.__enter__()
+                        return self
+
+                    def __exit__(self, *args):
+                        stopped_at_exit.append(stopped.is_set())
+                        release.set()
+                        result = self.pool.__exit__(*args)
+                        if phase == "submit-with-shutdown-error":
+                            raise OSError("synthetic secondary shutdown failure")
+                        return result
+
+                    def submit(self, *args):
+                        self.submitted += 1
+                        if phase.startswith("submit") and self.submitted == 3:
+                            started.wait()
+                            raise failure
+                        future = TrackedFuture(self.pool.submit(*args), self.submitted == 1)
+                        registered.append(future)
+                        return future
+
+                def snapshot(executor, repository, current, item, proofs):
+                    started.wait()
+                    self.assertTrue(release.wait(3))
+                    return [consumers, item, *proofs]
+
+                def api(repository, path, method="GET"):
+                    if method == "DELETE":
+                        deleted.append(path)
+                    else:
+                        self.assertEqual(path, "actions/runs/123")
+                        return expected
+
+                def pool_factory(*, max_workers):
+                    return real_pool(max_workers=max_workers) if max_workers == 4 else CandidatePool()
+
+                with patch.object(cleanup, "ThreadPoolExecutor", side_effect=pool_factory), \
+                        patch.object(cleanup, "Event", return_value=stopped), \
+                        patch.object(cleanup, "stable_consumers", return_value=consumers), \
+                        patch.object(cleanup.github, "pages", return_value=iter(items)), \
+                        patch.object(cleanup.github, "api", side_effect=api), \
+                        patch.object(cleanup, "deletion_snapshot", side_effect=snapshot), \
+                        patch.object(cleanup.time, "sleep"), patch("sys.stdout", new=io.StringIO()), \
+                        self.assertRaises(failure_type) as raised:
+                    cleanup.cleanup(expected["repository"]["full_name"], expected)
+                self.assertIs(raised.exception, failure)
+                self.assertEqual(stopped_at_exit, [True])
+                self.assertEqual(deleted, [])
+                self.assertTrue(all(future.future.done() and future.observed for future in registered))
+
     def test_eighty_one_jobs_keep_all_per_delete_json_calls_and_pacing(self):
         expected = {**run(), "event": "push", "head_branch": "dev"}
         inventory = [{**jobs()[0], "id": index + 1, "name": f"check-{index}"} for index in range(80)]
@@ -302,9 +466,9 @@ class ArtifactCleanupChecks(unittest.TestCase):
                  artifact(3, "healthcare-public-measurement-123-2"),
                  artifact(4, "healthcare-public-image-123-2", 90)]
         deleted, calls = self.exercise(items, expected, job_inventory=inventory)
-        self.assertEqual(deleted, [1, 2])
-        self.assertEqual(len(calls), 14 + 2 * 8)
-        self.assertEqual(sum("/jobs?" in path for _, path in calls), 9 + 2 * 3)
+        self.assertCountEqual(deleted, [1, 2])
+        self.assertEqual(len(calls), 11 + 2 * 7)
+        self.assertEqual(sum("/jobs?" in path for _, path in calls), 6 + 2 * 2)
 
     def test_missing_tested_archive_resumes_only_with_bound_publication_receipt(self):
         expected = {**run(), "event": "push", "head_branch": "dev", "image_artifact_id": 1}
@@ -450,7 +614,7 @@ class ArtifactCleanupChecks(unittest.TestCase):
                 cleanup.subprocess.CompletedProcess([], 0, raw)) as command:
             deleted, _ = self.exercise(remaining, {**run(), "event": "push", "head_branch": "dev"},
                                       publication_reader=reader)
-        self.assertEqual(deleted, [1, 4, 5])
+        self.assertCountEqual(deleted, [1, 4, 5])
         self.assertEqual(command.call_count, 1)
 
     def test_only_known_exact_attempt_intermediates_are_deleted_after_complete_pagination(self):
@@ -468,11 +632,13 @@ class ArtifactCleanupChecks(unittest.TestCase):
             keep.extend(artifact(keep_id + 5 + index, f"unknown-{index}") for index in range(100))
             with self.subTest(repository=repository):
                 deleted, calls = self.exercise(intermediates + keep, expected)
-                self.assertEqual(deleted, [item["id"] for item in intermediates])
+                self.assertCountEqual(deleted, [item["id"] for item in intermediates])
                 self.assertIn(("GET", "actions/runs/123/artifacts?per_page=100&page=2"), calls)
+                previous_delete = -1
                 for index, (method, _) in enumerate(calls):
                     if method == "DELETE":
-                        self.assertEqual(calls[index - 1], ("GET", "actions/runs/123"))
+                        self.assertIn(("GET", "actions/runs/123"), calls[previous_delete + 1:index])
+                        previous_delete = index
 
     def test_completed_failed_cancelled_wrong_workflow_and_repository_preserve_everything(self):
         for changes in ({"status": "completed"}, {"status": "queued"}, {"conclusion": "failure"},

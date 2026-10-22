@@ -1,27 +1,26 @@
 """Image transfer boundaries, plus an explicitly enabled GitHub Docker check."""
 
-from copy import deepcopy
-from datetime import datetime, timedelta, timezone
 import gzip
 import hashlib
 import io
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
-import tempfile
 import tarfile
+import tempfile
+import unittest
 import urllib.error
 import urllib.response
 import uuid
 import zipfile
-import unittest
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import source_image as transfer
-
 
 REPOSITORY = "EndurantDevs/drug-api"
 IDENTITY = {"repository": REPOSITORY, "source_sha": "a" * 40, "base_sha": "b" * 40,
@@ -189,7 +188,7 @@ class AdmissionChecks(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.admit({**run, "event": "pull_request"}, changed, items)
 
-    def test_authenticated_pr_noop_finds_publisher_on_third_job_page(self):
+    def test_authenticated_pr_noop_finds_publisher_on_second_job_page(self):
         run, jobs, _ = self.fixtures()
         jobs = jobs[:-1] + [{**jobs[2], "id": index + 5, "name": f"check-{index}"}
                            for index in range(76)] + jobs[-1:]
@@ -206,9 +205,9 @@ class AdmissionChecks(unittest.TestCase):
                 return deepcopy(pr)
             if path == "actions/runs/123":
                 return deepcopy(run)
-            for page in (1, 2, 3):
-                if path == f"actions/runs/123/attempts/2/jobs?per_page=30&page={page}":
-                    return {"total_count": 80, "jobs": deepcopy(jobs[(page - 1) * 30:page * 30])}
+            for page in (1, 2):
+                if path == f"actions/runs/123/attempts/2/jobs?per_page=50&page={page}":
+                    return {"total_count": 80, "jobs": deepcopy(jobs[(page - 1) * 50:page * 50])}
             raise AssertionError(path)
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -226,7 +225,7 @@ class AdmissionChecks(unittest.TestCase):
                 self.assertIsNone(transfer.admit())
         self.assertEqual([call.args[1] for call in calls.call_args_list], [
             "pulls/7", "actions/runs/123",
-            *(f"actions/runs/123/attempts/2/jobs?per_page=30&page={page}" for page in (1, 2, 3)),
+            *(f"actions/runs/123/attempts/2/jobs?per_page=50&page={page}" for page in (1, 2)),
         ])
         command.assert_called_once_with("git", "-C", str(transfer.ROOT), "rev-parse", "HEAD")
         registry.assert_not_called()
