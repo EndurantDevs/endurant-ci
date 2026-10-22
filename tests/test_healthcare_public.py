@@ -68,6 +68,14 @@ CUSTOM_IMPORT_SNAPSHOT_READ_TESTS = (
     "tests/test_custom_import_retained_homes_postgres.py",
     "tests/test_custom_import_revision_home_postgres.py",
 )
+CUSTOM_IMPORT_BULK_NATIVE_TESTS = (
+    "tests/test_custom_import_bulk_snapshot_writers_postgres.py",
+    "tests/test_custom_import_legacy_snapshot_writers_postgres.py",
+    "tests/test_custom_import_materialization_set_postgres.py",
+    "tests/test_custom_import_writer_cutover_postgres.py",
+    "tests/test_custom_import_build_counts_postgres.py",
+    "tests/test_custom_import_bulk_cutover_reads_postgres.py",
+)
 REGISTRY_SOURCE_CUSTODY_TESTS = (
     "tests/test_network_cms_registry_source_pair_postgres.py",
     "tests/test_network_cms_registry_complete_publication_postgres.py",
@@ -5027,6 +5035,113 @@ printf 'complete\n' >> "$CALL_LOG"
                     self.assertFalse(Path(report).exists())
                 self.assertEqual(list(runner.iterdir()), [])
 
+    def test_bulk_snapshot_groups_preserve_inputs_and_cleanup_before_failure_returns(
+        self,
+    ):
+        """Exercise real scoped orchestration with only database and pytest transports replaced."""
+        paths = CUSTOM_IMPORT_BULK_NATIVE_TESTS
+        layouts = ((), paths[:1], paths[-1:], paths[::2], paths[1:5], paths)
+        cases = [(layout, "") for layout in layouts] + [
+            (paths, paths[0]),
+            (paths, paths[-1]),
+        ]
+        for present, failure in cases:
+            with (
+                self.subTest(present=present, failure=failure),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                (root / "tests").mkdir()
+                for path in present:
+                    (root / path).touch()
+                call_log = root / "calls"
+                coverage = str(root / ".coverage")
+                addopts = "--cov=process --cov-branch --cov-append"
+                environment = {
+                    **os.environ,
+                    "SOURCE_ROOT": str(root),
+                    "CI_ROOT": str(ROOT),
+                    "RUNNER_TEMP": str(root),
+                    "CALL_LOG": str(call_log),
+                    "HLTHPRT_DB_USER": "synthetic",
+                    "HLTHPRT_DB_PASSWORD": "synthetic",
+                    "COVERAGE_FILE": coverage,
+                    "PYTEST_ADDOPTS": addopts,
+                    "FAILURE_PATH": failure,
+                }
+                dsn_prefix = (
+                    f"postgresql://{environment['HLTHPRT_DB_USER']}:{environment['HLTHPRT_DB_PASSWORD']}"
+                    "@127.0.0.1:5440/"
+                )
+                script = (
+                    CHECK_FUNCTIONS
+                    + r"""
+create_test_database() { printf 'create\t%s\n' "$1" >> "$CALL_LOG"; }
+drop_test_database() { printf 'drop\t%s\n' "$1" >> "$CALL_LOG"; }
+psql() { :; }
+timeout() {
+  printf 'timeout\t%s\t%s\n' "$1" "$2" >> "$CALL_LOG"
+  shift 2
+  "$@"
+}
+python() {
+  printf 'pytest\t%s\t%s\t%s\t%s\n' "$HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN" \
+    "$COVERAGE_FILE" "$PYTEST_ADDOPTS" "$*" >> "$CALL_LOG"
+  local path
+  for path in "$@"; do
+    if [[ "$path" = "$FAILURE_PATH" ]]; then return 17; fi
+  done
+}
+run_custom_import_verification_postgres() { printf 'complete\n' >> "$CALL_LOG"; }
+status=0
+run_core_postgres postgresql://synthetic core-snapshots-2 || status=$?
+exit "$status"
+"""
+                )
+                result = subprocess.run(
+                    ["bash", "-eu"],
+                    input=script,
+                    cwd=root,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 17 if failure else 0, result.stderr)
+                calls = [line.split("\t") for line in call_log.read_text().splitlines()]
+                expected = [
+                    list(present[index : index + 3])
+                    for index in range(0, len(present), 3)
+                ]
+                if failure:
+                    stopped = next(
+                        index
+                        for index, group in enumerate(expected)
+                        if failure in group
+                    )
+                    expected = expected[: stopped + 1]
+                native = [call for call in calls if call[0] == "pytest"]
+                self.assertEqual([call[4].split()[3:] for call in native], expected)
+                self.assertTrue(
+                    all(call[2:4] == [coverage, addopts] for call in native)
+                )
+                created = [call[1] for call in calls if call[0] == "create"]
+                self.assertEqual(len(created), len(expected))
+                self.assertEqual(len(set(created)), len(created))
+                self.assertEqual(
+                    [call[1] for call in calls if call[0] == "drop"], created
+                )
+                self.assertEqual(
+                    [call for call in calls if call[0] == "timeout"],
+                    [["timeout", "--foreground", "295s"] for _ in expected],
+                )
+                self.assertEqual(calls.count(["complete"]), int(not failure))
+                self.assertEqual(
+                    [call[1] for call in native],
+                    [dsn_prefix + name for name in created],
+                )
+
     def test_custom_import_postgres_tests_use_bounded_scoped_databases(self):
         """Route all import suites through bounded native groups, not skipped shards."""
 
@@ -5080,18 +5195,11 @@ printf 'complete\n' >> "$CALL_LOG"
         family_test_paths = required_test_paths[1:]
         snapshot_test_paths = CUSTOM_IMPORT_SNAPSHOT_READ_TESTS
         rejection_test_paths = (CUSTOM_IMPORT_REJECTION_CAPABILITY[-1],)
-        bulk_test_paths = (
-            "tests/test_custom_import_bulk_snapshot_writers_postgres.py",
-            "tests/test_custom_import_legacy_snapshot_writers_postgres.py",
-            "tests/test_custom_import_materialization_set_postgres.py",
-            "tests/test_custom_import_writer_cutover_postgres.py",
-            "tests/test_custom_import_build_counts_postgres.py",
-            "tests/test_custom_import_bulk_cutover_reads_postgres.py",
-        )
+        bulk_test_paths = CUSTOM_IMPORT_BULK_NATIVE_TESTS
         test_groups = (lifecycle_test_paths, materialization_test_paths, capture_test_paths,
                        build_test_paths[:4], operator_test_paths[:4], operator_test_paths[4:],
                        build_test_paths[4:], (installed_test_path, acquisition_test_path), family_test_paths,
-                       snapshot_test_paths, rejection_test_paths, bulk_test_paths)
+                       snapshot_test_paths, rejection_test_paths, bulk_test_paths[:3], bulk_test_paths[3:])
         groups_by_lane = {"core-imports": test_groups[:2] + test_groups[3:4],
                           "core-imports-2": test_groups[4:6],
                           "core-services": (capture_test_paths,), "core-snapshots": test_groups[6:9],
@@ -5253,7 +5361,7 @@ fi
                 self.assertEqual(len(routes), expected_route_count)
                 if not failure_path and all(path in present_paths for path in test_paths):
                     if lane in ("core-snapshots", "core-snapshots-2"):
-                        self.assertEqual(len(routes), 4 if lane == "core-snapshots" else 3)
+                        self.assertEqual(len(routes), 4)
                 databases = [route.split()[0] for route in routes]
                 self.assertEqual(len(databases), len(set(databases)))
                 for route in routes:
