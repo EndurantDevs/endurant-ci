@@ -99,21 +99,21 @@ class SelectedProducerTests(unittest.TestCase):
 
     def test_paginates_all_attempts_before_choosing_latest_job(self):
         first = [
-            self.job(100 + index, 1, f"Complete test {index}") for index in range(100)
+            self.job(100 + index, 1, f"Complete test {index}") for index in range(50)
         ]
         second = [self.job(300, 2, "Complete test 0", conclusion="failure")]
         with patch.object(
             common, "api", side_effect=[{"jobs": first}, {"jobs": second}]
         ) as read:
             selected = verify.selected_producers(self.run, REPOSITORY)
-        self.assertEqual(len(selected), 99)
+        self.assertEqual(len(selected), 49)
         self.assertNotIn(100, selected)
         self.assertNotIn(300, selected)
         self.assertEqual(
             [call.args[1] for call in read.call_args_list],
             [
-                "actions/runs/21/jobs?filter=all&per_page=100&page=1",
-                "actions/runs/21/jobs?filter=all&per_page=100&page=2",
+                "actions/runs/21/jobs?filter=all&per_page=50&page=1",
+                "actions/runs/21/jobs?filter=all&per_page=50&page=2",
             ],
         )
 
@@ -122,18 +122,23 @@ class SelectedProducerTests(unittest.TestCase):
             {
                 "jobs": [
                     self.job(
-                        100 + page * 100 + index, 1, f"Complete test {page}-{index}"
+                        100 + page * 50 + index, 1, f"Complete test {page}-{index}"
                     )
-                    for index in range(100)
+                    for index in range(50)
                 ]
             }
-            for page in range(10)
+            for page in range(20)
         ]
         with (
             patch.object(common, "api", side_effect=pages),
             self.assertRaises(ValueError),
         ):
             verify.selected_producers(self.run, REPOSITORY)
+
+    def test_rejects_a_page_larger_than_requested(self):
+        rows = [self.job(100 + index, 1, f"Complete test {index}") for index in range(51)]
+        with self.assertRaises(ValueError):
+            self.select(rows)
 
 
 class RetainedAttemptVerificationTests(unittest.TestCase):
@@ -227,7 +232,7 @@ class RetainedAttemptVerificationTests(unittest.TestCase):
         self.reads.append(path)
         values = {
             "actions/runs/21/artifacts?per_page=100": {"artifacts": self.artifacts},
-            "actions/runs/21/jobs?filter=all&per_page=100&page=1": {
+            "actions/runs/21/jobs?filter=all&per_page=50&page=1": {
                 "jobs": [self.current_job]
             },
             "actions/runs/21/attempts/1": self.retained,
@@ -318,7 +323,7 @@ class RetainedAttemptVerificationTests(unittest.TestCase):
             self.latest, REPOSITORY, self.document["measurement"]["source"]
         )
         self.assertEqual(references[0]["artifact_id"], 50)
-        self.assertIn("actions/runs/21/jobs?filter=all&per_page=100&page=1", self.reads)
+        self.assertIn("actions/runs/21/jobs?filter=all&per_page=50&page=1", self.reads)
         self.assertIn("actions/runs/21/attempts/1", self.reads)
         self.assertEqual(self.refresh({}), [])
 

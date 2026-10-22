@@ -188,13 +188,15 @@ def verify(
 def selected_producers(run, repository):
     """Select current native job executions without reviving a superseded failed job."""
     selected, identifiers = {}, set()
-    for page in range(1, 11):
+    page_size = 50
+    for page in range(1, 21):
         rows = engine.api(
             repository,
-            f"actions/runs/{run['id']}/jobs?filter=all&per_page=100&page={page}",
+            f"actions/runs/{run['id']}/jobs?filter=all&per_page={page_size}&page={page}",
         )["jobs"]
         engine.equivalent.require(
-            isinstance(rows, list), "Current native job inventory is invalid"
+            isinstance(rows, list) and len(rows) <= page_size,
+            "Current native job inventory is invalid",
         )
         for job in rows:
             engine.equivalent.require(
@@ -217,7 +219,7 @@ def selected_producers(run, repository):
             )
             if previous is None or previous["run_attempt"] < job["run_attempt"]:
                 selected[job["name"]] = job
-        if len(rows) < 100:
+        if len(rows) < page_size:
             break
     else:
         raise ValueError("Current native job inventory exceeds its bounded window")
