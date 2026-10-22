@@ -444,6 +444,47 @@ def artifact_name(producer):
     return f"common-tests-{producer['run_id']}-{producer['run_attempt']}-{producer['job_id']}"
 
 
+def attempt_jobs(repository, run):
+    """Read the complete bounded native job inventory for one workflow attempt."""
+    result, identifiers = [], set()
+    total = None
+    for page in range(1, 21):
+        suffix = "" if page == 1 else f"&page={page}"
+        document = api(
+            repository,
+            f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=50{suffix}",
+        )
+        rows = document.get("jobs") if isinstance(document, dict) else None
+        count = document.get("total_count") if isinstance(document, dict) else None
+        equivalent.require(
+            isinstance(rows, list)
+            and len(rows) <= 50
+            and all(isinstance(job, dict) for job in rows)
+            and type(count) is int
+            and 0 <= count < 1000
+            and (total is None or count == total),
+            "Native job inventory has invalid or changing metadata or exceeds its bounded window",
+        )
+        total = count
+        collected = len(result) + len(rows)
+        equivalent.require(
+            collected <= total and (len(rows) == 50 or collected == total),
+            "Native job inventory is incomplete or exceeds its declared count",
+        )
+        for job in rows:
+            equivalent.require(
+                type(job.get("id")) is int
+                and job["id"] > 0
+                and job["id"] not in identifiers,
+                "Native job inventory is invalid or duplicated",
+            )
+            identifiers.add(job["id"])
+            result.append(job)
+        if len(rows) < 50:
+            return result
+    raise ValueError("Native job inventory exceeds its bounded window")
+
+
 def current_producer(repository, step):
     run = api(repository, "actions/runs/" + os.environ["GITHUB_RUN_ID"])
     equivalent.require(
@@ -453,10 +494,7 @@ def current_producer(repository, step):
         and run.get("event") in {"push", "pull_request", "workflow_dispatch"},
         "Current execution is not a same-repository authorized workflow attempt",
     )
-    jobs = api(
-        repository,
-        f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100",
-    )["jobs"]
+    jobs = attempt_jobs(repository, run)
     matches = [
         job
         for job in jobs

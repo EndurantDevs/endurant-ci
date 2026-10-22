@@ -189,14 +189,28 @@ def selected_producers(run, repository):
     """Select current native job executions without reviving a superseded failed job."""
     selected, identifiers = {}, set()
     page_size = 50
+    total = None
     for page in range(1, 21):
-        rows = engine.api(
+        document = engine.api(
             repository,
             f"actions/runs/{run['id']}/jobs?filter=all&per_page={page_size}&page={page}",
-        )["jobs"]
+        )
+        rows = document.get("jobs") if isinstance(document, dict) else None
+        count = document.get("total_count") if isinstance(document, dict) else None
         engine.equivalent.require(
-            isinstance(rows, list) and len(rows) <= page_size,
-            "Current native job inventory is invalid",
+            isinstance(rows, list)
+            and len(rows) <= page_size
+            and all(isinstance(job, dict) for job in rows)
+            and type(count) is int
+            and 0 <= count < 1000
+            and (total is None or count == total),
+            "Current native job inventory has invalid or changing metadata or exceeds its bounded window",
+        )
+        total = count
+        collected = len(identifiers) + len(rows)
+        engine.equivalent.require(
+            collected <= total and (len(rows) == page_size or collected == total),
+            "Current native job inventory is incomplete or exceeds its declared count",
         )
         for job in rows:
             engine.equivalent.require(
