@@ -42,6 +42,145 @@ class Distribution:
         return "example_dependency.py,sha256=example,10\n" if name == "RECORD" else None
 
 
+class CurrentProducerPaginationTests(unittest.TestCase):
+    def setUp(self):
+        self.run = {
+            "id": 21,
+            "run_attempt": 2,
+            "repository": {"id": 10, "full_name": "example/project"},
+            "head_repository": {"id": 10},
+            "head_sha": "a" * 40,
+            "event": "push",
+            "path": ".github/workflows/ci.yml",
+        }
+        self.active = {
+            "id": 32,
+            "runner_name": "example-runner",
+            "status": "in_progress",
+            "steps": [{"name": "Complete tests", "status": "in_progress"}],
+        }
+        self.padding = [
+            {"id": 100 + index, "runner_name": "other", "steps": []}
+            for index in range(50)
+        ]
+        environment = patch.dict(
+            os.environ,
+            {
+                "GITHUB_RUN_ID": "21",
+                "GITHUB_RUN_ATTEMPT": "2",
+                "RUNNER_NAME": "example-runner",
+            },
+        )
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def test_current_producer_after_first_page_is_identified(self):
+        with patch.object(
+            common,
+            "api",
+            side_effect=[
+                self.run,
+                {"jobs": self.padding, "total_count": 51},
+                {"jobs": [self.active], "total_count": 51},
+            ],
+        ) as read:
+            producer, run = common.current_producer("example/project", "Complete tests")
+        self.assertEqual(producer["job_id"], 32)
+        self.assertEqual(run, self.run)
+        self.assertEqual(
+            [call.args[1] for call in read.call_args_list],
+            [
+                "actions/runs/21",
+                "actions/runs/21/attempts/2/jobs?per_page=50",
+                "actions/runs/21/attempts/2/jobs?per_page=50&page=2",
+            ],
+        )
+
+    def test_current_producer_ambiguity_across_pages_is_refused(self):
+        first = [self.active, *self.padding[:49]]
+        second = [{**self.active, "id": 33}]
+        with (
+            patch.object(
+                common,
+                "api",
+                side_effect=[
+                    self.run,
+                    {"jobs": first, "total_count": 51},
+                    {"jobs": second, "total_count": 51},
+                ],
+            ),
+            self.assertRaisesRegex(ValueError, "uniquely"),
+        ):
+            common.current_producer("example/project", "Complete tests")
+
+    def test_current_producer_refuses_incomplete_or_changed_inventory(self):
+        for pages in (
+            [{"jobs": [self.active], "total_count": 81}],
+            [
+                {"jobs": self.padding, "total_count": 51},
+                {"jobs": [self.active], "total_count": 52},
+            ],
+        ):
+            with (
+                self.subTest(pages=pages),
+                patch.object(common, "api", side_effect=[self.run, *pages]),
+                self.assertRaises(ValueError),
+            ):
+                common.current_producer("example/project", "Complete tests")
+
+    def test_attempt_inventory_refuses_invalid_pagination_metadata(self):
+        for document in (
+            None,
+            {"jobs": [self.active]},
+            {"jobs": [self.active], "total_count": True},
+            {"jobs": [self.active], "total_count": -1},
+            {"jobs": None, "total_count": 0},
+            {"jobs": [None], "total_count": 1},
+            {"jobs": [self.active], "total_count": 0},
+            {"jobs": [*self.padding, self.active], "total_count": 51},
+        ):
+            with (
+                self.subTest(document=document),
+                patch.object(common, "api", return_value=document),
+                self.assertRaises(ValueError),
+            ):
+                common.attempt_jobs("example/project", self.run)
+
+    def test_later_page_errors_and_duplicate_ids_never_return_partial_jobs(self):
+        failure = OSError("Synthetic unavailable page")
+        for final in (failure, {"jobs": [self.padding[0]], "total_count": 51}):
+            with (
+                self.subTest(final=final),
+                patch.object(
+                    common,
+                    "api",
+                    side_effect=[{"jobs": self.padding, "total_count": 51}, final],
+                ),
+                self.assertRaises(OSError if final is failure else ValueError),
+            ):
+                common.attempt_jobs("example/project", self.run)
+
+    def test_attempt_inventory_keeps_original_bounded_window(self):
+        for count in (999, 1000):
+            jobs = [{"id": index + 1} for index in range(count)]
+            pages = [
+                {"jobs": jobs[start : start + 50], "total_count": count}
+                for start in range(0, count, 50)
+            ]
+            with (
+                self.subTest(count=count),
+                patch.object(common, "api", side_effect=pages) as read,
+            ):
+                if count == 1000:
+                    with self.assertRaisesRegex(ValueError, "bounded window"):
+                        common.attempt_jobs("example/project", self.run)
+                else:
+                    self.assertEqual(
+                        common.attempt_jobs("example/project", self.run), jobs
+                    )
+            self.assertEqual(read.call_count, 1 if count == 1000 else 20)
+
+
 class CommonResultIntegrationTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()

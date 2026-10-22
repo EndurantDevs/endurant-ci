@@ -293,16 +293,18 @@ class CommonTestBrokerIntegrationTests(unittest.TestCase):
         responses = {
             "": {"id": 10},
             "actions/runs/21": self.current_run,
-            "actions/runs/21/attempts/2/jobs?per_page=100": {
-                "jobs": [self.current_job]
+            "actions/runs/21/attempts/2/jobs?per_page=50": {
+                "jobs": [self.current_job],
+                "total_count": 1,
             },
             "actions/jobs/32": self.current_job,
             "actions/workflows/ci.yml/runs?status=success&per_page=30": {
                 "workflow_runs": [self.current_run, self.original_run]
             },
             "actions/runs/20": self.original_run,
-            "actions/runs/20/attempts/1/jobs?per_page=100": {
-                "jobs": [self.original_job]
+            "actions/runs/20/attempts/1/jobs?per_page=50": {
+                "jobs": [self.original_job],
+                "total_count": 1,
             },
             "actions/runs/20/artifacts?per_page=100": {"artifacts": [self.artifact]},
             "actions/jobs/30": self.original_job,
@@ -472,6 +474,36 @@ class CommonTestBrokerIntegrationTests(unittest.TestCase):
         self.consume()
         self.assertEqual((self.source / "count").read_text(), "1")
 
+    def test_original_job_after_first_page_keeps_verified_offline_reuse(self):
+        original_read = self.read
+
+        def read(repository, path):
+            if path == "actions/runs/20/attempts/1/jobs?per_page=50":
+                return {
+                    "jobs": [
+                        {
+                            **self.original_job,
+                            "id": 100 + index,
+                            "name": f"Other test {index}",
+                        }
+                        for index in range(50)
+                    ],
+                    "total_count": 51,
+                }
+            if path == "actions/runs/20/attempts/1/jobs?per_page=50&page=2":
+                return {"jobs": [self.original_job], "total_count": 51}
+            return original_read(repository, path)
+
+        with patch.object(self, "read", side_effect=read):
+            document, _ = self.prepare()
+        self.assertIn("50", document["archives"])
+        self.assertIn(
+            "example/project/actions/runs/20/attempts/1/jobs?per_page=50&page=2",
+            document["responses"],
+        )
+        self.consume()
+        self.assertEqual((self.source / "count").read_text(), "1")
+
     def test_declared_stock_scopes_avoid_history_but_keep_the_complete_command(self):
         self.broker_arguments.scope = ["unit/full", "another/full"]
         document, download = self.prepare()
@@ -481,7 +513,7 @@ class CommonTestBrokerIntegrationTests(unittest.TestCase):
             [path for _, path in self.api_calls],
             [
                 "actions/runs/21",
-                "actions/runs/21/attempts/2/jobs?per_page=100",
+                "actions/runs/21/attempts/2/jobs?per_page=50",
                 "actions/jobs/32",
                 "",
             ],

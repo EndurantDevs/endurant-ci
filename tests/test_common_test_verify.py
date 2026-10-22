@@ -50,7 +50,9 @@ class SelectedProducerTests(unittest.TestCase):
         }
 
     def select(self, rows):
-        with patch.object(common, "api", return_value={"jobs": rows}):
+        with patch.object(
+            common, "api", return_value={"jobs": rows, "total_count": len(rows)}
+        ):
             return verify.selected_producers(self.run, REPOSITORY)
 
     def test_selects_highest_attempt_per_fixed_name_and_retains_other_jobs(self):
@@ -103,7 +105,12 @@ class SelectedProducerTests(unittest.TestCase):
         ]
         second = [self.job(300, 2, "Complete test 0", conclusion="failure")]
         with patch.object(
-            common, "api", side_effect=[{"jobs": first}, {"jobs": second}]
+            common,
+            "api",
+            side_effect=[
+                {"jobs": first, "total_count": 51},
+                {"jobs": second, "total_count": 51},
+            ],
         ) as read:
             selected = verify.selected_producers(self.run, REPOSITORY)
         self.assertEqual(len(selected), 49)
@@ -120,20 +127,65 @@ class SelectedProducerTests(unittest.TestCase):
     def test_rejects_inventory_beyond_bounded_window(self):
         pages = [
             {
+                "total_count": 1000,
                 "jobs": [
                     self.job(
                         100 + page * 50 + index, 1, f"Complete test {page}-{index}"
                     )
                     for index in range(50)
-                ]
+                ],
             }
             for page in range(20)
         ]
         with (
-            patch.object(common, "api", side_effect=pages),
+            patch.object(common, "api", side_effect=pages) as read,
             self.assertRaises(ValueError),
         ):
             verify.selected_producers(self.run, REPOSITORY)
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(
+            read.call_args.args[1],
+            "actions/runs/21/jobs?filter=all&per_page=50&page=1",
+        )
+
+    def test_smaller_pages_preserve_complete_inventory_within_original_bound(self):
+        rows = [
+            self.job(100 + index, 1, f"Complete test {index}") for index in range(999)
+        ]
+        pages = [
+            {"jobs": rows[start : start + 50], "total_count": 999}
+            for start in range(0, 999, 50)
+        ]
+        with patch.object(common, "api", side_effect=pages) as read:
+            selected = verify.selected_producers(self.run, REPOSITORY)
+        self.assertEqual(selected, {job["id"]: 1 for job in rows})
+        self.assertEqual(read.call_count, 20)
+
+    def test_refuses_incomplete_changed_or_invalid_inventory(self):
+        first = [
+            self.job(100 + index, 1, f"Complete test {index}") for index in range(50)
+        ]
+        for pages in (
+            [{"jobs": [self.job()], "total_count": 81}],
+            [
+                {"jobs": first, "total_count": 51},
+                {"jobs": [self.job(300)], "total_count": 52},
+            ],
+            [{"jobs": [*first, self.job(300)], "total_count": 51}],
+            [None],
+            [{"jobs": [self.job()]}],
+            [{"jobs": [self.job()], "total_count": True}],
+            [{"jobs": [self.job()], "total_count": -1}],
+            [{"jobs": None, "total_count": 0}],
+            [{"jobs": [None], "total_count": 1}],
+            [{"jobs": [self.job()], "total_count": 0}],
+        ):
+            with (
+                self.subTest(pages=pages),
+                patch.object(common, "api", side_effect=pages),
+                self.assertRaises(ValueError),
+            ):
+                verify.selected_producers(self.run, REPOSITORY)
 
     def test_rejects_a_page_larger_than_requested(self):
         rows = [self.job(100 + index, 1, f"Complete test {index}") for index in range(51)]
@@ -233,7 +285,8 @@ class RetainedAttemptVerificationTests(unittest.TestCase):
         values = {
             "actions/runs/21/artifacts?per_page=100": {"artifacts": self.artifacts},
             "actions/runs/21/jobs?filter=all&per_page=50&page=1": {
-                "jobs": [self.current_job]
+                "jobs": [self.current_job],
+                "total_count": 1,
             },
             "actions/runs/21/attempts/1": self.retained,
             "actions/jobs/32": self.current_job,

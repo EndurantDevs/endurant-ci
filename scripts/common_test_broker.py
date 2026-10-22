@@ -136,10 +136,7 @@ def prepare(arguments):
                     not in allowed
                 ):
                     continue
-                jobs = read(
-                    repository,
-                    f"actions/runs/{original_run['id']}/attempts/{original_run['run_attempt']}/jobs?per_page=100",
-                )["jobs"]
+                jobs = common.attempt_jobs(repository, original_run)
                 matches = [item for item in jobs if item.get("name") == job["name"]]
                 common.equivalent.require(
                     len(matches) == 1, "Original complete job inventory changed"
