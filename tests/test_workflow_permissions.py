@@ -208,7 +208,8 @@ class PublicWorkflowPermissions(unittest.TestCase):
         database_job = workflow["jobs"]["address-canonical-db-tests"]
         self.assertIn("postgis/postgis:18-", database_job["services"]["postgres"]["image"])
         installer = next(step for step in database_job["steps"] if step.get("name") == "Install PostgreSQL client")
-        command = installer["run"]
+        self.assertEqual(installer["run"], 'bash "$CI_ROOT/scripts/install_postgres_client"')
+        command = (ROOT / "scripts/install_postgres_client").read_text()
         self.assertIn("https://apt.postgresql.org/pub/repos/apt", command)
         self.assertIn("Acquire::Retries=3", command)
         self.assertIn("--retry-all-errors", command)
