@@ -91,6 +91,28 @@ REGISTRY_REQUIRED_TARGET_TESTS = (
     "tests/test_registry_required_target_review_store_postgres.py",
     "tests/test_registry_required_target_coverage_postgres.py",
 )
+REGISTRY_PREPARATION_CAPABILITY = (
+    "db/migration_registry_preparation.py",
+    "process/registry_migration_preparation.py",
+    "tests/test_registry_prepared_migrations_postgres.py",
+)
+REGISTRY_PREPARATION_DEPENDENCIES = (
+    "process/registry_management_permissions.py",
+    "tests/test_registry_management_permissions_postgres.py",
+    "tests/test_manual_provider_identity_store_postgres.py",
+    "tests/test_network_serving_schema_postgres.py",
+    "tests/test_registry_approval_store_postgres.py",
+)
+REGISTRY_CUSTODY_CAPABILITY = (
+    "db/migration_network_candidate_custody.py",
+    "process/registry_candidate_custody_preparation.py",
+    "tests/test_registry_candidate_custody_migration_postgres.py",
+)
+REGISTRY_CUSTODY_DEPENDENCIES = (
+    *REGISTRY_PREPARATION_CAPABILITY,
+    *REGISTRY_PREPARATION_DEPENDENCIES,
+    "alembic/versions/20261018011000_network_candidate_custody.py",
+)
 REGISTRY_ADDRESS_EQUIVALENCE_TEST = "tests/test_network_cms_registry_address_equivalence_postgres.py"
 REGISTRY_PTG_SCOPE_TESTS = (
     "tests/test_registry_ptg_graph_reader_postgres.py",
@@ -1339,6 +1361,9 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
     def test_registry_source_lifecycle_native_routes_fail_closed(self):
         self._check_optional_native_routes(only_kinds={"source-lifecycle"})
 
+    def test_registry_migration_native_routes_fail_closed(self):
+        self._check_optional_native_routes(only_kinds={"registry-preparation", "candidate-custody"})
+
     def _run_optional_native_shards(self, script, environment, source, timeout):
         """Share a closed source fixture across isolated positive shard routes."""
         temporary = tempfile.TemporaryDirectory()
@@ -1398,6 +1423,8 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
             ("managed-collection", MANAGED_COLLECTION_CAPABILITY, MANAGED_COLLECTION_REQUIRED),
             ("managed-pricing-source", MANAGED_PRICING_SOURCE_CAPABILITY, MANAGED_PRICING_SOURCE_REQUIRED),
             ("source-lifecycle", REGISTRY_SOURCE_LIFECYCLE_CAPABILITY, REGISTRY_SOURCE_LIFECYCLE_DEPENDENCIES),
+            ("registry-preparation", REGISTRY_PREPARATION_CAPABILITY, REGISTRY_PREPARATION_DEPENDENCIES),
+            ("candidate-custody", REGISTRY_CUSTODY_CAPABILITY, REGISTRY_CUSTODY_DEPENDENCIES),
             ("maintenance", PROFILE_MAINTENANCE_CAPABILITY, PROFILE_MAINTENANCE_DEPENDENCIES),
         ):
             if only_kinds is not None and kind not in only_kinds:
@@ -1413,7 +1440,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
             cases += [("complete", capability[0], stage, "") for stage in ("symlink", "dangling", "dirty", "untracked")]
             cases += [("complete", "", stage, "") for stage in (
                 "skipped", "empty", "missing-family", "invalid-report", "pytest", "drop", "report-cleanup")]
-            if kind in {"canonical-cutover", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"}:
+            if kind in {"canonical-cutover", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "registry-preparation", "candidate-custody"}:
                 cases.append(("complete", "", "duplicate", ""))
             if kind in {"provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"}:
                 cases += [("complete", "", "missing-family:" + path, "") for path in
@@ -1431,7 +1458,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
             if kind == "manual-location-commands":
                 cases += [("complete", "", stage, "") for stage in ("manual-location-exports", "cancel")]
 
-            if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"}:
+            if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"}:
                 cases += [("complete", "", "", str(index)) for index in range(48)]
             else:
                 cases += [("complete", "", "", "publication")]
@@ -1444,7 +1471,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                         source, runner, log = root / "source", root / "runner", root / "calls"
                         source.mkdir()
                         runner.mkdir()
-                        for path in registry_roster if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"} else ():
+                        for path in registry_roster if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"} else ():
                             target = source / path
                             target.parent.mkdir(parents=True, exist_ok=True)
                             target.touch()
@@ -1469,12 +1496,12 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                             target = source / path
                             target.parent.mkdir(parents=True, exist_ok=True)
                             target.touch()
-                        if kind in {"completion", "pricing", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"} and layout == "complete" and changed in registry_roster and not stage:
+                        if kind in {"completion", "pricing", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"} and layout == "complete" and changed in registry_roster and not stage:
                             (source / changed).unlink()
                         if stage in ("symlink", "dangling"):
                             target = source / changed
                             target.unlink()
-                            live = registry_roster[0] if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"} else dependencies[0]
+                            live = registry_roster[0] if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"} else dependencies[0]
                             target.symlink_to(source / (live if stage == "symlink" else "absent"))
                         timeout = root / "timeout"
                         timeout.write_text(f"#!{sys.executable}\n" + r'''
@@ -1548,7 +1575,7 @@ PYSHARD
   else command python3 "$@"; fi
 }
 '''
-                        call = (f"run_network_registry_postgres {shard}" if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"} else
+                        call = (f"run_network_registry_postgres {shard}" if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"} else
                                 "run_provider_profile_postgres postgresql://synthetic/runtime_test profile-publication"
                                 if shard == "publication" else "run_profile_control_maintenance_postgres")
                         if changed:
@@ -1581,9 +1608,9 @@ PYSHARD
                     if changed:
                         self.assertFalse(calls)
                     elif not stage:
-                        self.assertEqual(len(runs), int(kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"} or layout == "complete"))
+                        self.assertEqual(len(runs), int(kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"} or layout == "complete"))
                     for run in runs:
-                        if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"}:
+                        if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"}:
                             self.assertRegex(run["registry"], r"@127\.0\.0\.1:5440/hc_network_registry_[0-9a-f]{32}$")
                             self.assertEqual(run["cms_admission"], run["registry"]
                                              if kind in {"cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"}
@@ -1600,7 +1627,7 @@ PYSHARD
                             self.assertIsNone(run["schema_alias"])
                         if not shard:
                             self.assertEqual(capability[-1] in run["arguments"], layout == "complete")
-                    if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"} and shard and not stage:
+                    if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"} and shard and not stage:
                         shard_members.extend(json.loads((root / "selections").read_text()))
                     if kind == "manual-swaps" and not changed:
                         extensions = [c for c in calls if c.startswith("extensions:")]
@@ -1641,6 +1668,8 @@ PYSHARD
                              ("managed-detail", (*CMS_PROFILE_HOST_TESTS, *CMS_PROFILE_DIRECTORY_HOST_TESTS, *MANAGED_DETAIL_HOST_TESTS)),
                              ("managed-collection", (*CMS_PROFILE_HOST_TESTS, *CMS_PROFILE_DIRECTORY_HOST_TESTS, *MANAGED_COLLECTION_HOST_TESTS)),
                              ("source-lifecycle", (*PUBLICATION_WORKER_HOST_TESTS, *PUBLICATION_PTG_RUNTIME_HOST_TESTS, *REGISTRY_SOURCE_LIFECYCLE_TESTS)),
+                             ("registry-preparation", (REGISTRY_PREPARATION_CAPABILITY[-1],)),
+                             ("candidate-custody", (REGISTRY_PREPARATION_CAPABILITY[-1], REGISTRY_CUSTODY_CAPABILITY[-1])),
                              ("managed-pricing-source", (*CMS_PROFILE_HOST_TESTS, *CMS_PROFILE_DIRECTORY_HOST_TESTS,
                                                         *MANAGED_DETAIL_HOST_TESTS, *MANAGED_COLLECTION_HOST_TESTS,
                                                         *MANAGED_PRICING_SOURCE_HOST_TESTS))):
@@ -1907,6 +1936,10 @@ for shard in 0 1 2 3 4 5; do run_python_main "$shard"; done
     def test_registry_source_lifecycle_leaves_pure_discovery_only_when_complete(self):
         self._check_optional_native_exclusions(only_capability=REGISTRY_SOURCE_LIFECYCLE_CAPABILITY)
 
+    def test_registry_migration_modules_leave_python_discovery_only_when_complete(self):
+        for capability in (REGISTRY_PREPARATION_CAPABILITY, REGISTRY_CUSTODY_CAPABILITY):
+            self._check_optional_native_exclusions(only_capability=capability)
+
     def _check_optional_native_exclusions(self, only_capability=None):
         for capability, dependencies, host_tests in (
             (COMPANY_GROUP_CAPABILITY, COMPANY_GROUP_DEPENDENCIES, COMPANY_GROUP_HOST_TESTS),
@@ -1930,6 +1963,10 @@ for shard in 0 1 2 3 4 5; do run_python_main "$shard"; done
               *MANAGED_COLLECTION_HOST_TESTS, *MANAGED_PRICING_SOURCE_HOST_TESTS)),
             (REGISTRY_SOURCE_LIFECYCLE_CAPABILITY, REGISTRY_SOURCE_LIFECYCLE_DEPENDENCIES,
              (*PUBLICATION_WORKER_HOST_TESTS, *PUBLICATION_PTG_RUNTIME_HOST_TESTS, *REGISTRY_SOURCE_LIFECYCLE_TESTS)),
+            (REGISTRY_PREPARATION_CAPABILITY, REGISTRY_PREPARATION_DEPENDENCIES,
+             (REGISTRY_PREPARATION_CAPABILITY[-1],)),
+            (REGISTRY_CUSTODY_CAPABILITY, REGISTRY_CUSTODY_DEPENDENCIES,
+             (REGISTRY_PREPARATION_CAPABILITY[-1], REGISTRY_CUSTODY_CAPABILITY[-1])),
         ):
             if only_capability is not None and capability != only_capability:
                 continue
