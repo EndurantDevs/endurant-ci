@@ -235,6 +235,7 @@ PUBLICATION_WORKER_CAPABILITY = (
     'tests/test_registry_publication_worker.py',
     'tests/test_registry_publication_worker_permissions_postgres.py',
     'tests/test_registry_publication_consumer_postgres.py',
+    'tests/test_registry_initial_inventory_postgres.py',
 )
 PUBLICATION_WORKER_DEPENDENCIES = (
     'process/__init__.py',
@@ -269,7 +270,7 @@ PUBLICATION_WORKER_DEPENDENCIES = (
     'tests/test_registry_management_permissions_postgres.py',
     'tests/test_registry_candidate_composition_postgres.py',
 )
-PUBLICATION_WORKER_HOST_TESTS = PUBLICATION_WORKER_CAPABILITY[-2:]
+PUBLICATION_WORKER_HOST_TESTS = PUBLICATION_WORKER_CAPABILITY[-3:]
 BENEFIT_PLAN_CAPABILITY = (
     'process/registry_benefit_plan_metadata.py',
     'process/registry_benefit_plan_runtime.py',

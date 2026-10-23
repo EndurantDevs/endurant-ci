@@ -315,6 +315,7 @@ publication_worker_native_test_paths() {
     tests/test_registry_publication_worker.py
     tests/test_registry_publication_worker_permissions_postgres.py
     tests/test_registry_publication_consumer_postgres.py
+    tests/test_registry_initial_inventory_postgres.py
   )
   local source_path present=0
   for source_path in "${capability[@]}"; do
@@ -354,7 +355,8 @@ publication_worker_native_test_paths() {
     tests/test_registry_management_permissions_postgres.py \
     tests/test_registry_candidate_composition_postgres.py || return 1
   printf '%s\n' tests/test_registry_publication_worker_permissions_postgres.py \
-    tests/test_registry_publication_consumer_postgres.py
+    tests/test_registry_publication_consumer_postgres.py \
+    tests/test_registry_initial_inventory_postgres.py
 }
 
 benefit_plan_native_test_paths() {
