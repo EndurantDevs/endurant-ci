@@ -2593,6 +2593,8 @@ run_provider_directory_postgres postgresql://synthetic/test directory-source-2
                 call_log = Path(temporary) / lane
                 script = CHECK_FUNCTIONS + "\nrun_source_routes() {" + body + "}\n" + r'''
 log_call() {
+  test "$COVERAGE_FILE" = '.coverage.postgres.synthetic'
+  test "$PYTEST_ADDOPTS" = '--cov-append --cov-branch --cov-report='
   printf '%s\0' "${HLTHPRT_TIN_NPI_CONNECTOR_POSTGRES_DSN-}" \
     "${HLTHPRT_FHIR_FORMULARY_MIGRATION_POSTGRES_DSN-}" "$@" >> "$CALL_LOG"
   printf '\n' >> "$CALL_LOG"
@@ -2605,12 +2607,23 @@ run_source_routes postgresql://synthetic/test "$ROUTE_LANE"
                 result = subprocess.run(
                     ["bash", "-eu"], input=script, cwd=source, capture_output=True, text=True,
                     env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
-                         "CALL_LOG": str(call_log), "ROUTE_LANE": lane},
+                         "CALL_LOG": str(call_log), "ROUTE_LANE": lane,
+                         "COVERAGE_FILE": ".coverage.postgres.synthetic",
+                         "PYTEST_ADDOPTS": "--cov-append --cov-branch --cov-report="},
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 calls_by_lane[lane] = [line.rstrip("\0").split("\0") for line in call_log.read_text().splitlines()]
         first, second = (calls_by_lane[lane] for lane in ("directory-source", "directory-source-2"))
-        self.assertEqual((len(first), len(second)), (4, 6))
+        self.assertEqual((len(first), len(second)), (5, 6))
+        self.assertEqual(len(first[0][9:]), 18)
+        self.assertEqual(first[1][9:], [
+            "tests/test_provider_directory_terminal_root_retirement_postgres.py",
+            "tests/test_provider_directory_terminal_root_retirement_repair_postgres.py",
+            "tests/test_provider_directory_terminal_root_retirement_v2_postgres.py",
+            "tests/test_provider_directory_terminal_root_retirement_v2_topology_postgres.py",
+        ])
+        for call in first[:2]:
+            self.assertEqual(call[:2], ["postgresql://synthetic/test", ""])
         self.assertEqual(first + second, calls_by_lane["all"])
         selectors = [argument for call in first + second for argument in call if argument.startswith("tests/")]
         self.assertEqual(len(selectors), len(set(selectors)))
@@ -2622,6 +2635,33 @@ run_source_routes postgresql://synthetic/test "$ROUTE_LANE"
         for call in first + second:
             if call[2] == "timeout":
                 self.assertEqual(call[3:9], ["--foreground", "295s", "python", "-m", "pytest", "-q"])
+
+    def test_directory_source_cohorts_fail_before_later_invocations(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            for failed_batch in (1, 2):
+                with self.subTest(failed_batch=failed_batch):
+                    call_log = Path(temporary) / str(failed_batch)
+                    script = CHECK_FUNCTIONS + r'''
+invocation=0
+timeout() {
+  invocation=$((invocation + 1))
+  printf '%s\t%s\n' "$HLTHPRT_TIN_NPI_CONNECTOR_POSTGRES_DSN" "$*" >> "$CALL_LOG"
+  if [ "$invocation" = "$FAILED_BATCH" ]; then return 17; fi
+}
+run_owned_provider_directory_postgres() { return 99; }
+run_provider_directory_postgres postgresql://synthetic/test directory-source
+'''
+                    result = subprocess.run(
+                        ["bash", "-eu"], input=script, capture_output=True, text=True,
+                        env={**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT),
+                             "CALL_LOG": str(call_log), "FAILED_BATCH": str(failed_batch)},
+                    )
+                    self.assertEqual(result.returncode, 17, result.stderr)
+                    calls = call_log.read_text().splitlines()
+                    self.assertEqual(len(calls), failed_batch)
+                    for call in calls:
+                        self.assertTrue(call.startswith(
+                            "postgresql://synthetic/test\t--foreground 295s python -m pytest -q tests/"))
 
     def test_provider_candidate_batches_keep_optional_modules_and_failures(self):
         body = "  local provider_candidate_tests=()" + CHECK_FUNCTIONS.split(
