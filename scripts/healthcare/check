@@ -679,6 +679,49 @@ managed_pricing_source_native_test_paths() {
     tests/test_plan_pricing_source_policy_postgres.py
 }
 
+registry_migration_native_test_paths() {
+  local family source_path present
+  local capability=()
+  local dependencies=(
+    process/registry_management_permissions.py
+    tests/test_registry_management_permissions_postgres.py
+    tests/test_manual_provider_identity_store_postgres.py
+    tests/test_network_serving_schema_postgres.py
+    tests/test_registry_approval_store_postgres.py
+  )
+  for family in preparation custody; do
+    case "$family" in
+      preparation)
+        capability=(
+          db/migration_registry_preparation.py
+          process/registry_migration_preparation.py
+          tests/test_registry_prepared_migrations_postgres.py
+        )
+        ;;
+      custody)
+        capability=(
+          db/migration_network_candidate_custody.py
+          process/registry_candidate_custody_preparation.py
+          tests/test_registry_candidate_custody_migration_postgres.py
+        )
+        dependencies+=(
+          db/migration_registry_preparation.py
+          process/registry_migration_preparation.py
+          tests/test_registry_prepared_migrations_postgres.py
+          alembic/versions/20261018011000_network_candidate_custody.py
+        )
+        ;;
+    esac
+    present=0
+    for source_path in "${capability[@]}"; do
+      if [ -e "$repository_root/$source_path" ] || [ -L "$repository_root/$source_path" ]; then present=1; fi
+    done
+    [ "$present" = 1 ] || continue
+    require_native_source_files "${capability[@]}" "${dependencies[@]}" || return 1
+    printf '%s\n' "${capability[2]}"
+  done
+}
+
 registry_source_lifecycle_native_test_paths() {
   local capability=(
     process/registry_cms_source_consumer.py
@@ -754,6 +797,8 @@ run_python_main() {
   managed_pricing_source_tests=$(managed_pricing_source_native_test_paths) || return 1
   local registry_source_lifecycle_tests
   registry_source_lifecycle_tests=$(registry_source_lifecycle_native_test_paths) || return 1
+  local registry_migration_tests
+  registry_migration_tests=$(registry_migration_native_test_paths) || return 1
   local naic_tests
   naic_tests=$(naic_native_test_paths) || return 1
   local publication_worker_tests publication_ptg_runtime_tests manual_location_commands_tests
@@ -801,6 +846,9 @@ run_python_main() {
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
   done <<< "$registry_source_lifecycle_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
+  done <<< "$registry_migration_tests"
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
   done <<< "$managed_provider_detail_tests"
@@ -1973,6 +2021,8 @@ run_network_registry_postgres() (
   managed_pricing_source_tests=$(managed_pricing_source_native_test_paths) || return 1
   local registry_source_lifecycle_tests
   registry_source_lifecycle_tests=$(registry_source_lifecycle_native_test_paths) || return 1
+  local registry_migration_tests
+  registry_migration_tests=$(registry_migration_native_test_paths) || return 1
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$company_group_tests"
@@ -1997,6 +2047,9 @@ run_network_registry_postgres() (
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$registry_source_lifecycle_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || registry_tests+=("$test_path")
+  done <<< "$registry_migration_tests"
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$managed_provider_detail_tests"
