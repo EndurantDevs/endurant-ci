@@ -39,7 +39,6 @@ SKIPPED = {
         "address-canonical-db-tests",
         "Coverage results",
         "DEV image publication",
-        "CI artifact cleanup",
     ),
     "drug": ("Tests and build", "DEV image publication", "CI artifact cleanup"),
 }
