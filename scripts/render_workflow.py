@@ -15,6 +15,18 @@ METADATA_ONLY = ("github.event_name == 'pull_request' && github.event.action == 
 GUARD = f"!({METADATA_ONLY}) && ("
 
 
+def cleanup_dispatch_step():
+    return {
+        "name": "Queue independent artifact cleanup",
+        "if": "success() && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)",
+        "continue-on-error": True,
+        "env": {"GH_TOKEN": "${{ github.token }}"},
+        "run": 'timeout 15s gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/artifact-cleanup.yml/dispatches" '
+               '-f ref=dev -f "inputs[source_run_id]=$GITHUB_RUN_ID" '
+               '-f "inputs[source_run_attempt]=$GITHUB_RUN_ATTEMPT"',
+    }
+
+
 def job_name(label, matrix_job=None):
     if label == "${{ matrix.label }}":
         if not matrix_job or not re.fullmatch(r"[a-z0-9_-]+", matrix_job):
@@ -117,25 +129,31 @@ def render_workflow(kind, revision, caller):
         ],
         "outputs": {"receipt_artifact_id": "${{ steps.receipt-artifact.outputs.artifact-id }}"},
     }
-    workflow["jobs"]["artifact-cleanup"] = {
-        "name": "CI artifact cleanup", "runs-on": "ubuntu-latest", "timeout-minutes": 10,
-        "needs": ["dev-image-publication", producer_job, measurement_job],
-        "if": "success()",
-        "permissions": {"contents": "read", "actions": "write"},
-        "steps": [
-            {"name": "Check out trusted cleanup helper",
-             "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-             "with": {"repository": "EndurantDevs/endurant-ci", "ref": revision,
-                      "path": "ci", "persist-credentials": False}},
-            {"name": "Remove validated CI intermediates",
-             "env": {"GH_TOKEN": "${{ github.token }}", "PYTHONDONTWRITEBYTECODE": "1",
-                     "IMAGE_ARTIFACT_ID": "${{ needs." + producer_job + ".outputs.image_artifact_id }}",
-                     "MEASUREMENT_ARTIFACT_ID": "${{ needs." + measurement_job + ".outputs.measurement_artifact_id }}",
-                     "IMAGE_RECEIPT_ARTIFACT_ID": "${{ needs.dev-image-publication.outputs.receipt_artifact_id }}"},
-             "run": "python3 ci/scripts/artifact_cleanup.py"},
-        ],
-    }
+    if kind == "healthcare":
+        workflow["jobs"]["dev-image-publication"]["permissions"]["actions"] = "write"
+        workflow["jobs"]["dev-image-publication"]["steps"].append(cleanup_dispatch_step())
+    if kind == "drug":
+        workflow["jobs"]["artifact-cleanup"] = {
+            "name": "CI artifact cleanup", "runs-on": "ubuntu-latest", "timeout-minutes": 10,
+            "needs": ["dev-image-publication", producer_job, measurement_job],
+            "if": "success()",
+            "permissions": {"contents": "read", "actions": "write"},
+            "steps": [
+                {"name": "Check out trusted cleanup helper",
+                 "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+                 "with": {"repository": "EndurantDevs/endurant-ci", "ref": revision,
+                          "path": "ci", "persist-credentials": False}},
+                {"name": "Remove validated CI intermediates",
+                 "env": {"GH_TOKEN": "${{ github.token }}", "PYTHONDONTWRITEBYTECODE": "1",
+                         "IMAGE_ARTIFACT_ID": "${{ needs." + producer_job + ".outputs.image_artifact_id }}",
+                         "MEASUREMENT_ARTIFACT_ID": "${{ needs." + measurement_job + ".outputs.measurement_artifact_id }}",
+                         "IMAGE_RECEIPT_ARTIFACT_ID": "${{ needs.dev-image-publication.outputs.receipt_artifact_id }}"},
+                 "run": "python3 ci/scripts/artifact_cleanup.py"},
+            ],
+        }
     for job_id in ("dev-image-publication", "artifact-cleanup"):
+        if job_id not in workflow["jobs"]:
+            continue
         workflow["jobs"][job_id]["steps"][1:1] = [
             {"name": "Install pinned uv", "run": 'bash ci/scripts/install_uv'},
             {"name": "Install uv-managed Python", "run": 'bash ci/scripts/setup_python'},
@@ -196,6 +214,7 @@ def render_common_test_update(kind, revision, caller):
             or python_job.get("outputs") != expected_python["outputs"]
             or python_downloads[0] != python_downloads[1]):
         raise ValueError("Python measurement topology differs; regenerate the complete workflow")
+    original["jobs"].pop("artifact-cleanup", None)
     original["permissions"].pop("checks", None)
     for identifier in ("python-tests", "capacity-evidence"):
         original["jobs"][identifier] = updated["jobs"][identifier]
@@ -221,6 +240,11 @@ def render_common_test_update(kind, revision, caller):
     for step in original["jobs"]["dev-image-publication"]["steps"]:
         if step.get("name") == "Upload DEV image receipt":
             step["with"]["retention-days"] = 90
+    publication = original["jobs"]["dev-image-publication"]
+    publication["permissions"]["actions"] = "write"
+    publication["steps"][:] = [step for step in publication["steps"]
+                              if step.get("name") != "Queue independent artifact cleanup"]
+    publication["steps"].append(cleanup_dispatch_step())
     return "# Generated service validation with independently pinned common-test verification.\n" + yaml.safe_dump(
         original, sort_keys=False, width=120)
 

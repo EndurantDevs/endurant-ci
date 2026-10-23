@@ -388,6 +388,16 @@ class MetadataRecoveryChecks(unittest.TestCase):
                 self.assertFalse(self.exercise(fake))
                 self.assertEqual(fake.writes, [])
 
+    def test_cleanup_skip_inventory_matches_each_source_workflow(self):
+        self.assertNotIn("CI artifact cleanup", recovery.SKIPPED["healthcare"])
+        self.assertIn("CI artifact cleanup", recovery.SKIPPED["drug"])
+        fake = FakeGitHub()
+        self.assertIsNotNone(recovery.eligible_jobs(fake.kind, fake.jobs))
+        legacy_cleanup = deepcopy(fake.jobs[-1])
+        legacy_cleanup.update(id=999, name="CI artifact cleanup (metadata only)")
+        fake.jobs.append(legacy_cleanup)
+        self.assertIsNone(recovery.eligible_jobs(fake.kind, fake.jobs))
+
     def test_only_complete_portable_success_and_exact_skips_are_eligible(self):
         changes = (
             lambda f: f.jobs[0].update(conclusion="failure"),

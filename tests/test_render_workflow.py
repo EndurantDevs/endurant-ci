@@ -42,6 +42,10 @@ class RenderWorkflowChecks(unittest.TestCase):
                 "smoke": {"name": "portable import checks", "runs-on": "ubuntu-latest", "steps": [{"run": "true"}]}}}))
             caller.write_text(RENDERER.render_workflow("healthcare", "1" * 40, caller))
             original = yaml.safe_load(caller.read_text())
+            original["jobs"]["artifact-cleanup"] = {
+                "name": RENDERER.job_name("CI artifact cleanup"), "needs": "dev-image-publication",
+                "runs-on": "ubuntu-latest", "steps": [{"run": "python3 ci/scripts/artifact_cleanup.py"}],
+            }
             database = original["jobs"]["address-canonical-db-tests"]
             database["strategy"]["matrix"]["include"] = [row for row in database["strategy"]["matrix"]["include"]
                 if not row["shard"].startswith("registry-") and not row["shard"].startswith("core-snapshots")]
@@ -56,9 +60,9 @@ class RenderWorkflowChecks(unittest.TestCase):
             download["with"]["artifact-ids"] = ",".join(selectors).replace("${{ needs.python-tests", "${{\n  needs.python-tests")
             caller.write_text(yaml.safe_dump(original, sort_keys=False))
             result = yaml.safe_load(RENDERER.render_common_test_update("healthcare", "2" * 40, caller))
-            self.assertEqual(set(result["jobs"]), set(original["jobs"]))
+            self.assertEqual(set(result["jobs"]), set(original["jobs"]) - {"artifact-cleanup"})
             for identifier, job in original["jobs"].items():
-                if identifier not in {"python-tests", "capacity-evidence", "measurement", "dev-image-publication"}:
+                if identifier not in {"python-tests", "capacity-evidence", "measurement", "dev-image-publication", "artifact-cleanup"}:
                     self.assertEqual(result["jobs"][identifier], job, identifier)
             for identifier in ("python-tests", "capacity-evidence"):
                 self.assertEqual(result["jobs"][identifier]["env"]["CI_REVISION"], "2" * 40)
@@ -156,9 +160,12 @@ class RenderWorkflowChecks(unittest.TestCase):
                     workflow = yaml.safe_load(rendered)
                     if kind == "healthcare":
                         self.assertEqual(sum(len(job.get("strategy", {}).get("matrix", {}).get("include", [None]))
-                                             for job in workflow["jobs"].values()), 81)
+                                             for job in workflow["jobs"].values()), 80)
                     self.assertEqual(workflow["on"], original["on"])
-                    self.assertEqual(set(workflow["jobs"]), {"smoke", "dev-image-publication", "artifact-cleanup", *canonical["jobs"]})
+                    expected_jobs = {"smoke", "dev-image-publication", *canonical["jobs"]}
+                    if kind == "drug":
+                        expected_jobs.add("artifact-cleanup")
+                    self.assertEqual(set(workflow["jobs"]), expected_jobs)
                     self.assertNotIn("${{ inputs.ci_revision }}", rendered)
                     for job_id, job in workflow["jobs"].items():
                         self.assertNotIn("uses", job)
@@ -199,7 +206,7 @@ class RenderWorkflowChecks(unittest.TestCase):
                     refreshed = yaml.safe_load(RENDERER.render_workflow(kind, "2" * 40, caller))
                     self.assertEqual(refreshed["jobs"]["smoke"], workflow["jobs"]["smoke"])
 
-    def test_only_trusted_publication_and_final_cleanup_get_write_access(self):
+    def test_only_trusted_publication_and_drug_final_cleanup_get_write_access(self):
         with tempfile.TemporaryDirectory() as directory:
             caller = Path(directory) / "ci.yml"
             for kind in ("healthcare", "drug"):
@@ -213,40 +220,43 @@ class RenderWorkflowChecks(unittest.TestCase):
                 })
                 producer = "container-package" if kind == "healthcare" else "validate"
                 measurement = "measurement" if kind == "healthcare" else "publish"
-                cleanup_job = workflow["jobs"]["artifact-cleanup"]
-                self.assertEqual(cleanup_job, {
-                    "name": RENDERER.job_name("CI artifact cleanup"), "runs-on": "ubuntu-latest", "timeout-minutes": 10,
-                    "needs": ["dev-image-publication", producer, measurement],
-                    "if": "${{ " + RENDERER.GUARD + "success()) }}",
-                    "permissions": {"contents": "read", "actions": "write"},
-                    "steps": [{"name": "Check out trusted cleanup helper",
-                               "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-                               "with": {"repository": "EndurantDevs/endurant-ci", "ref": "1" * 40,
-                                        "path": "ci", "persist-credentials": False}},
-                              {"name": "Install pinned uv", "run": "bash ci/scripts/install_uv"},
-                              {"name": "Install uv-managed Python", "run": "bash ci/scripts/setup_python"},
-                              {"name": "Remove validated CI intermediates",
-                               "env": {"GH_TOKEN": "${{ github.token }}", "PYTHONDONTWRITEBYTECODE": "1",
-                                       "IMAGE_ARTIFACT_ID": "${{ needs." + producer + ".outputs.image_artifact_id }}",
-                                       "MEASUREMENT_ARTIFACT_ID": "${{ needs." + measurement + ".outputs.measurement_artifact_id }}",
-                                       "IMAGE_RECEIPT_ARTIFACT_ID": "${{ needs.dev-image-publication.outputs.receipt_artifact_id }}"},
-                               "run": "python3 ci/scripts/artifact_cleanup.py"}],
-                })
-                ancestors = set()
-                pending = list(cleanup_job["needs"])
-                while pending:
-                    identifier = pending.pop()
-                    if identifier in ancestors:
-                        continue
-                    ancestors.add(identifier)
-                    needs = workflow["jobs"][identifier].get("needs", [])
-                    pending.extend([needs] if isinstance(needs, str) else needs)
-                self.assertEqual(ancestors, set(workflow["jobs"]) - {"artifact-cleanup"})
-                for identifier in ancestors:
-                    if identifier != "dev-image-publication":
-                        self.assertTrue(all(value == "read" for value in workflow["jobs"][identifier].get("permissions", {}).values()))
+                if kind == "healthcare":
+                    self.assertNotIn("artifact-cleanup", workflow["jobs"])
+                else:
+                    cleanup_job = workflow["jobs"]["artifact-cleanup"]
+                    self.assertEqual(cleanup_job, {
+                        "name": RENDERER.job_name("CI artifact cleanup"), "runs-on": "ubuntu-latest", "timeout-minutes": 10,
+                        "needs": ["dev-image-publication", producer, measurement],
+                        "if": "${{ " + RENDERER.GUARD + "success()) }}",
+                        "permissions": {"contents": "read", "actions": "write"},
+                        "steps": [{"name": "Check out trusted cleanup helper",
+                                   "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+                                   "with": {"repository": "EndurantDevs/endurant-ci", "ref": "1" * 40,
+                                            "path": "ci", "persist-credentials": False}},
+                                  {"name": "Install pinned uv", "run": "bash ci/scripts/install_uv"},
+                                  {"name": "Install uv-managed Python", "run": "bash ci/scripts/setup_python"},
+                                  {"name": "Remove validated CI intermediates",
+                                   "env": {"GH_TOKEN": "${{ github.token }}", "PYTHONDONTWRITEBYTECODE": "1",
+                                           "IMAGE_ARTIFACT_ID": "${{ needs." + producer + ".outputs.image_artifact_id }}",
+                                           "MEASUREMENT_ARTIFACT_ID": "${{ needs." + measurement + ".outputs.measurement_artifact_id }}",
+                                           "IMAGE_RECEIPT_ARTIFACT_ID": "${{ needs.dev-image-publication.outputs.receipt_artifact_id }}"},
+                                   "run": "python3 ci/scripts/artifact_cleanup.py"}],
+                    })
+                    ancestors = set()
+                    pending = list(cleanup_job["needs"])
+                    while pending:
+                        identifier = pending.pop()
+                        if identifier in ancestors:
+                            continue
+                        ancestors.add(identifier)
+                        needs = workflow["jobs"][identifier].get("needs", [])
+                        pending.extend([needs] if isinstance(needs, str) else needs)
+                    self.assertEqual(ancestors, set(workflow["jobs"]) - {"artifact-cleanup"})
+                for identifier, job in workflow["jobs"].items():
+                    if identifier not in {"dev-image-publication", "artifact-cleanup"}:
+                        self.assertTrue(all(value == "read" for value in job.get("permissions", {}).values()))
                 publisher = workflow["jobs"]["dev-image-publication"]
-                self.assertEqual(publisher["permissions"], {"contents": "read", "pull-requests": "read", "actions": "read", "packages": "write"})
+                self.assertEqual(publisher["permissions"], {"contents": "read", "pull-requests": "read", "actions": "write" if kind == "healthcare" else "read", "packages": "write"})
                 expected_needs = ["smoke", "source-validation", producer, measurement] if kind == "healthcare" else ["smoke", "publish", producer]
                 self.assertEqual(publisher["needs"], expected_needs)
                 self.assertEqual(publisher["env"], {
@@ -265,7 +275,7 @@ class RenderWorkflowChecks(unittest.TestCase):
                 self.assertEqual(len(steps), len(publisher["steps"]))
                 self.assertEqual(steps["Stage DEV image publication intent"]["run"], "python3 ci/scripts/source_image.py stage")
                 self.assertEqual(steps["Publish validated DEV image"]["run"], "python3 ci/scripts/source_image.py publish")
-                for step in publisher["steps"][4:-1]:
+                for step in publisher["steps"][4:(-2 if kind == "healthcare" else -1)]:
                     self.assertEqual(step["if"], "steps.image.outputs.publish == 'true'")
                 self.assertEqual(publisher["steps"][4]["with"], {"artifact-ids": "${{ steps.image.outputs.artifact_id }}",
                     "digest-mismatch": "error", "path": "${{ runner.temp }}/public-image-download", "merge-multiple": True})
@@ -274,6 +284,17 @@ class RenderWorkflowChecks(unittest.TestCase):
                     "path": "${{ runner.temp }}/public-image-receipt/image.json",
                     "if-no-files-found": "error", "retention-days": 90})
                 self.assertEqual(steps["Upload DEV image receipt"]["id"], "receipt-artifact")
+                if kind == "healthcare":
+                    dispatch = publisher["steps"][-1]
+                    self.assertTrue(dispatch["continue-on-error"])
+                    self.assertTrue(dispatch["run"].startswith("timeout 15s gh api --method POST "))
+                    self.assertIn("-f ref=dev", dispatch["run"])
+                    self.assertIn("inputs[source_run_id]=$GITHUB_RUN_ID", dispatch["run"])
+                    self.assertIn("inputs[source_run_attempt]=$GITHUB_RUN_ATTEMPT", dispatch["run"])
+                    self.assertIn("head.repo.full_name == github.repository", dispatch["if"])
+                    self.assertNotIn("watch", dispatch["run"])
+                else:
+                    self.assertFalse(any(step.get("name") == "Queue independent artifact cleanup" for step in publisher["steps"]))
                 self.assertEqual(publisher["if"], "${{ " + RENDERER.GUARD + "success()) }}")
                 self.assertEqual(steps["Upload DEV image publication intent"]["with"], {
                     "name": kind + "-public-image-intent-${{ github.run_id }}-${{ github.run_attempt }}",
@@ -281,7 +302,7 @@ class RenderWorkflowChecks(unittest.TestCase):
                     "if-no-files-found": "error", "retention-days": 1})
                 self.assertLess(list(steps).index("Upload DEV image publication intent"),
                                 list(steps).index("Publish validated DEV image"))
-                self.assertEqual(publisher["steps"][-1], {
+                self.assertEqual(publisher["steps"][-2 if kind == "healthcare" else -1], {
                     "name": "Reconcile DEV image publication",
                     "if": "always() && steps.image.outputs.publish == 'true'",
                     "env": {"GH_TOKEN": "${{ github.token }}"},

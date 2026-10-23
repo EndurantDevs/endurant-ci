@@ -22,6 +22,7 @@ KINDS = {"EndurantDevs/healthcare-mrf-api": "healthcare", "EndurantDevs/drug-api
 CLEANUP_JOB = "CI artifact cleanup"
 STALE_CLEANUP_JOB = "stale-cleanup"
 STALE_CLEANUP_WORKFLOW = ".github/workflows/artifact-cleanup.yml"
+COMPLETED_CLEANUP_JOB = "completed-cleanup"
 RUN_FIELDS = ("id", "run_attempt", "path", "event", "head_sha", "head_branch")
 ARTIFACT_FIELDS = ("id", "name", "size_in_bytes", "expired", "created_at", "expires_at", "updated_at", "digest")
 TERMINAL_CONCLUSIONS = {
@@ -35,10 +36,27 @@ class InventoryPending(ValueError):
 
 
 def current_run(run, expected, repository):
+    completed = expected.get("completed") is True
     return bool(
-        run.get("status") == "in_progress" and run.get("conclusion") is None
+        run.get("status") == ("completed" if completed else "in_progress")
+        and run.get("conclusion") == ("success" if completed else None)
         and run.get("path") == ".github/workflows/ci.yml"
         and run.get("event") in {"push", "pull_request"}
+        and run.get("repository", {}).get("full_name") == repository
+        and run.get("head_repository", {}).get("full_name") == repository
+        and type(run.get("workflow_id")) is int and run["workflow_id"] > 0
+        and run["workflow_id"] == expected.get("workflow_id", run["workflow_id"])
+        and all(run.get(key) == expected.get(key) for key in RUN_FIELDS)
+        and (not completed or current_cleanup_run(repository, expected["cleanup_run"]))
+    )
+
+
+def current_cleanup_run(repository, expected):
+    run = github.api(repository, f"actions/runs/{expected['id']}")
+    return bool(
+        run.get("status") == "in_progress" and run.get("conclusion") is None
+        and run.get("path") == STALE_CLEANUP_WORKFLOW and run.get("event") == "workflow_dispatch"
+        and run.get("head_branch") == "dev"
         and run.get("repository", {}).get("full_name") == repository
         and run.get("head_repository", {}).get("full_name") == repository
         and type(run.get("workflow_id")) is int and run["workflow_id"] > 0
@@ -49,6 +67,13 @@ def current_run(run, expected, repository):
 
 def completed_consumers(repository, run):
     jobs = effective_jobs(repository, run)
+    if run.get("completed") is True:
+        required = {"portable import checks", "Coverage results", "Validation complete",
+                    "Container build", "DEV image publication"}
+        if not required <= {job["name"] for job in jobs} or any(
+                job.get("status") != "completed" or job.get("conclusion") != "success" for job in jobs):
+            raise ValueError("retained intermediates: every completed CI consumer must succeed")
+        return sorted((job["id"], job["name"], job["run_attempt"], job["conclusion"]) for job in jobs)
     if len(jobs) < 2 or not any(job.get("name") == CLEANUP_JOB for job in jobs):
         raise InventoryPending("cleanup requires a complete job inventory including itself")
     if sum(job.get("name") == CLEANUP_JOB for job in jobs) != 1:
@@ -89,6 +114,17 @@ def stable_consumers(repository, expected):
 
 def effective_jobs(repository, run):
     """Return GitHub's complete effective job snapshot for the current attempt."""
+    if run.get("completed") is True:
+        jobs = list(github.pages(repository, f"actions/runs/{run['id']}/jobs?filter=latest", "jobs"))
+        if (len({job.get("id") for job in jobs}) != len(jobs)
+                or len({job.get("name") for job in jobs}) != len(jobs)
+                or any(type(job.get("id")) is not int or job["id"] <= 0
+                       or not isinstance(job.get("name"), str) or not job["name"]
+                       or job.get("run_id") != run["id"] or type(job.get("run_attempt")) is not int
+                       or not 1 <= job["run_attempt"] <= run["run_attempt"]
+                       or job.get("head_sha") != run["head_sha"] for job in jobs)):
+            raise ValueError("workflow job inventory has ambiguous run-attempt provenance")
+        return jobs
     return attempt_jobs(repository, run, run["run_attempt"])
 
 
@@ -447,6 +483,53 @@ def deletion_snapshot(executor, repository, expected, artifact, proofs):
     return values
 
 
+def completed_artifact_ids(repository, expected, artifacts):
+    """Recover exact successful upload identities, including reused producer attempts."""
+    jobs = effective_jobs(repository, expected)
+    kind = KINDS[repository]
+
+    def uploaded(job_name, step_name, prefix):
+        producers = [job for job in jobs if job["name"] == job_name]
+        if len(producers) != 1 or producers[0].get("conclusion") != "success":
+            raise ValueError("completed cleanup requires its exact successful artifact producer")
+        producer = producers[0]
+        steps = [step for step in producer.get("steps", []) if step.get("name") == step_name]
+        if (len(steps) != 1 or steps[0].get("status") != "completed"
+                or steps[0].get("conclusion") != "success"):
+            raise ValueError("completed cleanup requires its exact successful artifact upload")
+        # Carried jobs can be relabeled with a newer attempt while retaining the original upload window.
+        matches = [item for item in artifacts
+                   if 0 < (artifact_attempt(item.get("name"), f"{kind}-public-{prefix}", expected) or 0)
+                   <= producer["run_attempt"]
+                   and timestamp(steps[0]["started_at"]) <= timestamp(item["created_at"])
+                   <= timestamp(steps[0]["completed_at"])]
+        if len(matches) != 1 or not current_evidence(matches[0], expected):
+            raise ValueError("completed cleanup requires its exact successful artifact upload")
+        attempt = artifact_attempt(matches[0]["name"], f"{kind}-public-{prefix}", expected)
+        if attempt != producer["run_attempt"]:
+            originals = [job for job in attempt_jobs(repository, expected, attempt) if job["name"] == job_name]
+            uploads = [step for job in originals for step in job.get("steps", []) if step.get("name") == step_name]
+            fields = ("name", "status", "conclusion", "started_at", "completed_at")
+            if (len(originals) != 1 or originals[0].get("status") != "completed"
+                    or originals[0].get("conclusion") != "success" or len(uploads) != 1
+                    or any(uploads[0].get(field) != steps[0].get(field) for field in fields)):
+                raise ValueError("carried artifact upload differs from its original successful execution")
+        return matches[0]
+
+    measurement = uploaded("Coverage results", "Upload public measurement", "measurement")
+    identifiers = {"measurement_artifact_id": measurement["id"]}
+    if expected["event"] == "push" and expected["head_branch"] == "dev":
+        receipt = uploaded("DEV image publication", "Upload DEV image receipt", "image")
+        record = publication_record(repository, receipt)
+        producer = record.get("producer_artifact") if isinstance(record, dict) else None
+        if (not isinstance(producer, dict) or type(producer.get("id")) is not int or producer["id"] <= 0
+                or record.get("measurement_run_attempt") != artifact_attempt(
+                    measurement["name"], f"{kind}-public-measurement", expected)):
+            raise ValueError("publication receipt differs from the effective measurement producer")
+        identifiers.update(image_artifact_id=producer["id"], image_receipt_artifact_id=receipt["id"])
+    return identifiers
+
+
 def cleanup(repository, expected):
     if repository not in KINDS or any(type(expected.get(key)) is not int or expected[key] <= 0
                                     for key in ("id", "run_attempt")):
@@ -461,6 +544,8 @@ def cleanup(repository, expected):
     consumers = stable_consumers(repository, expected)
     # Complete pagination before deletion can shift numbered pages.
     artifacts = list(github.pages(repository, f"{run_path}/artifacts", "artifacts"))
+    if expected.get("completed") is True:
+        expected = {**expected, **completed_artifact_ids(repository, expected, artifacts)}
     kind = KINDS[repository]
     finals = [artifact for artifact in artifacts
               if artifact.get("id") == expected.get("measurement_artifact_id")]
@@ -569,6 +654,62 @@ def cleanup(repository, expected):
     return deleted
 
 
+def completed_main():
+    payload = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+    repository = os.environ["GITHUB_REPOSITORY"]
+    if not (repository == "EndurantDevs/healthcare-mrf-api"
+            and os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch"
+            and os.environ["GITHUB_JOB"] == COMPLETED_CLEANUP_JOB
+            and os.environ["GITHUB_REF"] == "refs/heads/dev"
+            and os.environ.get("GITHUB_WORKFLOW_REF") == f"{repository}/{STALE_CLEANUP_WORKFLOW}@refs/heads/dev"
+            and payload.get("repository", {}).get("full_name") == repository
+            and payload["repository"].get("private") is False):
+        raise ValueError("completed cleanup requires its protected public workflow")
+    inputs = payload.get("inputs", {})
+    if (not isinstance(inputs, dict) or any(not isinstance(inputs.get(key), str)
+            or not re.fullmatch(r"[1-9][0-9]*", inputs[key]) for key in ("source_run_id", "source_run_attempt"))):
+        raise ValueError("completed cleanup requires an exact source run and attempt")
+    for attempt in range(60):
+        source = github.api(repository, f"actions/runs/{inputs['source_run_id']}")
+        if source.get("id") != int(inputs["source_run_id"]) or source.get("run_attempt") != int(inputs["source_run_attempt"]):
+            raise ValueError("retained artifacts: dispatched source run or attempt changed")
+        if source.get("status") == "completed":
+            break
+        if source.get("status") not in {"queued", "in_progress"}:
+            raise ValueError("retained artifacts: source run has an unexpected status")
+        if attempt == 59:
+            raise ValueError("retained artifacts: source CI did not finish within two minutes")
+        time.sleep(2)
+    if (source.get("conclusion") != "success" or source.get("display_title") != "CI"
+            or source.get("head_repository", {}).get("full_name") != repository):
+        print("Retained artifacts for unsuccessful, metadata-only or fork CI.")
+        return
+    if not (source.get("name") == "CI" and source.get("path") == ".github/workflows/ci.yml"
+            and source.get("status") == "completed" and source.get("event") in {"push", "pull_request"}
+            and all(type(source.get(key)) is int and source[key] > 0
+                    for key in ("id", "run_attempt", "workflow_id"))
+            and source.get("repository", {}).get("full_name") == repository
+            and github.SHA.fullmatch(source.get("head_sha", "")) and set(source["head_sha"]) != {"0"}
+            and isinstance(source.get("head_branch"), str) and source["head_branch"]
+            and (source["event"] != "push" or source["head_branch"] in {"main", "dev"})):
+        raise ValueError("completed source CI identity is invalid")
+    cleanup_run = {
+        "id": int(os.environ["GITHUB_RUN_ID"]), "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+        "path": STALE_CLEANUP_WORKFLOW, "event": "workflow_dispatch", "head_branch": "dev",
+        "head_sha": os.environ["GITHUB_SHA"],
+    }
+    if (any(cleanup_run[key] <= 0 for key in ("id", "run_attempt"))
+            or cleanup_run["id"] == source["id"]
+            or not github.SHA.fullmatch(cleanup_run["head_sha"]) or set(cleanup_run["head_sha"]) == {"0"}):
+        raise ValueError("completed cleanup execution identity is invalid")
+    own = github.api(repository, f"actions/runs/{cleanup_run['id']}")
+    cleanup_run["workflow_id"] = own.get("workflow_id")
+    if not current_cleanup_run(repository, cleanup_run):
+        raise ValueError("completed cleanup workflow identity changed")
+    cleanup(repository, {**{key: source[key] for key in (*RUN_FIELDS, "workflow_id")},
+                         "completed": True, "cleanup_run": cleanup_run})
+
+
 def main():
     payload = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     repository = os.environ["GITHUB_REPOSITORY"]
@@ -615,7 +756,9 @@ def main():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stale", action="store_true", help="remove obsolete durable public evidence")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--stale", action="store_true", help="remove obsolete durable public evidence")
+    mode.add_argument("--completed", action="store_true", help="remove intermediates after successful source CI")
     arguments = parser.parse_args()
     if arguments.stale:
         repository = os.environ["GITHUB_REPOSITORY"]
@@ -631,5 +774,7 @@ if __name__ == "__main__":
                                    "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
                                    "event": event, "head_sha": os.environ["GITHUB_SHA"],
                                    "head_branch": "main", "path": STALE_CLEANUP_WORKFLOW})
+    elif arguments.completed:
+        completed_main()
     else:
         main()
