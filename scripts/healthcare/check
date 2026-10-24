@@ -957,6 +957,11 @@ run_python_main() {
     tests/test_registry_ptg_office_intent_runtime_postgres.py \
     tests/test_registry_ptg_office_selection_postgres.py \
     tests/test_company_registry_assertions_postgres.py \
+    tests/test_plan_release_storage_postgres.py \
+    tests/test_plan_release_preparation_pins_postgres.py \
+    tests/test_plan_release_preparation_pin_safety_postgres.py \
+    tests/test_plan_release_preparation_pin_retirement_postgres.py \
+    tests/test_plan_release_read_admission_postgres.py \
     tests/test_provider_directory_profile_control_maintenance_postgres.py; do
     if [ -f "$repository_root/$test_path" ]; then
       collection_args+=(--ignore "$test_path")
@@ -2511,6 +2516,9 @@ run_core_postgres() {
     tests/test_formulary_fhir_collections_postgres.py \
     tests/test_process_mrf_address_summary_db.py
   fi
+  if [[ "$lane" = core-services-2 || "$lane" = all ]]; then
+    run_plan_release_postgres
+  fi
 
   if [[ "$lane" = core-services || "$lane" = all ]]; then
   if [ -f "$repository_root/tests/test_npi_result_archive_postgres.py" ]; then
@@ -3065,11 +3073,64 @@ run_owned_provider_directory_postgres() (
     exit "$status"
   }
   trap cleanup_owned_database EXIT
-  create_test_database "$owned_directory_database"
+  create_test_database "$owned_directory_database" || exit "$?"
   local dsn="postgresql+asyncpg://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@${HLTHPRT_DB_HOST}:${HLTHPRT_DB_PORT}/${owned_directory_database}"
+  local dsn_environment=()
+  if [[ -n "$variable" ]]; then dsn_environment+=("$variable=$dsn"); fi
   env -u DB_SCHEMA -u HLTHPRT_DB_DATABASE_OVERRIDE \
-    "$variable=$dsn" HLTHPRT_DB_DATABASE="$owned_directory_database" \
+    ${dsn_environment[@]+"${dsn_environment[@]}"} HLTHPRT_DB_DATABASE="$owned_directory_database" \
     timeout --foreground 295s python -m pytest -q "$@"
+)
+
+run_plan_release_postgres() (
+  local tests=(
+    tests/test_plan_release_storage_postgres.py
+    tests/test_plan_release_preparation_pins_postgres.py
+    tests/test_plan_release_preparation_pin_safety_postgres.py
+    tests/test_plan_release_preparation_pin_retirement_postgres.py
+    tests/test_plan_release_read_admission_postgres.py
+  )
+  local support=(
+    tests/plan_release_storage_postgres_support.py
+    tests/plan_release_storage_cohort_support.py
+    tests/plan_release_preparation_pin_postgres_support.py
+  )
+  local test_path present=0
+  for test_path in "${tests[@]}" "${support[@]}"; do
+    if [[ -e "$repository_root/$test_path" || -L "$repository_root/$test_path" ]]; then present=1; fi
+  done
+  [[ "$present" = 1 ]] || exit 0
+  require_native_source_files "${tests[@]}" "${support[@]}" scripts/ci/shard_pytest_nodeids.py || exit "$?"
+  local report="" selection=""
+  cleanup_plan_release_reports() {
+    local status=$?
+    trap - EXIT
+    if [[ -n "$report" ]] && ! rm -f -- "$report"; then
+      [ "$status" -ne 0 ] || status=1
+    fi
+    if [[ -n "$selection" ]] && ! rm -f -- "$selection"; then
+      [ "$status" -ne 0 ] || status=1
+    fi
+    exit "$status"
+  }
+  trap cleanup_plan_release_reports EXIT
+  report=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-plan-release-report.XXXXXX") || exit "$?"
+  selection=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-plan-release-selection.XXXXXX") || exit "$?"
+  python scripts/ci/shard_pytest_nodeids.py --shard-count 1 --shard-index 0 \
+    --output "$selection" -- "${tests[@]}" || exit "$?"
+  python - "$selection" "${tests[@]}" <<'PYTHON' || exit "$?"
+import pathlib
+import sys
+
+selected = pathlib.Path(sys.argv[1]).read_text().splitlines()
+modules = {node.split("::", 1)[0] for node in selected}
+assert selected and len(selected) == len(set(selected)), "Native plan release selection is empty or duplicated"
+assert all("::" in node for node in selected), "Native plan release selection has an invalid node ID"
+assert modules == set(sys.argv[2:]), "Native plan release selection differs from its closed module group"
+PYTHON
+  run_owned_provider_directory_postgres hc_plan_release_test "" \
+    "@$selection" --junitxml "$report" || exit "$?"
+  validate_registry_native_report "$report" "$selection"
 )
 
 geo_reference_native_test_path() {
@@ -3084,7 +3145,8 @@ geo_reference_native_test_path() {
 }
 
 run_geo_reference_postgres() (
-  local test_node="${1}::test_geo_replacement_keeps_indexes_and_fences_generation_and_failure" report="" selection=""
+  local report="" selection="" test_node=""
+  local -a test_nodes=()
   cleanup_geo_reference_report() {
     local status=$?
     trap - EXIT
@@ -3099,9 +3161,35 @@ run_geo_reference_postgres() (
   trap cleanup_geo_reference_report EXIT
   report=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-geo-reference-report.XXXXXX")
   selection=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-geo-reference-selection.XXXXXX")
-  printf '%s\n' "$test_node" > "$selection"
+  python - "$repository_root/$1" "$1" > "$selection" <<'PY' || exit "$?"
+import ast
+import pathlib
+import sys
+
+case_name = "test_geo_replacement_keeps_indexes_and_fences_generation_and_failure"
+tree = ast.parse(pathlib.Path(sys.argv[1]).read_text())
+tests = [node for node in ast.walk(tree)
+         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_")]
+assert len(tests) == 1 and tests[0].name == case_name, "Geo native source case inventory differs"
+case = tests[0]
+parameters = [node for node in case.decorator_list if isinstance(node, ast.Call)
+              and (getattr(node.func, "attr", None) or getattr(node.func, "id", None)) == "parametrize"]
+arguments = [argument.arg for argument in (*case.args.posonlyargs, *case.args.args, *case.args.kwonlyargs)]
+nodeid = sys.argv[2] + "::" + case_name
+if not parameters:
+    assert "index_profile" not in arguments, "Geo native parameter contract is missing"
+    print(nodeid)
+else:
+    expected = ast.parse('pytest.mark.parametrize("index_profile", ("current", "legacy-pricing", "legacy-native"))',
+                         mode="eval").body
+    assert len(parameters) == 1 and ast.dump(parameters[0]) == ast.dump(expected), "Geo native parameter contract differs"
+    assert "index_profile" in arguments, "Geo native parameter argument is missing"
+    for profile in ("current", "legacy-pricing", "legacy-native"):
+        print(nodeid + "[" + profile + "]")
+PY
+  while IFS= read -r test_node; do test_nodes+=("$test_node"); done < "$selection"
   run_owned_provider_directory_postgres hc_cms_admission_test HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN \
-    "$test_node" --junitxml "$report"
+    "${test_nodes[@]}" --junitxml "$report"
   validate_registry_native_report "$report" "$selection"
 )
 
