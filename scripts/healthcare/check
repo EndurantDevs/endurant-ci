@@ -305,6 +305,73 @@ manual_location_commands_native_test_paths() {
   printf '%s\n' "$native_test"
 }
 
+initial_inventory_native_test_path() {
+  local native_test=tests/test_registry_initial_inventory_postgres.py
+  local selected
+  selected=$(python3 - "$repository_root" "$native_test" <<'PY'
+import ast
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+
+def source_tree(name):
+    path = root / name
+    assert not path.is_symlink(), "Invalid initial inventory source: " + name
+    if not path.exists():
+        return ast.Module(body=[], type_ignores=[])
+    assert path.is_file(), "Invalid initial inventory source: " + name
+    return ast.parse(path.read_text(), filename=name)
+
+def defines(tree, name):
+    return any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+               for node in tree.body)
+
+def entry(tree, mapping):
+    return any(isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == mapping
+               for target in node.targets) and isinstance(node.value, ast.Dict)
+               and any(isinstance(key, ast.Constant) and key.value == "publish_initial_inventory"
+                       for key in node.value.keys) for node in tree.body)
+
+queue = source_tree("process/registry_publication_queue.py")
+execution = source_tree("process/registry_publication_execution.py")
+consumer = source_tree("process/registry_publication_consumer.py")
+authority = source_tree("process/registry_publication_authority.py")
+endpoint = source_tree("api/endpoint/registry_publication.py")
+source_tree(sys.argv[2])
+markers = (
+    defines(queue, "validated_registry_initial_inventory_command"),
+    defines(queue, "enqueue_registry_initial_inventory"),
+    defines(execution, "complete_queued_registry_initial_inventory"),
+    any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "complete_queued_registry_initial_inventory" for node in ast.walk(consumer)),
+    entry(authority, "_PATHS"),
+    entry(authority, "_COMMAND_VALIDATORS"),
+    defines(endpoint, "queue_initial_inventory"),
+)
+symbols = {"validated_registry_initial_inventory_command", "enqueue_registry_initial_inventory",
+           "complete_queued_registry_initial_inventory", "queue_initial_inventory"}
+mentioned = any(
+    isinstance(node, ast.Constant) and node.value == "publish_initial_inventory"
+    or isinstance(node, ast.Name) and node.id in symbols
+    or isinstance(node, ast.alias) and node.name in symbols
+    for tree in (queue, execution, consumer, authority, endpoint) for node in ast.walk(tree)
+)
+if any(markers) or mentioned or (root / sys.argv[2]).exists():
+    assert all(markers), "Incomplete initial inventory runtime capability"
+    print(sys.argv[2])
+PY
+  ) || return 1
+  [ -n "$selected" ] || return 0
+  require_native_source_files "$native_test" \
+    process/registry_publication_queue.py process/registry_publication_execution.py \
+    process/registry_publication_consumer.py process/registry_publication_authority.py \
+    api/endpoint/registry_publication.py process/network_bootstrap_sources.py \
+    process/network_candidate_custody.py process/network_membership_publication.py \
+    process/registry_network_catalog_read.py process/registry_publication_ptg_runtime.py || return 1
+  printf '%s\n' "$native_test"
+}
+
 publication_worker_native_test_paths() {
   local capability=(
     process/registry_publication_worker_permissions.py
@@ -315,9 +382,10 @@ publication_worker_native_test_paths() {
     tests/test_registry_publication_worker.py
     tests/test_registry_publication_worker_permissions_postgres.py
     tests/test_registry_publication_consumer_postgres.py
-    tests/test_registry_initial_inventory_postgres.py
   )
-  local source_path present=0
+  local source_path present=0 initial_inventory_test
+  initial_inventory_test=$(initial_inventory_native_test_path) || return 1
+  [ -z "$initial_inventory_test" ] || present=1
   for source_path in "${capability[@]}"; do
     if [ -e "$repository_root/$source_path" ] || [ -L "$repository_root/$source_path" ]; then present=1; fi
   done
@@ -355,8 +423,8 @@ publication_worker_native_test_paths() {
     tests/test_registry_management_permissions_postgres.py \
     tests/test_registry_candidate_composition_postgres.py || return 1
   printf '%s\n' tests/test_registry_publication_worker_permissions_postgres.py \
-    tests/test_registry_publication_consumer_postgres.py \
-    tests/test_registry_initial_inventory_postgres.py
+    tests/test_registry_publication_consumer_postgres.py
+  if [ -n "$initial_inventory_test" ]; then printf '%s\n' "$initial_inventory_test"; fi
 }
 
 benefit_plan_native_test_paths() {
