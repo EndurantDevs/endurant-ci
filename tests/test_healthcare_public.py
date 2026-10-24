@@ -1881,6 +1881,11 @@ run_registry_ptg_scope_postgres postgresql://synthetic/runtime_test
             REGISTRY_OFFICE_CUSTODY_CAPABILITY[-1], REGISTRY_OFFICE_PREPARATION_CAPABILITY[-1],
             REGISTRY_OFFICE_CHOICES_CAPABILITY[-1], *REGISTRY_OFFICE_COORDINATOR_CAPABILITY[-4:],
             COMPANY_ASSERTION_CAPABILITY[-1], PROFILE_MAINTENANCE_CAPABILITY[-1],
+            "tests/test_plan_release_storage_postgres.py",
+            "tests/test_plan_release_preparation_pins_postgres.py",
+            "tests/test_plan_release_preparation_pin_safety_postgres.py",
+            "tests/test_plan_release_preparation_pin_retirement_postgres.py",
+            "tests/test_plan_release_read_admission_postgres.py",
         )
         for present in (False, True):
             with self.subTest(present=present), tempfile.TemporaryDirectory() as temporary:
@@ -2760,6 +2765,7 @@ timeout() { log_call "$@"; }
 run_scoped_archive_postgres() { log_call archive "$@"; }
 geo_reference_native_test_path() { printf '%s\n' tests/test_geo_reference_family_postgres.py; }
 run_geo_reference_postgres() { log_call "$@"; }
+run_plan_release_postgres() { log_call plan-release; }
 create_test_database() { :; }
 drop_test_database() { :; }
 python3() { printf '%s\n' synthetic; }
@@ -2783,7 +2789,8 @@ run_core_postgres postgresql://postgres:postgres@localhost:5432/test "$ROUTE_LAN
         self.assertEqual(first[12:], second[12:])
         self.assertEqual(len(first[12:]), 51)
         self.assertEqual(len(set(first[12:])), 51)
-        self.assertEqual(len(calls_by_lane["core-services-2"]), 1)
+        self.assertEqual(calls_by_lane["core-services-2"][1:], [["plan-release"]])
+        self.assertNotIn(["plan-release"], calls_by_lane["core-services"])
         optional_paths = [argument for call in calls_by_lane["core-services"][1:]
                           for argument in call if argument.startswith("tests/")]
         self.assertEqual(len(optional_paths), 27)
