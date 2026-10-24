@@ -68,7 +68,7 @@ class PublicWorkflowPermissions(unittest.TestCase):
     def test_package_policy_keeps_verbose_complete_tests_and_proof_inputs(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
         job = workflow["jobs"]["validate"]
-        self.assertEqual(job["timeout-minutes"], 20)
+        self.assertEqual(job["timeout-minutes"], 30)
         self.assertEqual(job.get("permissions", workflow["permissions"]),
                          {"contents": "read", "actions": "read", "checks": "read"})
         step = next(step for step in job["steps"]
@@ -191,14 +191,30 @@ class PublicWorkflowPermissions(unittest.TestCase):
         self.assertIn("Upload PostgreSQL coverage data", names)
         self.assertIn("Expose immutable coverage artifact", names)
 
-    def test_snapshot_lanes_keep_native_toolchain_and_job_limits(self):
+    def test_database_lanes_reuse_prebuilt_native_artifacts_and_keep_job_limits(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         job = workflow["jobs"]["address-canonical-db-tests"]
         self.assertEqual(job["timeout-minutes"], 20)
         self.assertEqual(job["strategy"]["fail-fast"], False)
         setup = next(step for step in job["steps"] if step.get("name") == "Prepare source and toolchain")
-        for lane in ("core-snapshots", "core-snapshots-2"):
-            self.assertIn(f"matrix.shard == '{lane}'", setup["with"]["rust"])
+        # Database lanes consume the hygiene job's debug binaries and native wheel; no Rust toolchain.
+        self.assertNotIn("with", setup)
+        hygiene = workflow["jobs"]["public-hygiene"]
+        hygiene_setup = next(step for step in hygiene["steps"] if step.get("name") == "Prepare source and toolchain")
+        self.assertEqual(hygiene_setup["with"], {"rust": "true", "cargo-cache": "hygiene"})
+        staging = next(step for step in hygiene["steps"] if step.get("name") == "Stage shared Rust test binaries")
+        self.assertIn('check" native-wheel "$binary_directory"', staging["run"])
+        upload = next(step for step in hygiene["steps"] if step.get("name") == "Upload exact-source Rust test binaries")
+        self.assertIn("rust-debug-binaries/*.whl", upload["with"]["path"].split("\n"))
+        self.assertIn("rust-debug-binaries/ptg2-address-canon-wheel.sha256", upload["with"]["path"].split("\n"))
+        rust_setup = next(step for step in workflow["jobs"]["rust-scanner"]["steps"]
+                          if step.get("name") == "Prepare source and toolchain")
+        self.assertEqual(rust_setup["with"], {"rust": "true", "cargo-cache": "rust"})
+        for job_id in ("python-tests", "address-canonical-db-tests"):
+            download = next(step for step in workflow["jobs"][job_id]["steps"]
+                            if step.get("name") == "Download exact-source Rust test binaries")
+            self.assertEqual(download["with"]["artifact-ids"],
+                             "${{ needs.public-hygiene.outputs.rust_artifact_id || 'missing' }}", job_id)
         execution = next(step for step in job["steps"] if step.get("name") == "Run complete validation stage")
         self.assertEqual(execution["env"]["CI_RUST_BINARIES"], "${{ github.workspace }}/rust-debug-binaries")
         self.assertIn('postgres "$CI_SHARD"', execution["run"])

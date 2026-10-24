@@ -1066,7 +1066,7 @@ publication_worker_native_test_paths
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         setup = next(step for step in workflow["jobs"]["address-canonical-db-tests"]["steps"]
                      if step["name"] == "Prepare source and toolchain")
-        self.assertEqual(setup["with"], {"rust": "${{ (matrix.shard == 'core-services' || matrix.shard == 'core-services-2') || matrix.shard == 'core-snapshots' || matrix.shard == 'core-snapshots-2' || matrix.shard == 'core-ptg' || startsWith(matrix.shard, 'directory-source') || matrix.shard == 'directory-address' || matrix.shard == 'profile-publication' || startsWith(matrix.shard, 'registry-') }}"})
+        self.assertNotIn("with", setup)
         cases = [(lane, "", "") for lane in (
             "core-services", "core-services-2", "core", "core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", "core-ptg", "directory-source", "directory-source-2", "directory-storage",
             "directory-address", "profile-storage", "profile-publication",
@@ -1089,6 +1089,8 @@ publication_worker_native_test_paths
         cases += [("registry-0", "", stage) for stage in (
             "collection", "nodeids-cleanup", "wrong-selection", "duplicate-selection", "empty-selection",
         )]
+        cases += [("registry-0", "", "prebuilt"), ("core", "", "prebuilt")]
+        prebuilt_wheel = "ptg2_address_canon-0.0.0-cp314-cp314-linux_x86_64.whl"
         successful_shard_members = []
         for offset in range(0, len(cases), 4):
             with ExitStack() as temporaries:
@@ -1116,6 +1118,12 @@ publication_worker_native_test_paths
                         ), encoding="utf-8",
                     )
                     log = root / "calls"
+                    prebuilt = root / "prebuilt"
+                    if failure == "prebuilt":
+                        prebuilt.mkdir()
+                        (prebuilt / prebuilt_wheel).write_bytes(b"synthetic prebuilt wheel\n")
+                        (prebuilt / "ptg2-address-canon-wheel.sha256").write_text(
+                            f"{hashlib.sha256(b'synthetic prebuilt wheel\n').hexdigest()}  {prebuilt_wheel}\n")
                     script = CHECK_FUNCTIONS + r'''
 prepare_debug_rust_binaries() { :; }
 wait_for_service() { :; }
@@ -1129,7 +1137,10 @@ drop_test_database() {
   [ "$FAIL_STAGE" != drop ]
 }
 psql() { printf 'extensions\t%s\n' "$*" >> "$CALL_LOG"; }
-rustc() { echo "rustc $([ "$FAIL_STAGE" = rust-version ] && echo 1.98.0 || echo 1.98.1)"; }
+rustc() {
+  [ "$FAIL_STAGE" != prebuilt ] || return 127
+  echo "rustc $([ "$FAIL_STAGE" = rust-version ] && echo 1.98.0 || echo 1.98.1)"
+}
 rm() {
   if [[ "$FAIL_STAGE" = report-cleanup && "${!#}" = *"/healthcare-network-registry."* ]]; then return 23; fi
   if [[ "$FAIL_STAGE" = nodeids-cleanup && "${!#}" = *"/healthcare-registry-nodeids."* ]]; then return 23; fi
@@ -1226,6 +1237,9 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                         "ROUTE_LANE": lane, "FAIL_STAGE": failure,
                         "NETWORK_REGISTRY_TEST_DSN": "", "HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN": "",
                     }
+                    environment.pop("CI_RUST_BINARIES", None)
+                    if failure == "prebuilt":
+                        environment["CI_RUST_BINARIES"] = str(prebuilt)
                     prepared.append((lane, missing, failure, only_member))
                     pending.append((root, source, runner, log, script, environment, ""))
                 results = self._run_optional_native_cases(pending, timeout=None, cwd=ROOT)
@@ -1235,7 +1249,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                         if isinstance(result, (OSError, subprocess.SubprocessError)):
                             raise result
                         selected = (lane == "core" or lane.startswith("registry-")) and (missing != "all" or lane.startswith("registry-"))
-                        expected = 17 if failure in ("build", "install", "pytest", "collection") else 1 if failure not in ("", "more-management-cases") or (selected and missing) else 0
+                        expected = 17 if failure in ("build", "install", "pytest", "collection") else 1 if failure not in ("", "more-management-cases", "prebuilt") or (selected and missing) else 0
                         self.assertEqual(result.returncode, expected, result.stderr)
                         calls = log.read_text().splitlines() if log.exists() else []
                         if failure in ("report-cleanup", "nodeids-cleanup"):
@@ -1260,19 +1274,26 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                                                 else paths[0] if missing == "all-with-model" else missing)
                                     self.assertIn(f"Missing required native registry test: {required}", result.stderr)
                             continue
-                        self.assertTrue(calls[0].startswith("build\t-m maturin build --locked --features python-extension --out "))
-                        self.assertNotIn("--release", calls[0])
+                        if failure == "prebuilt":
+                            self.assertFalse(any(call.startswith("build\t") for call in calls))
+                            self.assertTrue(calls[0].endswith(f"/prebuilt/{prebuilt_wheel}"))
+                            self.assertRegex(result.stdout, r"CI_PHASE end name=rust-wheel-reuse elapsed_seconds=\d+ exit_code=0")
+                            install_calls = calls
+                        else:
+                            self.assertTrue(calls[0].startswith("build\t-m maturin build --locked --features python-extension --out "))
+                            self.assertNotIn("--release", calls[0])
+                            install_calls = calls[1:]
                         runs = [call for call in calls if call.startswith("pytest\t")]
                         report_failures = {"skipped", "error", "failure", "summary-skipped", "no-tests", "bad-count",
                                            "empty-report", "invalid-report", "large-report", "report-cleanup",
                                            "stale-registry-roster", "no-classname", "wrong-selection", "duplicate-selection", "empty-selection", "nodeids-cleanup"}
-                        self.assertEqual(len(runs), int(failure in ("", "pytest", "drop", "more-management-cases") or failure in report_failures
+                        self.assertEqual(len(runs), int(failure in ("", "pytest", "drop", "more-management-cases", "prebuilt") or failure in report_failures
                                                         or failure.startswith("missing-report:")))
                         if runs:
                             self.assertRegex(result.stdout, rf"CI_PHASE end name=network-registry-postgres-tests elapsed_seconds=\d+ exit_code={expected}")
-                            self.assertTrue(calls[1].startswith("uv\t--no-config pip install --python "))
-                            self.assertIn(" --no-build --no-deps ", calls[1])
-                            self.assertTrue(calls[2].startswith("uv\t--no-config pip check --python "))
+                            self.assertTrue(install_calls[0].startswith("uv\t--no-config pip install --python "))
+                            self.assertIn(" --no-build --no-deps ", install_calls[0])
+                            self.assertTrue(install_calls[1].startswith("uv\t--no-config pip check --python "))
                             _, registry_dsn, membership_dsn, arguments = runs[0].split("\t", 3)
                             self.assertEqual(registry_dsn, membership_dsn)
                             self.assertRegex(registry_dsn, r"@127\.0\.0\.1:5440/hc_network_registry_[0-9a-f]{32}$")
@@ -2364,13 +2385,15 @@ test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
 
     def test_cms_native_coverage_routes_and_owns_required_fixture_environments(self):
         routes = {
-            "directory-source": (
+            "registry-19": (
                 "tests/test_cms_npd_admission_postgres.py",
             ),
-            "directory-source-2": (
+            "registry-12": (
                 "tests/test_cms_npd_candidate_coverage_postgres.py",
                 "tests/test_cms_npd_intake_postgres.py",
                 "tests/test_provider_directory_cms_retained_relations_postgres.py",
+            ),
+            "directory-source-2": (
                 "tests/test_cms_capacity_preflight_receipt_migration.py",
                 "tests/test_provider_directory_cms_preflight_postgres.py",
                 "tests/test_provider_directory_cms_wal_budget_postgres.py",
@@ -2401,9 +2424,13 @@ test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
                 "tests/test_provider_directory_dataset_rehydrate_db.py",
                 "tests/test_provider_directory_proof_store_db.py",
                 "tests/test_provider_directory_dataset_resource_mutation_fence_db.py",
+            ),
+            "registry-18": (
                 "tests/test_provider_directory_semantic_proof_v3_db.py",
                 "tests/test_provider_directory_semantic_proof_v3_fences_db.py",
                 "tests/test_provider_directory_semantic_candidate_proof_v3_db.py",
+            ),
+            "registry-39": (
                 "tests/test_provider_directory_organization_union_v4_db.py",
                 "tests/test_provider_directory_organization_candidate_proof_v4_db.py",
                 "tests/test_provider_directory_organization_partition_v4_db.py",
@@ -2424,14 +2451,20 @@ test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
                 "tests/test_cms_doctors_preparation_postgres.py",
                 "tests/test_cms_doctors_preparation_seal_postgres.py",
                 "tests/test_cms_doctors_source_provenance_postgres.py",
-                "tests/test_entity_address_prepared_doctors_postgres.py::test_source_ranges_and_geo_use_prepared_doctors_until_exact_native_apply",
                 "tests/test_entity_address_prepared_doctors_postgres.py",
-                "tests/test_entity_address_prepared_doctors_postgres.py::test_source_backend_rejects_replacement_and_releases_locks_after_cancellation",
                 "tests/test_provider_profile_detail_load_postgres.py",
                 "tests/test_cms_archive_publication_postgres.py",
                 "tests/test_cms_serving_publication_postgres.py",
                 "tests/test_entity_address_serving_receipt_postgres.py",
                 "tests/test_provider_directory_cms_serving_receipt_postgres.py",
+            ),
+            "registry-24": (
+                "tests/test_entity_address_prepared_doctors_postgres.py::test_source_ranges_and_geo_use_prepared_doctors_until_exact_native_apply",
+            ),
+            "registry-13": (
+                "tests/test_entity_address_prepared_doctors_postgres.py::test_source_backend_rejects_replacement_and_releases_locks_after_cancellation",
+            ),
+            "registry-20": (
                 "tests/test_provider_directory_profile_failed_cleanup_postgres.py",
                 "tests/test_provider_directory_profile_initial_migration.py::test_native_initial_receipt_guards",
                 "tests/test_provider_directory_import_run_guards.py::test_native_complete_guard_catalog_and_ordinary_update",
@@ -2441,9 +2474,13 @@ test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
                 "tests/test_provider_directory_profile_initial_replay.py",
             ),
         }
+        # Registry shards that carry provider-profile blocks route through the profile family function.
+        profile_lanes = {"profile-storage", "profile-publication", "registry-24", "registry-13", "registry-20"}
         all_paths = tuple(path for paths in routes.values() for path in paths)
-        cms_paths = set(routes["directory-source"] + routes["directory-source-2"] + routes["profile-publication"]
-                        + routes["directory-address"][7:] + routes["profile-storage"][:4])
+        cms_paths = set(routes["registry-19"] + routes["registry-12"] + routes["directory-source-2"]
+                        + routes["profile-publication"] + routes["registry-24"] + routes["registry-13"] + routes["registry-20"]
+                        + routes["directory-address"][7:] + routes["registry-18"] + routes["registry-39"]
+                        + routes["profile-storage"][:4])
         entities_paths = set(routes["profile-storage"][4:6])
         cases = [
             (lane, present, "", "", 0)
@@ -2451,10 +2488,10 @@ test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
             for present in (all_paths, (), (paths[-1],))
         ]
         cases += [(lane, all_paths, paths[-1], "", 17) for lane, paths in routes.items()]
-        cases += [("profile-publication", (path,), "", "", 0)
-                  for path in routes["profile-publication"][-7:]]
-        cases += [("profile-publication", all_paths, path, "", 17)
-                  for path in routes["profile-publication"][-7:-1]]
+        cases += [("registry-20", (path,), "", "", 0)
+                  for path in routes["registry-20"][-7:]]
+        cases += [("registry-20", all_paths, path, "", 17)
+                  for path in routes["registry-20"][-7:-1]]
         cases += [
             (lane, all_paths, "", cleanup, expected)
             for lane in ("directory-address", "profile-publication", "profile-storage")
@@ -2527,7 +2564,7 @@ if selected:
                                  "HLTHPRT_OPENADDRESSES_BATCH_POSTGRES_DSN",
                                  "HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS"):
                         environment.pop(name, None)
-                    function = "run_provider_profile_postgres" if lane.startswith("profile") else "run_provider_directory_postgres"
+                    function = "run_provider_profile_postgres" if lane in profile_lanes else "run_provider_directory_postgres"
                     script = CHECK_FUNCTIONS + r'''
 install_address_canon_wheel() { :; }
 create_test_database() {
@@ -2615,21 +2652,17 @@ test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
                         self.assertFalse(leftovers)
 
     def test_directory_native_wheel_install_order(self):
-        suites = {
-            "directory-source": "test_cms_npd_admission_postgres.py",
-            "directory-source-2": "test_cms_npd_intake_postgres.py",
-            "provider-directory": "test_cms_npd_admission_postgres.py",
-            "directory-address": "test_provider_directory_dataset_resource_mutation_fence_db.py",
-            "profile-publication": "test_cms_doctors_preparation_postgres.py",
-            "provider-profile": "test_cms_doctors_preparation_postgres.py",
-        }
-        for lane, failure in ((lane, failure) for lane in suites for failure in ("", "build", "install")):
-            with self.subTest(lane=lane, failure=failure), tempfile.TemporaryDirectory() as temporary:
+        cases = [("directory-source", "build", ""), ("provider-directory", "build", ""),
+                 ("directory-source", "build", "build"), ("directory-source", "build", "install"),
+                 ("directory-source", "reuse", ""), ("provider-directory", "reuse", ""),
+                 ("directory-source", "reuse", "digest"), ("directory-source", "reuse", "install")]
+        for lane, mode, failure in cases:
+            with self.subTest(lane=lane, mode=mode, failure=failure), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 source_root, runner = root / "source", root / "runner"
                 (source_root / "support/ptg2_scanner").mkdir(parents=True)
                 (source_root / "tests").mkdir()
-                (source_root / "tests" / suites[lane]).touch()
+                (source_root / "tests/test_cms_npd_admission_postgres.py").touch()
                 runner.mkdir()
                 calls_path = root / "calls"
                 environment_by_name = {
@@ -2640,14 +2673,26 @@ test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
                     "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "synthetic",
                     "HLTHPRT_DB_HOST": "127.0.0.1", "HLTHPRT_DB_PORT": "5432",
                 }
+                environment_by_name.pop("CI_RUST_BINARIES", None)
+                wheel_name = "ptg2_address_canon-0.0.0-cp314-cp314-linux_x86_64.whl"
+                if mode == "reuse":
+                    prebuilt = root / "prebuilt"
+                    prebuilt.mkdir()
+                    (prebuilt / wheel_name).write_bytes(b"synthetic prebuilt wheel\n")
+                    digest = hashlib.sha256(b"synthetic prebuilt wheel\n").hexdigest()
+                    if failure == "digest":
+                        digest = "0" * 64
+                    (prebuilt / "ptg2-address-canon-wheel.sha256").write_text(f"{digest}  {wheel_name}\n")
+                    environment_by_name["CI_RUST_BINARIES"] = str(prebuilt)
                 run_result = subprocess.run(
                     ["bash", "-eu"], input=CHECK_FUNCTIONS + _directory_wheel_script(),
                     env=environment_by_name, capture_output=True, text=True, timeout=30,
                 )
-                self.assertEqual(run_result.returncode, 17 if failure else 0, run_result.stderr)
+                expected = 1 if failure == "digest" else 17 if failure else 0
+                self.assertEqual(run_result.returncode, expected, run_result.stderr)
                 phases = re.findall(r"CI_PHASE start name=([a-z-]+)", run_result.stdout)
-                expected_phases = ["postgres-prepare", "rust-wheel-build"]
-                if failure != "build":
+                expected_phases = ["postgres-prepare", "rust-wheel-build" if mode == "build" else "rust-wheel-reuse"]
+                if failure not in ("build", "digest"):
                     expected_phases.append("rust-wheel-install")
                 if not failure:
                     expected_phases.append("postgres-tests")
@@ -2656,21 +2701,31 @@ test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
                                      run_result.stdout)
                 self.assertEqual([name for name, _status in endings], expected_phases)
                 self.assertEqual([int(status) for _name, status in endings],
-                                 [0] * (len(expected_phases) - 1) + [17 if failure else 0])
-                calls = calls_path.read_text().splitlines()
-                self.assertEqual(sum(call.startswith("build\t") for call in calls), 1)
-                self.assertTrue(calls[0].startswith("build\t-m maturin build --locked --features python-extension --out "))
-                self.assertNotIn("--release", calls[0])
-                native_runs = [call for call in calls if f"tests/{suites[lane]}" in call]
+                                 [0] * (len(expected_phases) - 1) + [expected])
+                calls = calls_path.read_text().splitlines() if calls_path.exists() else []
+                native_runs = [call for call in calls if "tests/test_provider_directory_insurance_network_identity.py" in call]
+                if mode == "build":
+                    self.assertEqual(sum(call.startswith("build\t") for call in calls), 1)
+                    self.assertTrue(calls[0].startswith("build\t-m maturin build --locked --features python-extension --out "))
+                    self.assertNotIn("--release", calls[0])
+                    installs = calls[1:]
+                else:
+                    self.assertFalse(any(call.startswith("build\t") for call in calls))
+                    installs = calls
                 if failure:
                     self.assertFalse(native_runs)
                     self.assertFalse(any(call.startswith("tests\t") for call in calls))
+                    if failure == "digest":
+                        self.assertEqual(calls, [])
+                        self.assertIn("ptg2-address-canon-wheel.sha256", run_result.stderr + run_result.stdout)
                 else:
                     self.assertEqual(len(native_runs), 1)
-                    self.assertTrue(calls[1].startswith("uv\t--no-config pip install --python "))
-                    self.assertIn(" --no-build --no-deps ", calls[1])
-                    self.assertTrue(calls[2].startswith("uv\t--no-config pip check --python "))
-                    self.assertTrue(calls[3].startswith("tests\t"))
+                    self.assertTrue(installs[0].startswith("uv\t--no-config pip install --python "))
+                    self.assertIn(" --no-build --no-deps ", installs[0])
+                    if mode == "reuse":
+                        self.assertTrue(installs[0].endswith(f"/prebuilt/{wheel_name}"))
+                    self.assertTrue(installs[1].startswith("uv\t--no-config pip check --python "))
+                    self.assertTrue(installs[2].startswith("tests\t"))
                     self.assertEqual(sum(call.startswith("uv\t--no-config pip install") for call in calls), 1)
                 self.assertEqual(list(runner.iterdir()), [])
 
@@ -2723,6 +2778,7 @@ create_test_database() { printf 'create:%s\n' "$1" >> "$LIFECYCLE"; }
 drop_test_database() { printf 'drop:%s\n' "$1" >> "$LIFECYCLE"; }
 run_provider_directory_postgres postgresql://synthetic/test directory-source
 run_provider_directory_postgres postgresql://synthetic/test directory-source-2
+run_provider_directory_postgres postgresql://synthetic/test registry-19
 '''
                 result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
                 expected = 4 if missing else 17 if failure else 0
@@ -2762,7 +2818,7 @@ run_provider_directory_postgres postgresql://synthetic/test directory-source-2
             (source / "tests").mkdir(parents=True)
             for relative in available_paths:
                 (source / relative).touch()
-            for lane in ("directory-source", "directory-source-2", "all"):
+            for lane in ("directory-source", "registry-19", "directory-source-2", "registry-12", "registry-28", "all"):
                 call_log = Path(temporary) / lane
                 script = CHECK_FUNCTIONS + "\nrun_source_routes() {" + body + "}\n" + r'''
 log_call() {
@@ -2787,7 +2843,10 @@ run_source_routes postgresql://synthetic/test "$ROUTE_LANE"
                 self.assertEqual(result.returncode, 0, result.stderr)
                 calls_by_lane[lane] = [line.rstrip("\0").split("\0") for line in call_log.read_text().splitlines()]
         first, second = (calls_by_lane[lane] for lane in ("directory-source", "directory-source-2"))
-        self.assertEqual((len(first), len(second)), (6, 6))
+        admission, candidates, rooted_graph = (calls_by_lane[lane] for lane in ("registry-19", "registry-12", "registry-28"))
+        self.assertEqual((len(first), len(second)), (5, 4))
+        self.assertEqual([len(admission), len(candidates), len(rooted_graph)], [1, 1, 1])
+        shards = first + admission + candidates + second[:2] + rooted_graph + second[2:]
         self.assertEqual(len(first[0][9:]), 18)
         retirement_tests = [
             "tests/test_provider_directory_terminal_root_retirement_postgres.py",
@@ -2802,8 +2861,8 @@ run_source_routes postgresql://synthetic/test "$ROUTE_LANE"
             self.assertEqual(call[15:], retirement_tests)
         for call in first[:3]:
             self.assertEqual(call[:2], ["postgresql://synthetic/test", ""])
-        self.assertEqual(first + second, calls_by_lane["all"])
-        selectors = [argument for call in first + second for argument in call if argument.startswith("tests/")]
+        self.assertEqual(shards, calls_by_lane["all"])
+        selectors = [argument for call in shards for argument in call if argument.startswith("tests/")]
         self.assertEqual(set(selectors), available_paths)
         for path in available_paths:
             self.assertEqual(selectors.count(path), 2 if path in retirement_tests else 1)
@@ -2811,7 +2870,7 @@ run_source_routes postgresql://synthetic/test "$ROUTE_LANE"
         self.assertEqual(second[-1][9:], list(PROVIDER_CANDIDATE_TESTS[6:]))
         for call in second[-2:]:
             self.assertEqual(call[:2], ["", "postgresql://synthetic/test"])
-        for call in first + second:
+        for call in shards:
             if call[2] == "timeout":
                 self.assertEqual(call[3:9], ["--foreground", "295s", "python", "-m", "pytest", "-q"])
 
@@ -2895,7 +2954,7 @@ run_candidates postgresql://synthetic/test
             (source / "tests").mkdir(parents=True)
             for relative in available_paths:
                 (source / relative).touch()
-            for lane in ("core-services", "core-services-2"):
+            for lane in ("core-services", "core-services-2", "registry-31"):
                 call_log = Path(temporary) / lane
                 script = CHECK_FUNCTIONS + r'''
 log_call() { printf '%s\0' "$@" >> "$CALL_LOG"; printf '\n' >> "$CALL_LOG"; }
@@ -2929,7 +2988,8 @@ run_core_postgres postgresql://postgres:postgres@localhost:5432/test "$ROUTE_LAN
         self.assertEqual(len(set(first[12:])), 51)
         self.assertEqual(calls_by_lane["core-services-2"][1:], [["plan-release"]])
         self.assertNotIn(["plan-release"], calls_by_lane["core-services"])
-        optional_paths = [argument for call in calls_by_lane["core-services"][1:]
+        self.assertEqual(len(calls_by_lane["registry-31"]), 1)
+        optional_paths = [argument for call in calls_by_lane["core-services"][1:] + calls_by_lane["registry-31"]
                           for argument in call if argument.startswith("tests/")]
         self.assertEqual(len(optional_paths), 27)
         self.assertEqual(len(set(optional_paths)), 27)
@@ -2966,8 +3026,8 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-servic
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 calls = log.read_text().splitlines()
-                self.assertEqual(len(calls), 3 if len(present) == 3 else 2)
-                self.assertTrue(calls[-1].endswith(REQUIRED_IMPORT_NATIVE_TESTS[0]))
+                self.assertEqual(len(calls), 2 if len(present) == 3 else 1)
+                self.assertFalse(any(call.endswith(REQUIRED_IMPORT_NATIVE_TESTS[0]) for call in calls))
                 for name in present:
                     self.assertTrue(any(name in call for call in calls), name)
                 for name in names:
@@ -4331,7 +4391,7 @@ else:
 
     def test_installer_coverage_profile_and_exact_set_checks_are_executable(self):
         installer = (ROOT / "scripts/healthcare/install_python_lock").read_text()
-        programs = re.findall(r"<<'PY'\n(.*?)\nPY", installer, re.S)
+        programs = re.findall(r"<<'PY'\n(.*?)\nPY", installer, re.DOTALL)
         self.assertEqual(len(programs), 3)
         coverage_program, comparison_program = programs[1:]
 
@@ -5113,20 +5173,23 @@ git() {
                     self.assertIn(expected_error, result.stderr)
 
     def test_custom_import_verification_routes_native_families_and_checks_reports(self):
-        self._check_reported_custom_import_routes(CUSTOM_IMPORT_VERIFICATION_CAPABILITIES)
+        self._check_reported_custom_import_routes(CUSTOM_IMPORT_VERIFICATION_CAPABILITIES, native_lane="registry-14")
 
     def test_custom_import_rejection_runs_separately_from_snapshot_readers_and_checks_both_reports(self):
         self._check_reported_custom_import_routes(
-            (CUSTOM_IMPORT_REJECTION_CAPABILITY,), CUSTOM_IMPORT_SNAPSHOT_READ_TESTS)
+            (CUSTOM_IMPORT_REJECTION_CAPABILITY,), CUSTOM_IMPORT_SNAPSHOT_READ_TESTS,
+            native_lane="core-snapshots-2", reader_lane="registry-4")
 
-    def _check_reported_custom_import_routes(self, capabilities, reader_paths=()):
+    def _check_reported_custom_import_routes(self, capabilities, reader_paths=(), *, native_lane, reader_lane=None):
         native_paths = tuple(capability[-1] for capability in capabilities)
+        group_lanes = [(native_lane, native_paths[-1])] + ([(reader_lane, reader_paths[0])] if reader_paths else [])
         cases = [(lane, len(capabilities), "", native_paths[-1]) for lane in
-                 ("core-services", "core-services-2", "core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", "core-ptg", "all", "legacy")]
-        cases += [("core-snapshots-2", count, "", native_paths[-1]) for count in range(len(capabilities))]
-        cases += [("core-snapshots-2", len(capabilities), stage, native_paths[-1]) for stage in ("create", "setup")]
-        cases += [("core-snapshots-2", len(capabilities), stage, failure_path)
-                  for failure_path in (*reader_paths[:1], native_paths[-1])
+                 ("core-services", "core-services-2", "core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", "core-ptg",
+                  *(lane for lane, _ in group_lanes), "all", "legacy")]
+        cases += [(native_lane, count, "", native_paths[-1]) for count in range(len(capabilities))]
+        cases += [(lane, len(capabilities), stage, failure_path) for lane, failure_path in group_lanes for stage in ("create", "setup")]
+        cases += [(lane, len(capabilities), stage, failure_path)
+                  for lane, failure_path in group_lanes
                   for stage in ("pytest", "missing-report", "empty", "skipped", "error", "failure", "duplicate", "wrong-family", "missing-family")]
         for lane, count, stage, failure_path in cases:
             with self.subTest(lane=lane, count=count, stage=stage, failure=failure_path), tempfile.TemporaryDirectory() as temporary:
@@ -5232,8 +5295,10 @@ printf 'complete\n' >> "$CALL_LOG"
                         self.assertNotIn("--ignore " + capability[1] + " ", call + " ")
                 native = [call.split("\t") for call in calls if call.startswith("native\t")]
                 expected_groups = []
-                if count and lane in {"core-snapshots-2", "all", "legacy"}:
-                    expected_groups = ([list(reader_paths)] if reader_paths else []) + [list(native_paths[:count])]
+                if count and reader_paths and lane in {reader_lane, "all", "legacy"}:
+                    expected_groups.append(list(reader_paths))
+                if count and lane in {native_lane, "all", "legacy"}:
+                    expected_groups.append(list(native_paths[:count]))
                 expected_calls = expected_groups
                 if stage in {"create", "setup"}:
                     expected_calls = []
@@ -5244,7 +5309,7 @@ printf 'complete\n' >> "$CALL_LOG"
                 created = [call.removeprefix("create\t") for call in calls if call.startswith("create\t")]
                 dropped = [call.removeprefix("drop\t") for call in calls if call.startswith("drop\t")]
                 self.assertEqual(dropped, created)
-                if lane == "core-snapshots-2":
+                if lane in {native_lane, reader_lane}:
                     self.assertEqual(len(created), 1 if stage in {"create", "setup"} else len(expected_calls))
                 self.assertEqual(calls.count("complete"), int(not stage))
                 self.assertEqual(len({call[2] for call in native}), len(native))
@@ -5315,9 +5380,8 @@ python() {
     if [[ "$path" = "$FAILURE_PATH" ]]; then return 17; fi
   done
 }
-run_custom_import_verification_postgres() { printf 'complete\n' >> "$CALL_LOG"; }
 status=0
-run_core_postgres postgresql://synthetic core-snapshots-2 || status=$?
+run_core_postgres postgresql://synthetic core-snapshots-2 && printf 'complete\n' >> "$CALL_LOG" || status=$?
 exit "$status"
 """
                 )
@@ -5423,13 +5487,16 @@ exit "$status"
                        build_test_paths[:4], operator_test_paths[:4], operator_test_paths[4:],
                        build_test_paths[4:], (installed_test_path, acquisition_test_path), family_test_paths,
                        snapshot_test_paths, rejection_test_paths, bulk_test_paths[:3], bulk_test_paths[3:])
-        groups_by_lane = {"core-imports": test_groups[:2] + test_groups[3:4],
-                          "core-imports-2": test_groups[4:6],
-                          "core-services": (capture_test_paths,), "core-snapshots": test_groups[6:9],
-                          "core-snapshots-2": test_groups[9:],
+        groups_by_lane = {"core-imports": test_groups[:2], "registry-46": test_groups[3:4],
+                          "core-imports-2": test_groups[4:5], "registry-11": test_groups[5:6],
+                          "core-services": (), "registry-31": (capture_test_paths,),
+                          "core-snapshots": test_groups[6:7], "registry-41": test_groups[7:8], "registry-37": test_groups[8:9],
+                          "registry-4": test_groups[9:10], "core-snapshots-2": test_groups[10:],
                           "core-ptg": (), "all": test_groups, "legacy": test_groups}
-        required_by_lane = {"core-imports": (), "core-imports-2": (), "core-services": required_test_paths[:1],
-                            "core-snapshots": family_test_paths, "core-snapshots-2": (), "core-ptg": (), "all": required_test_paths}
+        required_by_lane = {"core-imports": (), "core-imports-2": (), "core-services": (), "registry-31": required_test_paths[:1],
+                            "core-snapshots": (), "registry-37": family_test_paths, "core-snapshots-2": (), "core-ptg": (),
+                            "all": required_test_paths}
+        home_lanes = tuple(lane for lane in groups_by_lane if lane not in ("all", "legacy"))
         historical_tail_paths = (
             "tests/test_cms_doctors_archive_postgres.py",
             "tests/test_tiger_result_archive_postgres.py",
@@ -5448,21 +5515,22 @@ exit "$status"
         archive_url = "postgresql://postgres:postgres@127.0.0.1:5440"
         present_path_sets = ((), *((path,) for path in optional_test_paths),
                              optional_capture_paths, optional_build_paths, legacy_optional_paths, optional_test_paths)
-        cases = [(lane, (*required_by_lane[lane], *paths), "", "")
-                 for lane in ("core-imports", "core-imports-2", "core-services", "core-snapshots", "core-snapshots-2", "core-ptg") for paths in present_path_sets]
+        cases = [(lane, (*required_by_lane.get(lane, ()), *paths), "", "") for lane in home_lanes for paths in present_path_sets
+                 if not lane.startswith("registry-") or not paths
+                 or any(path in paths for group in groups_by_lane[lane] for path in group)]
         cases += [(lane, test_paths, group[0], "")
                   for lane, groups in groups_by_lane.items() for group in groups]
-        cases += [(lane, test_paths, family_test_paths[1], "") for lane in ("core-snapshots", "all")]
+        cases += [(lane, test_paths, family_test_paths[1], "") for lane in ("registry-37", "all")]
         cases += [(lane, test_paths, build_test_paths[-1], "") for lane in ("core-snapshots", "all")]
-        cases += [(lane, test_paths, build_test_paths[3], "") for lane in ("core-imports", "all")]
-        cases += [(lane, test_paths, acquisition_test_path, "") for lane in ("core-snapshots", "all")]
+        cases += [(lane, test_paths, build_test_paths[3], "") for lane in ("registry-46", "all")]
+        cases += [(lane, test_paths, acquisition_test_path, "") for lane in ("registry-41", "all")]
         cases += [(lane, tuple(path for path in required if path != missing), "", missing)
                   for lane, required in required_by_lane.items() for missing in required]
-        cases += [("core-snapshots", tuple(path for path in family_test_paths if path != missing)
+        cases += [("registry-37", tuple(path for path in family_test_paths if path != missing)
                    + build_test_paths[4:], "", missing) for missing in family_test_paths]
-        cases += [(lane, (*required_by_lane[lane], acquisition_test_path), "", missing)
-                  for lane in ("core-snapshots", "all") for missing in acquisition_dependencies]
-        cases += [(lane, test_paths, "", "") for lane in ("core-imports", "core-imports-2", "core-services", "all", "legacy")]
+        cases += [(lane, (*required_by_lane.get(lane, ()), acquisition_test_path), "", missing)
+                  for lane in ("registry-41", "all") for missing in acquisition_dependencies]
+        cases += [(lane, test_paths, "", "") for lane in ("core-imports", "registry-46", "core-imports-2", "registry-11", "core-services", "all", "legacy")]
         cases += [("all", required_test_paths, "", "")]
         cases += [(lane, (*required_test_paths, *snapshot_test_paths), "", "") for lane in ("all", "legacy")]
         complete_routes_by_lane = {}
@@ -5555,7 +5623,7 @@ fi
                         if missing_path:
                             missing_kind = "installed import dependency" if missing_path in acquisition_dependencies else "native import test"
                             self.assertIn(f"Missing required {missing_kind}: {missing_path}", result.stderr)
-                            if lane == "core-snapshots":
+                            if lane != "all":
                                 self.assertFalse(any(call.startswith("hc_custom_import_test_")
                                                      for call in call_log.read_text().splitlines()))
                             continue
@@ -5591,8 +5659,9 @@ fi
                         expected_route_count = sum(2 if group == list(family_test_paths) else 1 for group in expected_groups)
                         self.assertEqual(len(routes), expected_route_count)
                         if not failure_path and all(path in present_paths for path in test_paths):
-                            if lane in ("core-snapshots", "core-snapshots-2"):
-                                self.assertEqual(len(routes), 4)
+                            complete_counts = {"core-snapshots": 1, "registry-41": 1, "registry-37": 2, "registry-4": 1, "core-snapshots-2": 3}
+                            if lane in complete_counts:
+                                self.assertEqual(len(routes), complete_counts[lane])
                         databases = [route.split()[0] for route in routes]
                         self.assertEqual(len(databases), len(set(databases)))
                         for route in routes:
@@ -5635,7 +5704,9 @@ fi
                             complete_routes_by_lane[lane] += [call.split("\t", 1)[1].split()[3:] for call in calls
                                                               if "\t-m pytest -q " in call
                                                               and call.split("\t", 1)[1].split()[3] in historical_tail_paths]
-        combined = complete_routes_by_lane["core-imports"] + complete_routes_by_lane["core-imports-2"]
+        imports_2 = complete_routes_by_lane["core-imports-2"]
+        combined = (complete_routes_by_lane["core-imports"] + complete_routes_by_lane["registry-46"]
+                    + imports_2[:1] + complete_routes_by_lane["registry-11"] + imports_2[1:])
         self.assertEqual(combined, complete_routes_by_lane["all"])
         self.assertEqual(combined, complete_routes_by_lane["legacy"])
         self.assertEqual(len(combined), 11)
@@ -5984,6 +6055,205 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                     self.assertLess(calls.index(f"create\t{database}"), calls.index(execution))
                     self.assertGreater(calls.index(f"drop\t{database}"), calls.index(execution))
                     stopped = failed_path in paths
+
+
+    def test_native_wheel_staging_and_reuse_validate_one_digest_bound_wheel(self):
+        wheel_name = "ptg2_address_canon-0.0.0-cp314-cp314-linux_x86_64.whl"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            (source / "support/ptg2_scanner").mkdir(parents=True)
+            output = root / "artifact"
+            script = CHECK_FUNCTIONS + r"""
+install_python_dependencies() { printf 'deps\n' >> "$CALL_LOG"; }
+rustc() { echo "rustc $RUSTC_VERSION"; }
+python() {
+  case "$*" in
+    '-m maturin build '*)
+      printf 'build\t%s\t%s\n' "$PWD" "$*" >> "$CALL_LOG"
+      printf 'synthetic wheel\n' > "${!#}/$WHEEL_NAME" ;;
+    *) command python3 "$@" ;;
+  esac
+}
+stage_native_wheel "$OUTPUT_DIRECTORY"
+"""
+            log = root / "calls"
+            environment = {**os.environ, "CI_ROOT": str(ROOT), "SOURCE_ROOT": str(source), "CALL_LOG": str(log),
+                           "OUTPUT_DIRECTORY": str(output), "WHEEL_NAME": wheel_name, "RUSTC_VERSION": "1.98.0"}
+            # The build site keeps the pinned toolchain guarantee that consumers no longer check.
+            rejected = subprocess.run(["bash", "-eu"], input=script, text=True, capture_output=True, timeout=10,
+                                      env=environment)
+            self.assertEqual(rejected.returncode, 1, rejected.stderr)
+            self.assertEqual(log.read_text().splitlines(), ["deps"])
+            self.assertFalse(output.exists() and any(output.iterdir()))
+            log.unlink()
+            result = subprocess.run(["bash", "-eu"], input=script, text=True, capture_output=True, timeout=10,
+                                    env={**environment, "RUSTC_VERSION": "1.98.1"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = log.read_text().splitlines()
+            self.assertEqual(calls[0], "deps")
+            self.assertTrue(calls[1].startswith(f"build\t{source / 'support/ptg2_scanner'}\t-m maturin build --locked --features python-extension --out "))
+            self.assertEqual(sorted(path.name for path in output.iterdir()), sorted([wheel_name, "ptg2-address-canon-wheel.sha256"]))
+            digest = hashlib.sha256(b"synthetic wheel\n").hexdigest()
+            self.assertEqual((output / "ptg2-address-canon-wheel.sha256").read_text(), f"{digest}  {wheel_name}\n")
+            self.assertRegex(result.stdout, r"CI_PHASE end name=rust-wheel-build elapsed_seconds=\d+ exit_code=0")
+
+            # A relative output directory resolves against the source root, not the crate directory.
+            log.unlink()
+            relative = subprocess.run(["bash", "-eu"], input=script, text=True, capture_output=True, timeout=10,
+                                      env={**environment, "RUSTC_VERSION": "1.98.1", "OUTPUT_DIRECTORY": "relative-artifact"})
+            self.assertEqual(relative.returncode, 0, relative.stderr)
+            self.assertEqual(sorted(path.name for path in (source / "relative-artifact").iterdir()),
+                             sorted([wheel_name, "ptg2-address-canon-wheel.sha256"]))
+            self.assertFalse((source / "support/ptg2_scanner/relative-artifact").exists())
+
+            # The dispatcher requires an explicit output directory.
+            usage = subprocess.run(["bash", str(ROOT / "scripts/healthcare/check"), "native-wheel"], text=True,
+                                   capture_output=True, timeout=10,
+                                   env={**os.environ, "CI_ROOT": str(ROOT), "SOURCE_ROOT": str(source)})
+            self.assertEqual(usage.returncode, 2)
+            self.assertIn("native-wheel OUTPUT_DIRECTORY", usage.stderr)
+
+        reuse_script = CHECK_FUNCTIONS + r"""
+python() { printf 'python\t%s\n' "$*" >> "$CALL_LOG"; return 99; }
+uv() {
+  printf 'uv\t%s\n' "$*" >> "$CALL_LOG"
+  if [[ "$FAIL_STAGE" = install && "$*" = '--no-config pip install '* ]]; then return 17; fi
+  if [[ "$FAIL_STAGE" = check && "$*" = '--no-config pip check '* ]]; then return 23; fi
+}
+install_address_canon_wheel
+"""
+        for stage, expected in (("ok", 0), ("relative-ok", 0), ("missing-digest", 2), ("two-wheels", 2),
+                                ("wrong-name", 2), ("bad-digest", 1), ("symlink-wheel", 2), ("missing-directory", 2),
+                                ("install", 17), ("check", 23)):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                prebuilt = root / "prebuilt"
+                prebuilt.mkdir()
+                payload = b"synthetic wheel\n"
+                (prebuilt / wheel_name).write_bytes(payload)
+                digest = hashlib.sha256(payload).hexdigest()
+                described = wheel_name
+                if stage == "wrong-name":
+                    described = "other-0.0.0-cp314-cp314-linux_x86_64.whl"
+                if stage == "bad-digest":
+                    digest = "f" * 64
+                if stage != "missing-digest":
+                    (prebuilt / "ptg2-address-canon-wheel.sha256").write_text(f"{digest}  {described}\n")
+                if stage == "two-wheels":
+                    (prebuilt / "second-0.0.0-cp314-cp314-linux_x86_64.whl").write_bytes(payload)
+                if stage == "symlink-wheel":
+                    (prebuilt / wheel_name).unlink()
+                    (prebuilt / "elsewhere.whl").write_bytes(payload)
+                    (prebuilt / wheel_name).symlink_to(prebuilt / "elsewhere.whl")
+                    (prebuilt / "elsewhere.whl").rename(root / "elsewhere.whl")
+                    (prebuilt / wheel_name).unlink()
+                    (prebuilt / wheel_name).symlink_to(root / "elsewhere.whl")
+                log = root / "calls"
+                result = subprocess.run(["bash", "-eu"], input=reuse_script, text=True, capture_output=True, timeout=10,
+                                        env={**os.environ, "CI_ROOT": str(ROOT), "SOURCE_ROOT": str(root),
+                                             "CALL_LOG": str(log), "FAIL_STAGE": stage,
+                                             "CI_RUST_BINARIES": (str(root / "absent") if stage == "missing-directory"
+                                                                  else "prebuilt" if stage == "relative-ok" else str(prebuilt))})
+                self.assertEqual(result.returncode, expected, result.stderr)
+                phases = re.findall(r"CI_PHASE end name=([a-z-]+) elapsed_seconds=\d+ exit_code=(\d+)", result.stdout)
+                calls = log.read_text().splitlines() if log.exists() else []
+                if expected == 0 or stage in {"install", "check"}:
+                    self.assertEqual(phases, [("rust-wheel-reuse", "0"), ("rust-wheel-install", str(expected))])
+                    self.assertEqual(len(calls), 1 if stage == "install" else 2)
+                    self.assertTrue(calls[0].startswith("uv\t--no-config pip install --python "))
+                    self.assertIn(" --no-build --no-deps --reinstall ", calls[0])
+                    # A relative CI_RUST_BINARIES resolves against the source root before the digest check.
+                    self.assertTrue(calls[0].endswith(f"{prebuilt.resolve()}/{wheel_name}"))
+                    if stage != "install":
+                        self.assertTrue(calls[1].startswith("uv\t--no-config pip check --python "))
+                    self.assertEqual(set(root.iterdir()), {prebuilt, log})
+                    self.assertEqual((prebuilt / wheel_name).read_bytes(), payload)
+                else:
+                    self.assertEqual(phases, [("rust-wheel-reuse", str(expected))])
+                    self.assertEqual(calls, [])
+
+
+    def test_postgres_block_placements_resolve_to_registry_shards_and_keep_coarse_lanes(self):
+        table = re.search(r"postgres_block_lane\(\) \{\n  case \"\$1\" in\n(.*?)\n    \*\) return 1 ;;", CHECK_FUNCTIONS, re.DOTALL)
+        self.assertIsNotNone(table)
+        placements = dict(re.findall(r"^\s+([a-z0-9-]+)\) printf '([a-z0-9-]+)\\n' ;;$", table[1], re.MULTILINE))
+        self.assertEqual(len(placements), table[1].count(";;"))
+        self.assertTrue(placements)
+        lanes = {f"registry-{index}" for index in range(48)} | {
+            "core-services", "core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", "core-ptg",
+            "directory-source", "directory-storage", "directory-address", "profile-storage", "profile-publication"}
+        self.assertTrue(set(placements.values()) <= lanes, placements)
+        homes = {"cms-npd-candidates": "directory-source-2", "custom-import-snapshot-storage": "core-snapshots-2",
+                 "control-imports": "profile-storage", "custom-import-provider-query": "core-imports-2",
+                 "uhc-flex-rooted-graph": "directory-source-2", "profile-publication-suites": "profile-publication",
+                 "custom-import-verification": "core-snapshots-2", "custom-import-family": "core-snapshots",
+                 "custom-import-installed": "core-snapshots", "cms-npd-admission": "directory-source",
+                 "custom-import-build": "core-imports", "custom-import-capture": "core-services",
+                 "profile-prepared-doctors-ranges": "profile-publication", "organization-partition-v4": "directory-address",
+                 "profile-prepared-doctors-cancellation": "profile-publication", "semantic-proof-v3": "directory-address",
+                 "profile-initial-publication": "profile-publication"}
+        self.assertEqual(set(placements), set(homes))
+        self.assertEqual(len(set(placements.values())), len(placements), "one block per receiving shard")
+        self.assertTrue(all(target != home for home, target in ((homes[block], placements[block]) for block in homes)))
+        script = CHECK_FUNCTIONS + "\npostgres_block_runs \"$LANE\" \"$HOME_LANE\" \"$BLOCK\"\n"
+
+        def runs(lane, home, block):
+            result = subprocess.run(["bash", "-eu"], input=script, text=True, capture_output=True, timeout=10,
+                                    env={**os.environ, "CI_ROOT": str(ROOT), "SOURCE_ROOT": str(ROOT),
+                                         "LANE": lane, "HOME_LANE": home, "BLOCK": block})
+            self.assertIn(result.returncode, (0, 1), result.stderr)
+            return result.returncode == 0
+
+        for block, home in homes.items():
+            with self.subTest(block=block):
+                target = placements[block]
+                self.assertTrue(runs(target, home, block))
+                self.assertTrue(runs("all", home, block))
+                self.assertFalse(runs(home, home, block))
+                self.assertFalse(runs("directory-storage", home, block))
+        with self.subTest(block="unplaced"):
+            self.assertTrue(runs("core-ptg", "core-ptg", "unplaced-block"))
+            self.assertTrue(runs("all", "core-ptg", "unplaced-block"))
+            self.assertFalse(runs("registry-4", "core-ptg", "unplaced-block"))
+
+
+    def test_registry_shards_dispatch_reassigned_blocks_after_registry_tests(self):
+        script = CHECK_FUNCTIONS + r"""
+install_python_dependencies() { :; }
+prepare_debug_rust_binaries() { :; }
+wait_for_service() { :; }
+prepare_postgres() { :; }
+install_address_canon_wheel() { printf 'wheel\n' >> "$CALL_LOG"; }
+require_base_sha() { COVERAGE_BASE_SHA=synthetic; }
+run_network_registry_postgres() { printf 'registry\t%s\n' "$*" >> "$CALL_LOG"; }
+run_core_postgres() { printf 'core\t%s\n' "$*" >> "$CALL_LOG"; }
+run_provider_directory_postgres() { printf 'directory\t%s\n' "$*" >> "$CALL_LOG"; }
+run_provider_profile_postgres() { printf 'profile\t%s\n' "$*" >> "$CALL_LOG"; }
+timeout() { :; }
+run_postgres "$ROUTE_LANE"
+"""
+        dsn = "postgresql://postgres:postgres@127.0.0.1:5432/ptg2_v3_lifecycle_test_ci_runner"
+        expected_by_lane = {
+            "registry-3": ["registry\t3", f"core\t{dsn} registry-3", f"directory\t{dsn} registry-3",
+                           f"profile\t{dsn} registry-3"],
+            "registry-47": ["registry\t47", f"core\t{dsn} registry-47", f"directory\t{dsn} registry-47",
+                            f"profile\t{dsn} registry-47"],
+            "core-services": [f"core\t{dsn} core-services"],
+            "directory-source": ["wheel", f"directory\t{dsn} directory-source"],
+            "profile-storage": [f"profile\t{dsn} profile-storage"],
+            "core": ["registry\t", f"core\t{dsn}"],
+        }
+        for lane, expected in expected_by_lane.items():
+            with self.subTest(lane=lane), tempfile.TemporaryDirectory() as temporary:
+                log = Path(temporary) / "calls"
+                result = subprocess.run(["bash", "-eu"], input=script, text=True, capture_output=True, timeout=10,
+                                        env={**os.environ, "CI_ROOT": str(ROOT), "SOURCE_ROOT": str(ROOT),
+                                             "CI_DEPS_READY": "1", "ROUTE_LANE": lane, "CALL_LOG": str(log),
+                                             "RUNNER_TEMP": temporary, "COVERAGE_FILE": str(Path(temporary) / "cov")})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(log.read_text().splitlines(), expected)
+                self.assertRegex(result.stdout, r"CI_PHASE end name=postgres-tests elapsed_seconds=\d+ exit_code=0")
 
 
 if __name__ == "__main__":
