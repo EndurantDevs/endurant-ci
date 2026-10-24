@@ -235,7 +235,6 @@ PUBLICATION_WORKER_CAPABILITY = (
     'tests/test_registry_publication_worker.py',
     'tests/test_registry_publication_worker_permissions_postgres.py',
     'tests/test_registry_publication_consumer_postgres.py',
-    'tests/test_registry_initial_inventory_postgres.py',
 )
 PUBLICATION_WORKER_DEPENDENCIES = (
     'process/__init__.py',
@@ -270,7 +269,29 @@ PUBLICATION_WORKER_DEPENDENCIES = (
     'tests/test_registry_management_permissions_postgres.py',
     'tests/test_registry_candidate_composition_postgres.py',
 )
-PUBLICATION_WORKER_HOST_TESTS = PUBLICATION_WORKER_CAPABILITY[-3:]
+PUBLICATION_WORKER_HOST_TESTS = PUBLICATION_WORKER_CAPABILITY[-2:]
+INITIAL_INVENTORY_NATIVE_TEST = "tests/test_registry_initial_inventory_postgres.py"
+INITIAL_INVENTORY_SOURCES = {
+    "process/registry_publication_queue.py": (
+        "def validated_registry_initial_inventory_command(): pass\n"
+        "async def enqueue_registry_initial_inventory(): pass\n"
+    ),
+    "process/registry_publication_execution.py": "async def complete_queued_registry_initial_inventory(): pass\n",
+    "process/registry_publication_consumer.py": (
+        "async def execute():\n    return await complete_queued_registry_initial_inventory()\n"
+    ),
+    "process/registry_publication_authority.py": (
+        "_PATHS = {'publish_initial_inventory': '/synthetic/authorize'}\n"
+        "_COMMAND_VALIDATORS = {'publish_initial_inventory': validated_registry_initial_inventory_command}\n"
+    ),
+    "api/endpoint/registry_publication.py": "async def queue_initial_inventory(): pass\n",
+    INITIAL_INVENTORY_NATIVE_TEST: "def test_initial_inventory(): assert True\n",
+}
+INITIAL_INVENTORY_DEPENDENCIES = (
+    "process/network_bootstrap_sources.py", "process/network_candidate_custody.py",
+    "process/network_membership_publication.py", "process/registry_network_catalog_read.py",
+    "process/registry_publication_ptg_runtime.py",
+)
 BENEFIT_PLAN_CAPABILITY = (
     'process/registry_benefit_plan_metadata.py',
     'process/registry_benefit_plan_runtime.py',
@@ -897,6 +918,80 @@ def _stop_import_family_workers(root):
 
 
 class HealthcarePublicChecks(unittest.TestCase):
+    def test_initial_inventory_extends_only_a_complete_publication_worker(self):
+        cases = [("historical", "", ""), ("current", "", ""), ("comments", "", ""),
+                 ("operation-only", "", ""), ("import-only", "", "")]
+        cases += [(layout, path, "") for layout in ("only", "partial") for path in INITIAL_INVENTORY_SOURCES]
+        cases += [("current", path, "missing")
+                  for path in (*INITIAL_INVENTORY_SOURCES, *INITIAL_INVENTORY_DEPENDENCIES)]
+        cases += [("current", path, stage) for path in INITIAL_INVENTORY_SOURCES
+                  for stage in ("dirty", "staged", "untracked", "symlink", "dangling", "syntax")]
+        cases += [("current", path, "marker:" + marker) for path, marker in (
+            ("process/registry_publication_queue.py", "validated_registry_initial_inventory_command"),
+            ("process/registry_publication_queue.py", "enqueue_registry_initial_inventory"),
+            ("process/registry_publication_execution.py", "complete_queued_registry_initial_inventory"),
+            ("process/registry_publication_consumer.py", "complete_queued_registry_initial_inventory"),
+            ("process/registry_publication_authority.py", "_PATHS"),
+            ("process/registry_publication_authority.py", "_COMMAND_VALIDATORS"),
+            ("api/endpoint/registry_publication.py", "queue_initial_inventory"),
+        )]
+        for layout, changed, stage in cases:
+            with self.subTest(layout=layout, changed=changed, stage=stage), tempfile.TemporaryDirectory() as temporary:
+                source = Path(temporary)
+                self._initial_inventory_source(source, layout, changed, stage)
+                result = subprocess.run(
+                    ["bash", "-eu"], input=CHECK_FUNCTIONS + r'''
+git() {
+  if [[ "${!#}" = "$CHANGED_PATH" ]] &&
+      [[ "$FAIL_STAGE" = dirty || "$FAIL_STAGE" = staged || "$FAIL_STAGE" = untracked ]]; then return 1; fi
+  return 0
+}
+publication_worker_native_test_paths
+''', cwd=source, text=True, capture_output=True, timeout=10,
+                    env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                         "CHANGED_PATH": changed, "FAIL_STAGE": stage})
+                accepted = layout in {"historical", "comments", "current"} and not changed
+                self.assertEqual(result.returncode, 0 if accepted else 1, result.stderr)
+                expected = [*PUBLICATION_WORKER_HOST_TESTS]
+                if layout == "current":
+                    expected.append(INITIAL_INVENTORY_NATIVE_TEST)
+                self.assertEqual(result.stdout.splitlines(), expected if accepted else [])
+
+    def _initial_inventory_source(self, source, layout, changed, stage):
+        if layout != "only":
+            for name in (*PUBLICATION_WORKER_CAPABILITY, *PUBLICATION_WORKER_DEPENDENCIES):
+                path = source / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+        if layout == "current":
+            for name in INITIAL_INVENTORY_DEPENDENCIES:
+                path = source / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+        selected = INITIAL_INVENTORY_SOURCES if layout == "current" else (
+            {changed: INITIAL_INVENTORY_SOURCES[changed]} if layout in {"only", "partial"} else {})
+        for name, content in selected.items():
+            path = source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        queue = source / "process/registry_publication_queue.py"
+        if layout == "comments":
+            queue.write_text("# publish_initial_inventory enqueue_registry_initial_inventory\n")
+        elif layout == "operation-only":
+            queue.write_text("OPERATIONS = ('publish_initial_inventory',)\n")
+        elif layout == "import-only":
+            queue.write_text("from synthetic import validated_registry_initial_inventory_command\n")
+        path = source / changed
+        if stage == "missing":
+            path.unlink()
+        elif stage in {"symlink", "dangling"}:
+            path.unlink()
+            path.symlink_to(source / ("process/__init__.py" if stage == "symlink" else "absent"))
+        elif stage == "syntax":
+            path.write_text("invalid Python !\n")
+        elif stage.startswith("marker:"):
+            path.write_text(path.read_text().replace(stage.partition(":")[2], "absent_marker"))
+
     def test_registry_dispatch_accepts_exactly_forty_eight_native_workers(self):
         script = CHECK_FUNCTIONS + "\n" + (
             "prepare_debug_rust_binaries() { printf 'admitted\\n'; exit 73; }\n"
