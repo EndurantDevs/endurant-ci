@@ -5,6 +5,10 @@ inputs:
     description: Install the reviewed Rust toolchain
     default: 'false'
     required: false
+  cargo-cache:
+    description: Restore and save the Cargo registry and build directory under this scope
+    default: ''
+    required: false
   dependencies:
     description: Install the source Python requirements during setup
     default: 'false'
@@ -61,6 +65,18 @@ runs:
       printf 'CI_DEPS_READY=1\nCI_PYTHON_ENV_READY=1\n' >> "$GITHUB_ENV"
     shell: bash
     working-directory: source
+  - name: Restore Cargo registry and build directory
+    if: inputs.rust == 'true' && inputs.cargo-cache != ''
+    uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+    with:
+      path: |
+        ~/.cargo/registry/index
+        ~/.cargo/registry/cache
+        ~/.cargo/git/db
+        source/support/ptg2_scanner/target
+      key: healthcare-cargo-${{ inputs.cargo-cache }}-${{ runner.os }}-1.98.1-${{ hashFiles('source/support/ptg2_scanner/Cargo.lock', 'source/support/ptg2_scanner/Cargo.toml') }}
+      restore-keys: |
+        healthcare-cargo-${{ inputs.cargo-cache }}-${{ runner.os }}-1.98.1-
   - name: Install exact Rust toolchain
     if: inputs.rust == 'true'
     shell: bash
@@ -68,4 +84,6 @@ runs:
     run: 'rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy --component llvm-tools-preview
       --no-self-update
 
-      rustup default 1.98.1'
+      rustup default 1.98.1
+
+      printf ''CARGO_INCREMENTAL=0\n'' >> "$GITHUB_ENV"'

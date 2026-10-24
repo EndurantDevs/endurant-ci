@@ -23,6 +23,41 @@ artifact_path() {
   fi
 }
 
+# Bounded PostgreSQL blocks that execute outside their family lane. Each entry
+# names the registry shard that runs the block; blocks without an entry stay in
+# their family lane, and the coarse core/provider-directory/provider-profile
+# lanes still run every block. Registry shards run their registry selection first
+# and then the blocks placed on them.
+postgres_block_lane() {
+  case "$1" in
+    cms-npd-candidates) printf 'registry-12\n' ;;
+    custom-import-snapshot-storage) printf 'registry-4\n' ;;
+    control-imports) printf 'registry-3\n' ;;
+    custom-import-provider-query) printf 'registry-11\n' ;;
+    uhc-flex-rooted-graph) printf 'registry-28\n' ;;
+    profile-publication-suites) printf 'registry-32\n' ;;
+    custom-import-verification) printf 'registry-14\n' ;;
+    custom-import-family) printf 'registry-37\n' ;;
+    custom-import-installed) printf 'registry-41\n' ;;
+    cms-npd-admission) printf 'registry-19\n' ;;
+    custom-import-build) printf 'registry-46\n' ;;
+    custom-import-capture) printf 'registry-31\n' ;;
+    profile-prepared-doctors-ranges) printf 'registry-24\n' ;;
+    organization-partition-v4) printf 'registry-39\n' ;;
+    profile-prepared-doctors-cancellation) printf 'registry-13\n' ;;
+    semantic-proof-v3) printf 'registry-18\n' ;;
+    profile-initial-publication) printf 'registry-20\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+postgres_block_runs() {
+  local lane=$1 home=$2 block=$3 target
+  [[ "$lane" = all ]] && return 0
+  target=$(postgres_block_lane "$block") || target=$home
+  [[ "$lane" = "$target" ]]
+}
+
 usage() {
   cat >&2 <<'EOF'
 usage: scripts/healthcare/check MODE [ARG]
@@ -38,6 +73,7 @@ MODE is one of:
   security
   redis
   postgres core-services|core-services-2|core-imports|core-imports-2|core-snapshots|core-snapshots-2|core-ptg|registry-0..47|directory-source|directory-source-2|directory-storage|directory-address|profile-storage|profile-publication
+  native-wheel OUTPUT_DIRECTORY
 EOF
   exit 2
 }
@@ -1216,6 +1252,11 @@ run_api_contract() {
 
 install_address_canon_wheel() (
   local wheel_directory cleanup_command
+  if [ "$#" -eq 0 ] && [ "${CI_RUST_BINARIES+x}" = x ]; then
+    trap 'ci_phase_end "$?"' EXIT
+    reuse_address_canon_wheel
+    exit 0
+  fi
   wheel_directory=$(mktemp -d "${RUNNER_TEMP:-/tmp}/healthcare-ptg2-wheel.XXXXXX")
   printf -v cleanup_command 'ci_phase_end "$?"; rm -rf -- %q' "$wheel_directory"
   trap "$cleanup_command" EXIT
@@ -1237,6 +1278,64 @@ install_address_canon_wheel() (
   uv --no-config pip check --python "$(command -v python)"
   ci_phase_end
 )
+
+reuse_address_canon_wheel() {
+  ci_phase_begin rust-wheel-reuse
+  local source_directory=$CI_RUST_BINARIES
+  if [ -z "$source_directory" ] || [ ! -d "$source_directory" ] || [ -L "$source_directory" ]; then
+    echo "CI_RUST_BINARIES must name a real directory" >&2
+    return 2
+  fi
+  # The digest is checked from inside the directory, so a relative path must be resolved first.
+  source_directory=$(cd "$source_directory" && pwd -P)
+  local digest_file="$source_directory/ptg2-address-canon-wheel.sha256"
+  if [ ! -f "$digest_file" ] || [ -L "$digest_file" ]; then
+    echo "prebuilt native wheel digest is missing: $digest_file" >&2
+    return 2
+  fi
+  shopt -s nullglob
+  local wheels=("$source_directory"/*.whl)
+  shopt -u nullglob
+  if [ "${#wheels[@]}" -ne 1 ] || [ -L "${wheels[0]}" ]; then
+    echo "exactly one prebuilt native wheel is required in $source_directory" >&2
+    return 2
+  fi
+  local expected_name
+  expected_name=$(awk 'NR == 1 {print $2}' "$digest_file")
+  if [ "$(wc -l < "$digest_file")" -ne 1 ] || [ "$expected_name" != "$(basename "${wheels[0]}")" ]; then
+    echo "prebuilt native wheel digest does not describe ${wheels[0]}" >&2
+    return 2
+  fi
+  if ! (cd "$source_directory" && sha256sum --check --strict --quiet "$digest_file"); then
+    echo "prebuilt native wheel does not match ptg2-address-canon-wheel.sha256" >&2
+    return 1
+  fi
+  if [ "$artifact_root" != . ]; then
+    cp "$digest_file" "$(artifact_path ptg2-address-canon-wheel.sha256)"
+  fi
+  ci_phase_end
+  ci_phase_begin rust-wheel-install
+  uv --no-config pip install --python "$(command -v python)" --no-build --no-deps --reinstall "${wheels[0]}"
+  uv --no-config pip check --python "$(command -v python)"
+  ci_phase_end
+}
+
+stage_native_wheel() {
+  local output_directory=$1
+  install_python_dependencies
+  mkdir -p "$output_directory"
+  # maturin runs inside the crate directory, so the output path must not stay relative.
+  output_directory=$(cd "$output_directory" && pwd -P)
+  ci_phase_begin rust-wheel-build
+  test "$(rustc --version | awk '{print $2}')" = 1.98.1
+  (cd support/ptg2_scanner && python -m maturin build --locked --features python-extension --out "$output_directory")
+  shopt -s nullglob
+  local wheels=("$output_directory"/*.whl)
+  shopt -u nullglob
+  [ "${#wheels[@]}" -eq 1 ]
+  (cd "$output_directory" && sha256sum "$(basename "${wheels[0]}")" > ptg2-address-canon-wheel.sha256)
+  ci_phase_end
+}
 
 verify_registry_native_wheel() {
   python -I - "$1" "$2" <<'PY'
@@ -2203,7 +2302,9 @@ run_network_registry_postgres() (
       return 1
     }
   done
-  test "$(rustc --version | awk '{print $2}')" = 1.98.1
+  if [ "${CI_RUST_BINARIES+x}" != x ]; then
+    test "$(rustc --version | awk '{print $2}')" = 1.98.1
+  fi
   install_address_canon_wheel
   if [ -n "$naic_tests" ]; then
     verify_registry_native_wheel "$repository_root" naic
@@ -2626,7 +2727,7 @@ run_core_postgres() {
   fi
   fi
 
-  if [[ "$lane" = core-services || "$lane" = all ]]; then
+  if postgres_block_runs "$lane" core-services custom-import-capture; then
   local required_import_test_path
   for required_import_test_path in \
     tests/test_custom_import_snowflake_statement_snapshot_postgres.py; do
@@ -2675,7 +2776,7 @@ run_core_postgres() {
 
   fi
 
-  if [[ "$lane" = core-services || "$lane" = all ]]; then
+  if postgres_block_runs "$lane" core-services custom-import-capture; then
   custom_import_postgres_tests=()
   for custom_import_test_path in \
     tests/test_custom_import_capture_store_postgres.py \
@@ -2697,7 +2798,7 @@ run_core_postgres() {
 
   fi
 
-  if [[ "$lane" = core-imports || "$lane" = all ]]; then
+  if postgres_block_runs "$lane" core-imports custom-import-build; then
   custom_import_postgres_tests=()
   for custom_import_test_path in \
     tests/test_custom_import_bounded_build_postgres.py \
@@ -2736,7 +2837,9 @@ run_core_postgres() {
       HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN "$archive_url" \
       "${custom_import_postgres_tests[@]}"
   fi
+  fi
 
+  if postgres_block_runs "$lane" core-imports-2 custom-import-provider-query; then
   custom_import_postgres_tests=()
   for custom_import_test_path in \
     tests/test_custom_import_provider_query_postgres.py \
@@ -2757,7 +2860,7 @@ run_core_postgres() {
 
   fi
 
-  if [[ "$lane" = core-snapshots || "$lane" = all ]]; then
+  if postgres_block_runs "$lane" core-snapshots custom-import-family; then
   local required_import_test_path
   for required_import_test_path in \
     tests/test_custom_import_identical_children_postgres.py \
@@ -2767,6 +2870,10 @@ run_core_postgres() {
       return 1
     }
   done
+  fi
+
+  if postgres_block_runs "$lane" core-snapshots custom-import-installed; then
+  local required_import_test_path
   local installed_import_postgres_tests=(tests/test_custom_import_installed_operator_postgres.py)
   if [ -f "$repository_root/tests/test_custom_import_installed_acquisition_postgres.py" ]; then
     for required_import_test_path in \
@@ -2781,6 +2888,9 @@ run_core_postgres() {
     done
     installed_import_postgres_tests+=(tests/test_custom_import_installed_acquisition_postgres.py)
   fi
+  fi
+
+  if [[ "$lane" = core-snapshots || "$lane" = all ]]; then
   custom_import_postgres_tests=()
   for custom_import_test_path in \
     tests/test_custom_import_build_output_postgres.py \
@@ -2796,7 +2906,9 @@ run_core_postgres() {
       HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN "$archive_url" \
       "${custom_import_postgres_tests[@]}"
   fi
+  fi
 
+  if postgres_block_runs "$lane" core-snapshots custom-import-installed; then
   if [ -f "$repository_root/tests/test_custom_import_installed_operator_postgres.py" ]; then
     local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
     run_scoped_archive_postgres \
@@ -2805,18 +2917,19 @@ run_core_postgres() {
       "${installed_import_postgres_tests[@]}" \
       -n 2 --dist worksteal --durations=9 -vv
   fi
-
-  local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
-  run_import_family_postgres "$archive_url"
-
   fi
 
-  if [[ "$lane" = core-snapshots-2 || "$lane" = all ]]; then
+  if postgres_block_runs "$lane" core-snapshots custom-import-family; then
+  local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
+  run_import_family_postgres "$archive_url"
+  fi
+
   local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
   local rejection_test
-  rejection_test=$(custom_import_rejection_native_test_path) || return 1
   local custom_import_postgres_tests=()
   local custom_import_test_path
+  if postgres_block_runs "$lane" core-snapshots-2 custom-import-snapshot-storage; then
+  rejection_test=$(custom_import_rejection_native_test_path) || return 1
   for custom_import_test_path in \
     tests/test_custom_import_snapshot_storage_postgres.py \
     tests/test_custom_import_snapshot_reads_postgres.py \
@@ -2837,6 +2950,10 @@ run_core_postgres() {
         "${custom_import_postgres_tests[@]}"
     fi
   fi
+  fi
+
+  if [[ "$lane" = core-snapshots-2 || "$lane" = all ]]; then
+  rejection_test=$(custom_import_rejection_native_test_path) || return 1
   if [ -n "$rejection_test" ]; then
     run_reported_custom_import_postgres "$archive_url" "$rejection_test" || return "$?"
   fi
@@ -2860,9 +2977,10 @@ run_core_postgres() {
       "${custom_import_postgres_tests[@]:0:3}" || return "$?"
     custom_import_postgres_tests=("${custom_import_postgres_tests[@]:3}")
   done
+  fi
 
+  if postgres_block_runs "$lane" core-snapshots-2 custom-import-verification; then
   run_custom_import_verification_postgres "$archive_url" || return "$?"
-
   fi
 
   if [[ "$lane" = core-services || "$lane" = all ]]; then
@@ -3391,14 +3509,18 @@ run_provider_directory_postgres() {
     "${directory_entity_tests[@]}"
   run_owned_provider_directory_postgres cms_network_test CMS_NETWORK_TEST_DATABASE \
     tests/test_provider_directory_insurance_network_identity.py
+  fi
+  if postgres_block_runs "$lane" directory-source cms-npd-admission; then
   run_available_cms_postgres owned tests/test_cms_npd_admission_postgres.py
   fi
 
-  if [[ "$lane" = directory-source-2 || "$lane" = all ]]; then
+  if postgres_block_runs "$lane" directory-source-2 cms-npd-candidates; then
   run_available_cms_postgres owned \
     tests/test_cms_npd_candidate_coverage_postgres.py \
     tests/test_cms_npd_intake_postgres.py \
     tests/test_provider_directory_cms_retained_relations_postgres.py
+  fi
+  if [[ "$lane" = directory-source-2 || "$lane" = all ]]; then
   run_available_cms_postgres owned \
     tests/test_cms_capacity_preflight_receipt_migration.py \
     tests/test_provider_directory_cms_preflight_postgres.py \
@@ -3406,7 +3528,9 @@ run_provider_directory_postgres() {
   if [ -f "$repository_root/tests/test_provider_directory_entity_redirect.py" ]; then
     timeout --foreground 295s python -m pytest -q tests/test_provider_directory_entity_redirect.py
   fi
+  fi
 
+  if postgres_block_runs "$lane" directory-source-2 uhc-flex-rooted-graph; then
   HLTHPRT_FHIR_FORMULARY_MIGRATION_POSTGRES_DSN=$dsn \
     timeout --foreground 295s python -m pytest -q \
       tests/test_uhc_flex_practitioner_registration_postgres.py \
@@ -3420,7 +3544,9 @@ run_provider_directory_postgres() {
       tests/test_provider_directory_rooted_graph_single_root_postgres.py \
       tests/test_provider_directory_rooted_graph_publication_guards_postgres.py \
       tests/test_provider_directory_rooted_graph_publication_postgres.py
+  fi
 
+  if [[ "$lane" = directory-source-2 || "$lane" = all ]]; then
   local provider_candidate_tests=()
   for test_path in \
     tests/test_practitioner_migration_boundaries_postgres.py \
@@ -3508,15 +3634,21 @@ run_provider_directory_postgres() {
     tests/test_provider_directory_dataset_rehydrate_db.py \
     tests/test_provider_directory_proof_store_db.py \
     tests/test_provider_directory_dataset_resource_mutation_fence_db.py
+  fi
+  if postgres_block_runs "$lane" directory-address semantic-proof-v3; then
   run_available_cms_postgres owned \
     tests/test_provider_directory_semantic_proof_v3_db.py \
     tests/test_provider_directory_semantic_proof_v3_fences_db.py \
     tests/test_provider_directory_semantic_candidate_proof_v3_db.py
+  fi
+  if postgres_block_runs "$lane" directory-address organization-partition-v4; then
   run_available_cms_postgres owned \
     tests/test_provider_directory_organization_union_v4_db.py \
     tests/test_provider_directory_organization_candidate_proof_v4_db.py \
     tests/test_provider_directory_organization_partition_v4_db.py \
     tests/test_provider_directory_organization_partition_v4_fences_db.py
+  fi
+  if [[ "$lane" = directory-address || "$lane" = all ]]; then
   env "${common_env[@]}" timeout --foreground 295s python -m pytest -q \
     -o asyncio_default_test_loop_scope=session \
     -o asyncio_default_fixture_loop_scope=session \
@@ -3735,7 +3867,7 @@ run_profile_liveness_postgres() {
 run_provider_profile_postgres() {
   local dsn=$1
   local lane=${2:-all}
-  if [[ "$lane" = profile-storage || "$lane" = all ]]; then
+  if postgres_block_runs "$lane" profile-storage control-imports; then
   local database=control_imports_test_ci_runner
   create_test_database "$database"
   if ! HLTHPRT_DB_DATABASE=$database \
@@ -3750,7 +3882,10 @@ run_provider_profile_postgres() {
     return 1
   fi
   drop_test_database "$database"
+  fi
 
+  if [[ "$lane" = profile-storage || "$lane" = all ]]; then
+  local database
   database=uhc_retained_admission_test_ci_runner
   create_test_database "$database"
   if ! HLTHPRT_UHC_RETAINED_ADMISSION_POSTGRES_DSN="${dsn%/*}/$database" \
@@ -3845,14 +3980,22 @@ run_provider_profile_postgres() {
     tests/test_cms_doctors_preparation_seal_postgres.py
   run_available_cms_postgres owned \
     tests/test_cms_doctors_source_provenance_postgres.py
+  fi
+  if postgres_block_runs "$lane" profile-publication profile-prepared-doctors-ranges; then
   run_available_cms_postgres owned \
     tests/test_entity_address_prepared_doctors_postgres.py::test_source_ranges_and_geo_use_prepared_doctors_until_exact_native_apply
+  fi
+  if [[ "$lane" = profile-publication || "$lane" = all ]]; then
   run_available_cms_postgres owned \
     tests/test_entity_address_prepared_doctors_postgres.py \
     --deselect=tests/test_entity_address_prepared_doctors_postgres.py::test_source_ranges_and_geo_use_prepared_doctors_until_exact_native_apply \
     --deselect=tests/test_entity_address_prepared_doctors_postgres.py::test_source_backend_rejects_replacement_and_releases_locks_after_cancellation
+  fi
+  if postgres_block_runs "$lane" profile-publication profile-prepared-doctors-cancellation; then
   run_available_cms_postgres owned \
     tests/test_entity_address_prepared_doctors_postgres.py::test_source_backend_rejects_replacement_and_releases_locks_after_cancellation
+  fi
+  if [[ "$lane" = profile-publication || "$lane" = all ]]; then
   run_available_cms_postgres owned \
     tests/test_provider_profile_detail_load_postgres.py
   run_available_cms_postgres owned \
@@ -3860,6 +4003,8 @@ run_provider_profile_postgres() {
     tests/test_cms_serving_publication_postgres.py \
     tests/test_entity_address_serving_receipt_postgres.py \
     tests/test_provider_directory_cms_serving_receipt_postgres.py
+  fi
+  if postgres_block_runs "$lane" profile-publication profile-initial-publication; then
   run_available_cms_postgres owned \
     tests/test_provider_directory_profile_failed_cleanup_postgres.py \
     tests/test_provider_directory_profile_initial_migration.py::test_native_initial_receipt_guards \
@@ -3868,6 +4013,9 @@ run_provider_profile_postgres() {
     tests/test_provider_directory_profile_initial_reader_postgres.py \
     tests/test_provider_directory_profile_initial_cutover_postgres.py \
     tests/test_provider_directory_profile_initial_replay.py
+  fi
+
+  if postgres_block_runs "$lane" profile-publication profile-publication-suites; then
   set --
   if [ -f "$repository_root/tests/test_cms_doctors_education.py" ]; then
     set -- tests/test_cms_doctors_education.py::test_native_postgres_publication_rolls_back_both_tables_on_education_failure
@@ -3927,6 +4075,9 @@ run_provider_profile_postgres() {
       tests/test_provider_directory_profile_uhc_flex_postgres.py \
       tests/test_npi_provider_directory_profile_postgres.py \
       "$@"
+  fi
+
+  if [[ "$lane" = profile-publication || "$lane" = all ]]; then
   local source_profile_tests=()
   local source_profile_test
   for source_profile_test in \
@@ -4015,6 +4166,12 @@ run_postgres() {
     core-*) run_core_postgres "$dsn" "$shard" ;;
     directory-*) run_provider_directory_postgres "$dsn" "$shard" ;;
     profile-*) run_provider_profile_postgres "$dsn" "$shard" ;;
+    registry-*)
+      # Registry shards also carry the bounded blocks placed on them above.
+      run_core_postgres "$dsn" "$shard"
+      run_provider_directory_postgres "$dsn" "$shard"
+      run_provider_profile_postgres "$dsn" "$shard"
+      ;;
     core) run_core_postgres "$dsn" ;;
     provider-directory) run_provider_directory_postgres "$dsn" ;;
     provider-profile) run_provider_profile_postgres "$dsn" ;;
@@ -4042,5 +4199,6 @@ case "${1:-}" in
   security) [ "$#" -eq 1 ] || usage; run_security ;;
   redis) [ "$#" -eq 1 ] || usage; run_redis ;;
   postgres) [ "$#" -eq 2 ] || usage; run_postgres "$2" ;;
+  native-wheel) [ "$#" -eq 2 ] && [ -n "$2" ] || usage; stage_native_wheel "$2" ;;
   *) usage ;;
 esac

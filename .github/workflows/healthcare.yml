@@ -39,6 +39,7 @@ jobs:
       uses: ./ci/scripts/healthcare/setup
       with:
         rust: 'true'
+        cargo-cache: hygiene
     - name: Run complete validation stage
       run: 'bash "$CI_ROOT/scripts/healthcare/check" hygiene &
 
@@ -62,7 +63,7 @@ jobs:
       run: "binary_directory=\"$GITHUB_WORKSPACE/rust-debug-binaries\"\nmkdir -p \"$binary_directory\"\ninstall -m 0755 \\\
         \n  support/ptg2_scanner/target/debug/ptg2_scanner \\\n  support/ptg2_scanner/target/debug/ptg2_provider_graph_v4\
         \ \\\n  support/ptg2_scanner/target/debug/raw_claim_check \\\n  support/ptg2_scanner/target/debug/uhc_semantic_facts\
-        \ \\\n  \"$binary_directory/\"\n"
+        \ \\\n  \"$binary_directory/\"\nbash \"$CI_ROOT/scripts/healthcare/check\" native-wheel \"$binary_directory\"\n"
     - name: Upload exact-source Rust test binaries
       id: rust-artifact
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -74,7 +75,11 @@ jobs:
 
           rust-debug-binaries/raw_claim_check
 
-          rust-debug-binaries/uhc_semantic_facts'
+          rust-debug-binaries/uhc_semantic_facts
+
+          rust-debug-binaries/*.whl
+
+          rust-debug-binaries/ptg2-address-canon-wheel.sha256'
         if-no-files-found: error
         compression-level: 6
         retention-days: 1
@@ -348,6 +353,7 @@ jobs:
       uses: ./ci/scripts/healthcare/setup
       with:
         rust: 'true'
+        cargo-cache: rust
     - name: Install verified Rust validation tools
       run: |
         tools_directory="$RUNNER_TEMP/healthcare-rust-tools"
@@ -525,8 +531,6 @@ jobs:
         persist-credentials: false
     - name: Prepare source and toolchain
       uses: ./ci/scripts/healthcare/setup
-      with:
-        rust: ${{ (matrix.shard == 'core-services' || matrix.shard == 'core-services-2') || matrix.shard == 'core-snapshots' || matrix.shard == 'core-snapshots-2' || matrix.shard == 'core-ptg' || startsWith(matrix.shard, 'directory-source') || matrix.shard == 'directory-address' || matrix.shard == 'profile-publication' || startsWith(matrix.shard, 'registry-') }}
     - name: Install PostgreSQL client
       run: bash "$CI_ROOT/scripts/install_postgres_client"
     - name: Download exact-source Rust test binaries
