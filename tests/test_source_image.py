@@ -642,26 +642,43 @@ class IntentChecks(unittest.TestCase):
             TransferChecks().setup_artifact(directory)
             with patch.dict(os.environ, {"RUNNER_TEMP": temporary}), patch.object(transfer, "admit", return_value=expected()), \
                     patch.object(transfer, "package_id", return_value=321), \
-                    patch.object(transfer, "package_versions", return_value=[{"id": 10**15 + i} for i in range(5000)]), \
+                    patch.object(transfer, "package_versions", return_value=[{"id": 10**30 + i} for i in range(9999)]), \
                     patch.object(transfer, "require_absent_registry_tag"):
                 with self.assertRaisesRegex(ValueError, "metadata bound"):
                     transfer.stage(expected(), directory)
                 self.assertFalse((Path(temporary) / "public-image-intent").exists())
 
-    def test_stage_retains_inventory_when_compact_intent_fits(self):
+    def test_stage_retains_inventory_near_complete_pagination_limit(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary) / "input"
             directory.mkdir()
             TransferChecks().setup_artifact(directory)
-            ids = list(range(10**9, 10**9 + 5500))
+            ids = list(range(2**63 - 10000, 2**63 - 1))
             with patch.dict(os.environ, {"RUNNER_TEMP": temporary}), patch.object(transfer, "admit", return_value=expected()), \
                     patch.object(transfer, "package_id", return_value=321), \
                     patch.object(transfer, "package_versions", return_value=[{"id": value} for value in ids]), \
                     patch.object(transfer, "require_absent_registry_tag"):
                 transfer.stage(expected(), directory)
                 content = (Path(temporary) / "public-image-intent/intent.json").read_bytes()
-                self.assertLessEqual(len(content), 65536)
-                self.assertEqual(json.loads(content)["prior_version_ids"], ids)
+                self.assertGreater(len(content), 65536)
+                self.assertLessEqual(len(content), transfer.INTENT_MAX_BYTES)
+                intent = json.loads(content)
+                self.assertEqual(intent["prior_version_ids"], ids)
+                with self.assertRaisesRegex(ValueError, "bounded metadata"):
+                    transfer.read_json(Path(temporary) / "public-image-intent/intent.json")
+                job = {"started_at": intent["created_at"]}
+                with patch.object(transfer, "active_publisher", return_value=({}, job)), \
+                        patch.object(transfer, "uploaded_payload", return_value=intent):
+                    self.assertEqual(transfer.authenticated_intent(expected())[0], intent)
+                self.assertEqual(self.upload(intent), intent)
+
+    def test_larger_intents_preserve_receipt_and_oversize_refusals(self):
+        payload = {"synthetic": "x" * 65536}
+        self.assertEqual(self.upload(payload), payload)
+        with self.assertRaisesRegex(ValueError, "unexpected files"):
+            self.upload(payload, intent=False)
+        with self.assertRaisesRegex(ValueError, "unexpected files"):
+            self.upload({"synthetic": "x" * transfer.INTENT_MAX_BYTES})
 
     def test_publisher_can_reconcile_after_another_step_fails_without_current_dev_admission(self):
         run, jobs, _ = AdmissionChecks().fixtures()
