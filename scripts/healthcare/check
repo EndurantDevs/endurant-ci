@@ -3368,12 +3368,16 @@ run_provider_directory_postgres() {
       tests/test_provider_directory_reviewed_subset_direct_v4_disposition_postgres.py \
       tests/test_provider_directory_reviewed_subset_v5_http410_disposition_postgres.py
 
-  HLTHPRT_TIN_NPI_CONNECTOR_POSTGRES_DSN=$dsn \
-    timeout --foreground 295s python -m pytest -q \
-      tests/test_provider_directory_terminal_root_retirement_postgres.py \
-      tests/test_provider_directory_terminal_root_retirement_repair_postgres.py \
-      tests/test_provider_directory_terminal_root_retirement_v2_postgres.py \
-      tests/test_provider_directory_terminal_root_retirement_v2_topology_postgres.py
+  local retirement_shard
+  for retirement_shard in 0 1; do
+    HLTHPRT_TIN_NPI_CONNECTOR_POSTGRES_DSN=$dsn \
+      timeout --foreground 295s python -m pytest -q \
+        -p scripts.ci.shard_pytest_nodeids --ci-shard-count 2 --ci-shard-index "$retirement_shard" \
+        tests/test_provider_directory_terminal_root_retirement_postgres.py \
+        tests/test_provider_directory_terminal_root_retirement_repair_postgres.py \
+        tests/test_provider_directory_terminal_root_retirement_v2_postgres.py \
+        tests/test_provider_directory_terminal_root_retirement_v2_topology_postgres.py || return "$?"
+  done
 
   local directory_entity_tests=(
     tests/test_provider_directory_entities_postgres.py

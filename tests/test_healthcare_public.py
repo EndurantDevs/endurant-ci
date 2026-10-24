@@ -2787,20 +2787,26 @@ run_source_routes postgresql://synthetic/test "$ROUTE_LANE"
                 self.assertEqual(result.returncode, 0, result.stderr)
                 calls_by_lane[lane] = [line.rstrip("\0").split("\0") for line in call_log.read_text().splitlines()]
         first, second = (calls_by_lane[lane] for lane in ("directory-source", "directory-source-2"))
-        self.assertEqual((len(first), len(second)), (5, 6))
+        self.assertEqual((len(first), len(second)), (6, 6))
         self.assertEqual(len(first[0][9:]), 18)
-        self.assertEqual(first[1][9:], [
+        retirement_tests = [
             "tests/test_provider_directory_terminal_root_retirement_postgres.py",
             "tests/test_provider_directory_terminal_root_retirement_repair_postgres.py",
             "tests/test_provider_directory_terminal_root_retirement_v2_postgres.py",
             "tests/test_provider_directory_terminal_root_retirement_v2_topology_postgres.py",
-        ])
-        for call in first[:2]:
+        ]
+        for shard, call in enumerate(first[1:3]):
+            self.assertEqual(call[9:15], [
+                "-p", "scripts.ci.shard_pytest_nodeids", "--ci-shard-count", "2", "--ci-shard-index", str(shard),
+            ])
+            self.assertEqual(call[15:], retirement_tests)
+        for call in first[:3]:
             self.assertEqual(call[:2], ["postgresql://synthetic/test", ""])
         self.assertEqual(first + second, calls_by_lane["all"])
         selectors = [argument for call in first + second for argument in call if argument.startswith("tests/")]
-        self.assertEqual(len(selectors), len(set(selectors)))
         self.assertEqual(set(selectors), available_paths)
+        for path in available_paths:
+            self.assertEqual(selectors.count(path), 2 if path in retirement_tests else 1)
         self.assertEqual(second[-2][9:], list(PROVIDER_CANDIDATE_TESTS[:6]))
         self.assertEqual(second[-1][9:], list(PROVIDER_CANDIDATE_TESTS[6:]))
         for call in second[-2:]:
@@ -2811,9 +2817,9 @@ run_source_routes postgresql://synthetic/test "$ROUTE_LANE"
 
     def test_directory_source_cohorts_fail_before_later_invocations(self):
         with tempfile.TemporaryDirectory() as temporary:
-            for failed_batch in (1, 2):
-                with self.subTest(failed_batch=failed_batch):
-                    call_log = Path(temporary) / str(failed_batch)
+            for failed_batch, conditional in ((1, False), (2, False), (3, False), (2, True), (3, True)):
+                with self.subTest(failed_batch=failed_batch, conditional=conditional):
+                    call_log = Path(temporary) / f"{failed_batch}-{conditional}"
                     script = CHECK_FUNCTIONS + r'''
 invocation=0
 timeout() {
@@ -2822,8 +2828,10 @@ timeout() {
   if [ "$invocation" = "$FAILED_BATCH" ]; then return 17; fi
 }
 run_owned_provider_directory_postgres() { return 99; }
-run_provider_directory_postgres postgresql://synthetic/test directory-source
 '''
+                    invoke = "run_provider_directory_postgres postgresql://synthetic/test directory-source"
+                    script += (f'if {invoke}; then exit 99; else exit "$?"; fi\n'
+                               if conditional else invoke + "\n")
                     result = subprocess.run(
                         ["bash", "-eu"], input=script, capture_output=True, text=True,
                         env={**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT),
@@ -2834,7 +2842,7 @@ run_provider_directory_postgres postgresql://synthetic/test directory-source
                     self.assertEqual(len(calls), failed_batch)
                     for call in calls:
                         self.assertTrue(call.startswith(
-                            "postgresql://synthetic/test\t--foreground 295s python -m pytest -q tests/"))
+                            "postgresql://synthetic/test\t--foreground 295s python -m pytest -q "))
 
     def test_provider_candidate_batches_keep_optional_modules_and_failures(self):
         body = "  local provider_candidate_tests=()" + CHECK_FUNCTIONS.split(
