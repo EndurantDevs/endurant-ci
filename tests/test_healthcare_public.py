@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from importlib import metadata
 from pathlib import Path
 
@@ -1089,31 +1090,33 @@ publication_worker_native_test_paths
             "collection", "nodeids-cleanup", "wrong-selection", "duplicate-selection", "empty-selection",
         )]
         successful_shard_members = []
-        for lane, missing, failure in cases:
-            with self.subTest(lane=lane, missing=missing, failure=failure), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                source, runner = root / "source", root / "runner"
-                (source / "support/ptg2_scanner").mkdir(parents=True)
-                (source / "tests").mkdir()
-                runner.mkdir()
-                only_member = missing.removeprefix("only:") if missing.startswith("only:") else ""
-                for path in paths:
-                    if (path == only_member if only_member else path != missing and missing not in ("all", "all-with-model")):
-                        (source / path).touch()
-                if missing == "all-with-model":
-                    (source / "db/models").mkdir(parents=True)
-                    (source / "db/models/network_registry.py").touch()
-                (source / "asyncpg.py").write_text(
-                    "raise ImportError('synthetic dependency missing')\n" if failure == "asyncpg" else "", encoding="utf-8",
-                )
-                (source / "ptg2_address_canon.py").write_text(
-                    "\n".join(
-                        f"{name} = 0" if failure == name + ":not-callable" else f"def {name}(): pass"
-                        for name in exports if name != failure
-                    ), encoding="utf-8",
-                )
-                log = root / "calls"
-                script = CHECK_FUNCTIONS + r'''
+        for offset in range(0, len(cases), 4):
+            with ExitStack() as temporaries:
+                prepared, pending = [], []
+                for lane, missing, failure in cases[offset:offset + 4]:
+                    root = Path(temporaries.enter_context(tempfile.TemporaryDirectory()))
+                    source, runner = root / "source", root / "runner"
+                    (source / "support/ptg2_scanner").mkdir(parents=True)
+                    (source / "tests").mkdir()
+                    runner.mkdir()
+                    only_member = missing.removeprefix("only:") if missing.startswith("only:") else ""
+                    for path in paths:
+                        if (path == only_member if only_member else path != missing and missing not in ("all", "all-with-model")):
+                            (source / path).touch()
+                    if missing == "all-with-model":
+                        (source / "db/models").mkdir(parents=True)
+                        (source / "db/models/network_registry.py").touch()
+                    (source / "asyncpg.py").write_text(
+                        "raise ImportError('synthetic dependency missing')\n" if failure == "asyncpg" else "", encoding="utf-8",
+                    )
+                    (source / "ptg2_address_canon.py").write_text(
+                        "\n".join(
+                            f"{name} = 0" if failure == name + ":not-callable" else f"def {name}(): pass"
+                            for name in exports if name != failure
+                        ), encoding="utf-8",
+                    )
+                    log = root / "calls"
+                    script = CHECK_FUNCTIONS + r'''
 prepare_debug_rust_binaries() { :; }
 wait_for_service() { :; }
 prepare_postgres() { :; }
@@ -1217,85 +1220,92 @@ timeout() { shift 2; "$@"; }
 run_postgres "$ROUTE_LANE"
 test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN:-}"
 '''
-                environment = {
-                    **os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT), "RUNNER_TEMP": str(runner),
-                    "CI_DEPS_READY": "1", "COVERAGE_BASE_SHA": "a" * 40, "CALL_LOG": str(log),
-                    "ROUTE_LANE": lane, "FAIL_STAGE": failure,
-                    "NETWORK_REGISTRY_TEST_DSN": "", "HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN": "",
-                }
-                result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True, check=False)
-                selected = (lane == "core" or lane.startswith("registry-")) and (missing != "all" or lane.startswith("registry-"))
-                expected = 17 if failure in ("build", "install", "pytest", "collection") else 1 if failure not in ("", "more-management-cases") or (selected and missing) else 0
-                self.assertEqual(result.returncode, expected, result.stderr)
-                calls = log.read_text().splitlines() if log.exists() else []
-                if failure in ("report-cleanup", "nodeids-cleanup"):
-                    report_paths = list(runner.iterdir())
-                    self.assertEqual(len(report_paths), 1)
-                    self.assertTrue(report_paths[0].name.startswith("healthcare-"))
-                    report_paths[0].unlink()
-                self.assertEqual(list(runner.iterdir()), [])
-                if not selected or missing or failure == "rust-version":
-                    if lane in ("directory-source", "directory-source-2", "directory-address", "profile-publication"):
-                        self.assertEqual(len(calls), 3)
-                        self.assertTrue(calls[0].startswith("build\t-m maturin build "))
-                        self.assertTrue(calls[1].startswith("uv\t--no-config pip install "))
-                        self.assertTrue(calls[2].startswith("uv\t--no-config pip check "))
-                    else:
-                        self.assertEqual(calls, [])
-                    if selected and missing:
-                        if missing == "all":
-                            self.assertIn("Native registry shard requires registry source and tests", result.stderr)
-                        else:
-                            required = (next(path for path in paths if path != only_member) if only_member
-                                        else paths[0] if missing == "all-with-model" else missing)
-                            self.assertIn(f"Missing required native registry test: {required}", result.stderr)
-                    continue
-                self.assertTrue(calls[0].startswith("build\t-m maturin build --locked --features python-extension --out "))
-                self.assertNotIn("--release", calls[0])
-                runs = [call for call in calls if call.startswith("pytest\t")]
-                report_failures = {"skipped", "error", "failure", "summary-skipped", "no-tests", "bad-count",
-                                   "empty-report", "invalid-report", "large-report", "report-cleanup",
-                                   "stale-registry-roster", "no-classname", "wrong-selection", "duplicate-selection", "empty-selection", "nodeids-cleanup"}
-                self.assertEqual(len(runs), int(failure in ("", "pytest", "drop", "more-management-cases") or failure in report_failures
-                                                or failure.startswith("missing-report:")))
-                if runs:
-                    self.assertRegex(result.stdout, rf"CI_PHASE end name=network-registry-postgres-tests elapsed_seconds=\d+ exit_code={expected}")
-                    self.assertTrue(calls[1].startswith("uv\t--no-config pip install --python "))
-                    self.assertIn(" --no-build --no-deps ", calls[1])
-                    self.assertTrue(calls[2].startswith("uv\t--no-config pip check --python "))
-                    _, registry_dsn, membership_dsn, arguments = runs[0].split("\t", 3)
-                    self.assertEqual(registry_dsn, membership_dsn)
-                    self.assertRegex(registry_dsn, r"@127\.0\.0\.1:5440/hc_network_registry_[0-9a-f]{32}$")
-                    selected_arguments = shlex.split(arguments)
-                    if lane.startswith("registry-"):
-                        collection = next(call for call in calls if call.startswith("collection\t"))
-                        collected = shlex.split(collection.split("\t", 1)[1])
-                        self.assertEqual(collected[:5], ["scripts/ci/shard_pytest_nodeids.py", "--shard-count", "48",
-                                                        "--shard-index", lane.removeprefix("registry-")])
-                        self.assertEqual(collected[collected.index("--") + 1:], list(paths))
-                        if not failure:
-                            selection = next(call for call in calls if call.startswith("selection\t"))
-                            successful_shard_members.extend(
-                                nodeid.split("::", 1)[0] for nodeid in selection.split("\t")[1:]
-                            )
-                        self.assertEqual(selected_arguments[:3], ["-m", "pytest", "-q"])
-                        self.assertEqual(len(selected_arguments), 7)
-                        selection_path = Path(selected_arguments[3].removeprefix("@"))
-                        self.assertEqual(selection_path.parent, runner)
-                        self.assertFalse(selection_path.exists())
-                    else:
-                        self.assertEqual(selected_arguments[:-3], ["-m", "pytest", "-q", *paths])
-                    self.assertEqual(selected_arguments[-3], "--verbosity=1")
-                    self.assertEqual(selected_arguments[-2], "--junitxml")
-                    self.assertEqual(Path(selected_arguments[-1]).parent, runner)
-                    self.assertFalse(Path(selected_arguments[-1]).exists())
-                    database = registry_dsn.rsplit("/", 1)[1]
-                    self.assertEqual(calls[-1], f"drop\t{database}")
-                    self.assertEqual(calls.count(f"create\t{database}"), 1)
-                    self.assertLess(calls.index("exports"), calls.index(f"create\t{database}"))
-                    extensions = next(call for call in calls if call.startswith("extensions\t"))
-                    for name in ("intarray", "btree_gin", "postgis"):
-                        self.assertIn(f"CREATE EXTENSION IF NOT EXISTS {name} WITH SCHEMA public", extensions)
+                    environment = {
+                        **os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT), "RUNNER_TEMP": str(runner),
+                        "CI_DEPS_READY": "1", "COVERAGE_BASE_SHA": "a" * 40, "CALL_LOG": str(log),
+                        "ROUTE_LANE": lane, "FAIL_STAGE": failure,
+                        "NETWORK_REGISTRY_TEST_DSN": "", "HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN": "",
+                    }
+                    prepared.append((lane, missing, failure, only_member))
+                    pending.append((root, source, runner, log, script, environment, ""))
+                results = self._run_optional_native_cases(pending, timeout=None, cwd=ROOT)
+                for (lane, missing, failure, only_member), (root, source, runner, log, result) in zip(
+                        prepared, results, strict=True):
+                    with self.subTest(lane=lane, missing=missing, failure=failure):
+                        if isinstance(result, (OSError, subprocess.SubprocessError)):
+                            raise result
+                        selected = (lane == "core" or lane.startswith("registry-")) and (missing != "all" or lane.startswith("registry-"))
+                        expected = 17 if failure in ("build", "install", "pytest", "collection") else 1 if failure not in ("", "more-management-cases") or (selected and missing) else 0
+                        self.assertEqual(result.returncode, expected, result.stderr)
+                        calls = log.read_text().splitlines() if log.exists() else []
+                        if failure in ("report-cleanup", "nodeids-cleanup"):
+                            report_paths = list(runner.iterdir())
+                            self.assertEqual(len(report_paths), 1)
+                            self.assertTrue(report_paths[0].name.startswith("healthcare-"))
+                            report_paths[0].unlink()
+                        self.assertEqual(list(runner.iterdir()), [])
+                        if not selected or missing or failure == "rust-version":
+                            if lane in ("directory-source", "directory-source-2", "directory-address", "profile-publication"):
+                                self.assertEqual(len(calls), 3)
+                                self.assertTrue(calls[0].startswith("build\t-m maturin build "))
+                                self.assertTrue(calls[1].startswith("uv\t--no-config pip install "))
+                                self.assertTrue(calls[2].startswith("uv\t--no-config pip check "))
+                            else:
+                                self.assertEqual(calls, [])
+                            if selected and missing:
+                                if missing == "all":
+                                    self.assertIn("Native registry shard requires registry source and tests", result.stderr)
+                                else:
+                                    required = (next(path for path in paths if path != only_member) if only_member
+                                                else paths[0] if missing == "all-with-model" else missing)
+                                    self.assertIn(f"Missing required native registry test: {required}", result.stderr)
+                            continue
+                        self.assertTrue(calls[0].startswith("build\t-m maturin build --locked --features python-extension --out "))
+                        self.assertNotIn("--release", calls[0])
+                        runs = [call for call in calls if call.startswith("pytest\t")]
+                        report_failures = {"skipped", "error", "failure", "summary-skipped", "no-tests", "bad-count",
+                                           "empty-report", "invalid-report", "large-report", "report-cleanup",
+                                           "stale-registry-roster", "no-classname", "wrong-selection", "duplicate-selection", "empty-selection", "nodeids-cleanup"}
+                        self.assertEqual(len(runs), int(failure in ("", "pytest", "drop", "more-management-cases") or failure in report_failures
+                                                        or failure.startswith("missing-report:")))
+                        if runs:
+                            self.assertRegex(result.stdout, rf"CI_PHASE end name=network-registry-postgres-tests elapsed_seconds=\d+ exit_code={expected}")
+                            self.assertTrue(calls[1].startswith("uv\t--no-config pip install --python "))
+                            self.assertIn(" --no-build --no-deps ", calls[1])
+                            self.assertTrue(calls[2].startswith("uv\t--no-config pip check --python "))
+                            _, registry_dsn, membership_dsn, arguments = runs[0].split("\t", 3)
+                            self.assertEqual(registry_dsn, membership_dsn)
+                            self.assertRegex(registry_dsn, r"@127\.0\.0\.1:5440/hc_network_registry_[0-9a-f]{32}$")
+                            selected_arguments = shlex.split(arguments)
+                            if lane.startswith("registry-"):
+                                collection = next(call for call in calls if call.startswith("collection\t"))
+                                collected = shlex.split(collection.split("\t", 1)[1])
+                                self.assertEqual(collected[:5], ["scripts/ci/shard_pytest_nodeids.py", "--shard-count", "48",
+                                                                "--shard-index", lane.removeprefix("registry-")])
+                                self.assertEqual(collected[collected.index("--") + 1:], list(paths))
+                                if not failure:
+                                    selection = next(call for call in calls if call.startswith("selection\t"))
+                                    successful_shard_members.extend(
+                                        nodeid.split("::", 1)[0] for nodeid in selection.split("\t")[1:]
+                                    )
+                                self.assertEqual(selected_arguments[:3], ["-m", "pytest", "-q"])
+                                self.assertEqual(len(selected_arguments), 7)
+                                selection_path = Path(selected_arguments[3].removeprefix("@"))
+                                self.assertEqual(selection_path.parent, runner)
+                                self.assertFalse(selection_path.exists())
+                            else:
+                                self.assertEqual(selected_arguments[:-3], ["-m", "pytest", "-q", *paths])
+                            self.assertEqual(selected_arguments[-3], "--verbosity=1")
+                            self.assertEqual(selected_arguments[-2], "--junitxml")
+                            self.assertEqual(Path(selected_arguments[-1]).parent, runner)
+                            self.assertFalse(Path(selected_arguments[-1]).exists())
+                            database = registry_dsn.rsplit("/", 1)[1]
+                            self.assertEqual(calls[-1], f"drop\t{database}")
+                            self.assertEqual(calls.count(f"create\t{database}"), 1)
+                            self.assertLess(calls.index("exports"), calls.index(f"create\t{database}"))
+                            extensions = next(call for call in calls if call.startswith("extensions\t"))
+                            for name in ("intarray", "btree_gin", "postgis"):
+                                self.assertIn(f"CREATE EXTENSION IF NOT EXISTS {name} WITH SCHEMA public", extensions)
 
         self.assertEqual(len(successful_shard_members), len(set(successful_shard_members)))
         self.assertCountEqual(successful_shard_members, paths)
@@ -1460,6 +1470,22 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
     def test_registry_migration_native_routes_fail_closed(self):
         self._check_optional_native_routes(only_kinds={"registry-preparation", "candidate-custody"})
 
+    def _run_optional_native_cases(self, prepared, *, timeout=30, cwd=None):
+        """Execute isolated route fixtures without moving assertions into workers."""
+        def run(case):
+            root, source, runner, log, script, environment, call = case
+            try:
+                result = subprocess.run(
+                    ["bash", "-eu"], input=script + "\n" + call,
+                    env=environment, cwd=source if cwd is None else cwd, capture_output=True, text=True,
+                    timeout=timeout, check=False)
+            except (OSError, subprocess.SubprocessError) as error:
+                result = error
+            return root, source, runner, log, result
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            return list(pool.map(run, prepared))
+
     def _run_optional_native_shards(self, script, environment, source, timeout):
         """Share a closed source fixture across isolated positive shard routes."""
         temporary = tempfile.TemporaryDirectory()
@@ -1471,7 +1497,8 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
         inventory = {str(path.relative_to(shared_source)): path.read_bytes()
                      for path in shared_source.rglob("*") if path.is_file()}
 
-        def run(shard):
+        prepared = []
+        for shard in range(48):
             case_root = root / str(shard)
             runner, log = case_root / "runner", case_root / "calls"
             runner.mkdir(parents=True)
@@ -1480,22 +1507,15 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                 "CALL_LOG": str(log), "SELECTION_LOG": str(case_root / "selections"),
                 "PATH": str(root) + os.pathsep + os.environ["PATH"],
             }
-            try:
-                result = subprocess.run(
-                    ["bash", "-eu"], input=script + f"\nrun_network_registry_postgres {shard}",
-                    env=case_environment, cwd=shared_source, capture_output=True, text=True,
-                    timeout=30, check=False)
-            except (OSError, subprocess.SubprocessError) as error:
-                result = error
-            return case_root, shared_source, runner, log, result
-
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            results = dict(zip(map(str, range(48)), pool.map(run, range(48)), strict=True))
+            prepared.append((case_root, shared_source, runner, log, script, case_environment,
+                             f"run_network_registry_postgres {shard}"))
+        results = dict(zip(map(str, range(48)), self._run_optional_native_cases(prepared), strict=True))
         observed = {str(path.relative_to(shared_source)): path.read_bytes()
                     for path in shared_source.rglob("*") if path.is_file()}
         return results, inventory, observed
 
     def _check_optional_native_routes(self, only_kinds=None):
+        dedicated_kinds = {"managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"}
         registry_roster = tuple(shlex.split(CHECK_FUNCTIONS.split(
             "run_network_registry_postgres() (\n", 1)[1].split("  local registry_tests=(\n", 1)[1].split("\n  )", 1)[0]))
         shard_members_by_kind = {}
@@ -1523,7 +1543,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
             ("candidate-custody", REGISTRY_CUSTODY_CAPABILITY, REGISTRY_CUSTODY_DEPENDENCIES),
             ("maintenance", PROFILE_MAINTENANCE_CAPABILITY, PROFILE_MAINTENANCE_DEPENDENCIES),
         ):
-            if only_kinds is not None and kind not in only_kinds:
+            if (only_kinds is None and kind in dedicated_kinds) or (only_kinds is not None and kind not in only_kinds):
                 continue
             shard_members = []
             shard_results = None
@@ -1558,49 +1578,52 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                 cases += [("complete", "", "", str(index)) for index in range(48)]
             else:
                 cases += [("complete", "", "", "publication")]
-            for layout, changed, stage, shard in cases:
-                with self.subTest(kind=kind, layout=layout, changed=changed, stage=stage, shard=shard), tempfile.TemporaryDirectory() as temporary:
-                    if shard.isdecimal() and shard_results is not None:
-                        root, source, runner, log, result = shard_results[shard]
-                    else:
-                        root = Path(temporary)
-                        source, runner, log = root / "source", root / "runner", root / "calls"
-                        source.mkdir()
-                        runner.mkdir()
-                        for path in registry_roster if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"} else ():
-                            target = source / path
-                            target.parent.mkdir(parents=True, exist_ok=True)
-                            target.touch()
-                        if kind == "manual-swaps" and layout == "complete":
-                            for path in (*COMPANY_ASSERTION_CAPABILITY, *COMPANY_ASSERTION_DEPENDENCIES):
-                                if path == changed and not stage:
+            for offset in range(0, len(cases), 4):
+                with ExitStack() as temporaries:
+                    prepared, pending = [], []
+                    for case in cases[offset:offset + 4]:
+                        layout, changed, stage, shard = case
+                        if shard.isdecimal() and shard_results is not None:
+                            root, source, runner, log, result = shard_results[shard]
+                        else:
+                            root = Path(temporaries.enter_context(tempfile.TemporaryDirectory()))
+                            source, runner, log = root / "source", root / "runner", root / "calls"
+                            source.mkdir()
+                            runner.mkdir()
+                            for path in registry_roster if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"} else ():
+                                target = source / path
+                                target.parent.mkdir(parents=True, exist_ok=True)
+                                target.touch()
+                            if kind == "manual-swaps" and layout == "complete":
+                                for path in (*COMPANY_ASSERTION_CAPABILITY, *COMPANY_ASSERTION_DEPENDENCIES):
+                                    if path == changed and not stage:
+                                        continue
+                                    target = source / path
+                                    target.parent.mkdir(parents=True, exist_ok=True)
+                                    target.touch()
+                            if kind in {"publication-ptg-runtime", "benefit-plans", "source-lifecycle"} and layout == "complete":
+                                for path in (*PUBLICATION_WORKER_CAPABILITY, *PUBLICATION_WORKER_DEPENDENCIES):
+                                    if path == changed and not stage:
+                                        continue
+                                    target = source / path
+                                    target.parent.mkdir(parents=True, exist_ok=True)
+                                    target.touch()
+                            selected = (capability[:1] if kind == "manual-location-commands" else ()) if layout == "legacy" else (changed,) if layout == "only" else (*capability, *dependencies)
+                            for path in selected:
+                                if path == changed and not stage and layout != "only":
                                     continue
                                 target = source / path
                                 target.parent.mkdir(parents=True, exist_ok=True)
                                 target.touch()
-                        if kind in {"publication-ptg-runtime", "benefit-plans", "source-lifecycle"} and layout == "complete":
-                            for path in (*PUBLICATION_WORKER_CAPABILITY, *PUBLICATION_WORKER_DEPENDENCIES):
-                                if path == changed and not stage:
-                                    continue
-                                target = source / path
-                                target.parent.mkdir(parents=True, exist_ok=True)
-                                target.touch()
-                        selected = (capability[:1] if kind == "manual-location-commands" else ()) if layout == "legacy" else (changed,) if layout == "only" else (*capability, *dependencies)
-                        for path in selected:
-                            if path == changed and not stage and layout != "only":
-                                continue
-                            target = source / path
-                            target.parent.mkdir(parents=True, exist_ok=True)
-                            target.touch()
-                        if kind in {"completion", "pricing", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"} and layout == "complete" and changed in registry_roster and not stage:
-                            (source / changed).unlink()
-                        if stage in ("symlink", "dangling"):
-                            target = source / changed
-                            target.unlink()
-                            live = registry_roster[0] if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"} else dependencies[0]
-                            target.symlink_to(source / (live if stage == "symlink" else "absent"))
-                        timeout = root / "timeout"
-                        timeout.write_text(f"#!{sys.executable}\n" + r'''
+                            if kind in {"completion", "pricing", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"} and layout == "complete" and changed in registry_roster and not stage:
+                                (source / changed).unlink()
+                            if stage in ("symlink", "dangling"):
+                                target = source / changed
+                                target.unlink()
+                                live = registry_roster[0] if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"} else dependencies[0]
+                                target.symlink_to(source / (live if stage == "symlink" else "absent"))
+                            timeout = root / "timeout"
+                            timeout.write_text(f"#!{sys.executable}\n" + r'''
 import json, os, pathlib, signal, sys, xml.etree.ElementTree as ET
 arguments = sys.argv[1:]
 assert arguments[:6] == ["--foreground", "295s", "python", "-m", "pytest", "-q"]
@@ -1632,19 +1655,19 @@ if os.environ["FAIL_STAGE"] == "duplicate":
     suite.set("tests", str(len(modules) + 1))
 path.write_bytes(ET.tostring(report))
 ''')
-                        timeout.chmod(0o755)
-                        environment = {
-                            **os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT), "RUNNER_TEMP": str(runner),
-                            "CALL_LOG": str(log), "SELECTION_LOG": str(root / "selections"), "FAIL_STAGE": stage, "CHANGED_PATH": changed,
-                            "NEW_NATIVE_TEST": capability[-1], "PATH": str(root) + os.pathsep + os.environ["PATH"],
-                            "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "synthetic",
-                            "HLTHPRT_DB_HOST": "127.0.0.1", "HLTHPRT_DB_PORT": "5432",
-                            "HLTHPRT_DB_DATABASE": "base_test", "HLTHPRT_DB_DATABASE_OVERRIDE": "wrong",
-                            "DB_SCHEMA": "stale", "HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST": "0",
-                            "HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN": "unchanged",
-                            "HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN": "unchanged-cms",
-                        }
-                        script = CHECK_FUNCTIONS + r'''
+                            timeout.chmod(0o755)
+                            environment = {
+                                **os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT), "RUNNER_TEMP": str(runner),
+                                "CALL_LOG": str(log), "SELECTION_LOG": str(root / "selections"), "FAIL_STAGE": stage, "CHANGED_PATH": changed,
+                                "NEW_NATIVE_TEST": capability[-1], "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                                "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "synthetic",
+                                "HLTHPRT_DB_HOST": "127.0.0.1", "HLTHPRT_DB_PORT": "5432",
+                                "HLTHPRT_DB_DATABASE": "base_test", "HLTHPRT_DB_DATABASE_OVERRIDE": "wrong",
+                                "DB_SCHEMA": "stale", "HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST": "0",
+                                "HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN": "unchanged",
+                                "HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN": "unchanged-cms",
+                            }
+                            script = CHECK_FUNCTIONS + r'''
 git() { [[ "$FAIL_STAGE" != dirty && "$FAIL_STAGE" != untracked ]] || [[ "${!#}" != "$CHANGED_PATH" ]]; }
 rustc() { echo 'rustc 1.98.1'; }
 verify_registry_native_wheel() {
@@ -1671,78 +1694,85 @@ PYSHARD
   else command python3 "$@"; fi
 }
 '''
-                        call = (f"run_network_registry_postgres {shard}" if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"} else
-                                "run_provider_profile_postgres postgresql://synthetic/runtime_test profile-publication"
-                                if shard == "publication" else "run_profile_control_maintenance_postgres")
-                        if changed:
-                            call = "if " + call + "; then exit 9; else exit 1; fi"
-                        if shard.isdecimal():
-                            shard_results, inventory, observed = self._run_optional_native_shards(
-                                script, environment, source, timeout)
-                            self.assertEqual(observed, inventory)
-                            root, source, runner, log, result = shard_results[shard]
-                        else:
-                            result = subprocess.run(["bash", "-eu"], input=script + "\n" + call, env=environment,
-                                                    cwd=source, capture_output=True, text=True, timeout=30, check=False)
-                    if isinstance(result, (OSError, subprocess.SubprocessError)):
-                        raise result
-                    expected = 143 if stage == "cancel" else 17 if stage in {"pytest", "runtime-exports", "worker-exports", "manual-location-exports"} else 1 if changed or stage else 0
-                    self.assertEqual(result.returncode, expected, result.stderr)
-                    calls = log.read_text().splitlines() if log.exists() else []
-                    runs = [json.loads(line) for line in calls if line.startswith("{")]
-                    if kind in {"publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"} and layout == "complete" and not changed:
-                        modes = (["manual-location-commands"] if kind == "manual-location-commands" else
-                                 ["publication-worker"] + (["1"] if kind == "publication-ptg-runtime" else []))
-                        if stage == "worker-exports":
-                            modes = modes[:1]
-                        self.assertEqual([c for c in calls if c.startswith("native-exports:")],
-                                         ["native-exports:" + mode for mode in modes])
-                        if stage in {"worker-exports", "runtime-exports", "manual-location-exports"}:
-                            self.assertFalse(any(c.startswith("create:") for c in calls))
-                    if kind == "maintenance":
-                        runs = [run for run in runs if capability[-1] in run["arguments"]]
-                    if changed:
-                        self.assertFalse(calls)
-                    elif not stage:
-                        self.assertEqual(len(runs), int(kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"} or layout == "complete"))
-                    for run in runs:
-                        if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"}:
-                            self.assertRegex(run["registry"], r"@127\.0\.0\.1:5440/hc_network_registry_[0-9a-f]{32}$")
-                            self.assertEqual(run["cms_admission"], run["registry"]
-                                             if kind in {"cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"}
-                                             and layout == "complete" else "unchanged-cms")
-                            if layout == "complete" and kind in {"company", "company-groups", "manual-swaps", "publication-ptg-runtime", "benefit-plans", "source-lifecycle"}:
-                                self.assertEqual(run["map"], "1")
-                                self.assertEqual(run["migration"], run["registry"])
+                            call = (f"run_network_registry_postgres {shard}" if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"} else
+                                    "run_provider_profile_postgres postgresql://synthetic/runtime_test profile-publication"
+                                    if shard == "publication" else "run_profile_control_maintenance_postgres")
+                            if changed:
+                                call = "if " + call + "; then exit 9; else exit 1; fi"
+                            if shard.isdecimal():
+                                shard_results, inventory, observed = self._run_optional_native_shards(
+                                    script, environment, source, timeout)
+                                self.assertEqual(observed, inventory)
+                                root, source, runner, log, result = shard_results[shard]
                             else:
-                                self.assertEqual((run["map"], run["migration"]), ("0", "unchanged"))
-                        else:
-                            self.assertRegex(run["database"], r"^hc_cms_admission_test_[0-9a-f]{32}$")
-                            self.assertTrue(run["profile"].endswith("/" + run["database"]))
-                            self.assertIsNone(run["override"])
-                            self.assertIsNone(run["schema_alias"])
-                        if not shard:
-                            self.assertEqual(capability[-1] in run["arguments"], layout == "complete")
-                    if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"} and shard and not stage:
-                        shard_members.extend(json.loads((root / "selections").read_text()))
-                    if kind == "manual-swaps" and not changed:
-                        extensions = [c for c in calls if c.startswith("extensions:")]
-                        selected_modules = (*registry_roster, COMPANY_ASSERTION_CAPABILITY[-1], capability[-1])
-                        if shard:
-                            selected_modules = selected_modules[int(shard)::48]
-                        extension_count = sum("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public" in c for c in extensions)
-                        self.assertEqual(extension_count, int(layout == "complete" and capability[-1] in selected_modules))
-                        if shard and not stage:
-                            manual_swap_shard_extensions.append(extension_count)
-                    created = [c[7:] for c in calls if c.startswith("create:")]
-                    dropped = [c[5:] for c in calls if c.startswith("drop:")]
-                    self.assertEqual(created, dropped)
-                    leftovers = list(runner.iterdir())
-                    if stage == "report-cleanup":
-                        self.assertTrue(leftovers)
-                        for path in leftovers: path.unlink()
-                    else:
-                        self.assertFalse(leftovers)
+                                pending.append((root, source, runner, log, script, environment, call))
+                                result = None
+                        prepared.append((case, root, source, runner, log, result))
+                    completed = iter(self._run_optional_native_cases(pending))
+                    for case, root, source, runner, log, result in prepared:
+                        layout, changed, stage, shard = case
+                        if result is None:
+                            root, source, runner, log, result = next(completed)
+                        with self.subTest(kind=kind, layout=layout, changed=changed, stage=stage, shard=shard):
+                            if isinstance(result, (OSError, subprocess.SubprocessError)):
+                                raise result
+                            expected = 143 if stage == "cancel" else 17 if stage in {"pytest", "runtime-exports", "worker-exports", "manual-location-exports"} else 1 if changed or stage else 0
+                            self.assertEqual(result.returncode, expected, result.stderr)
+                            calls = log.read_text().splitlines() if log.exists() else []
+                            runs = [json.loads(line) for line in calls if line.startswith("{")]
+                            if kind in {"publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans"} and layout == "complete" and not changed:
+                                modes = (["manual-location-commands"] if kind == "manual-location-commands" else
+                                         ["publication-worker"] + (["1"] if kind == "publication-ptg-runtime" else []))
+                                if stage == "worker-exports":
+                                    modes = modes[:1]
+                                self.assertEqual([c for c in calls if c.startswith("native-exports:")],
+                                                 ["native-exports:" + mode for mode in modes])
+                                if stage in {"worker-exports", "runtime-exports", "manual-location-exports"}:
+                                    self.assertFalse(any(c.startswith("create:") for c in calls))
+                            if kind == "maintenance":
+                                runs = [run for run in runs if capability[-1] in run["arguments"]]
+                            if changed:
+                                self.assertFalse(calls)
+                            elif not stage:
+                                self.assertEqual(len(runs), int(kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"} or layout == "complete"))
+                            for run in runs:
+                                if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"}:
+                                    self.assertRegex(run["registry"], r"@127\.0\.0\.1:5440/hc_network_registry_[0-9a-f]{32}$")
+                                    self.assertEqual(run["cms_admission"], run["registry"]
+                                                     if kind in {"cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle"}
+                                                     and layout == "complete" else "unchanged-cms")
+                                    if layout == "complete" and kind in {"company", "company-groups", "manual-swaps", "publication-ptg-runtime", "benefit-plans", "source-lifecycle"}:
+                                        self.assertEqual(run["map"], "1")
+                                        self.assertEqual(run["migration"], run["registry"])
+                                    else:
+                                        self.assertEqual((run["map"], run["migration"]), ("0", "unchanged"))
+                                else:
+                                    self.assertRegex(run["database"], r"^hc_cms_admission_test_[0-9a-f]{32}$")
+                                    self.assertTrue(run["profile"].endswith("/" + run["database"]))
+                                    self.assertIsNone(run["override"])
+                                    self.assertIsNone(run["schema_alias"])
+                                if not shard:
+                                    self.assertEqual(capability[-1] in run["arguments"], layout == "complete")
+                            if kind in {"company", "company-groups", "completion", "pricing", "manual-swaps", "canonical-cutover", "naic", "publication-worker", "publication-ptg-runtime", "manual-location-commands", "benefit-plans", "provider-plan", "cms-profile", "cms-profile-directory", "managed-detail", "managed-collection", "managed-pricing-source", "source-lifecycle", "registry-preparation", "candidate-custody"} and shard and not stage:
+                                shard_members.extend(json.loads((root / "selections").read_text()))
+                            if kind == "manual-swaps" and not changed:
+                                extensions = [c for c in calls if c.startswith("extensions:")]
+                                selected_modules = (*registry_roster, COMPANY_ASSERTION_CAPABILITY[-1], capability[-1])
+                                if shard:
+                                    selected_modules = selected_modules[int(shard)::48]
+                                extension_count = sum("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public" in c for c in extensions)
+                                self.assertEqual(extension_count, int(layout == "complete" and capability[-1] in selected_modules))
+                                if shard and not stage:
+                                    manual_swap_shard_extensions.append(extension_count)
+                            created = [c[7:] for c in calls if c.startswith("create:")]
+                            dropped = [c[5:] for c in calls if c.startswith("drop:")]
+                            self.assertEqual(created, dropped)
+                            leftovers = list(runner.iterdir())
+                            if stage == "report-cleanup":
+                                self.assertTrue(leftovers)
+                                for path in leftovers: path.unlink()
+                            else:
+                                self.assertFalse(leftovers)
             shard_members_by_kind[kind] = shard_members
         if only_kinds is None or "manual-swaps" in only_kinds:
             self.assertEqual(len(manual_swap_shard_extensions), 48)
@@ -1769,7 +1799,7 @@ PYSHARD
                              ("managed-pricing-source", (*CMS_PROFILE_HOST_TESTS, *CMS_PROFILE_DIRECTORY_HOST_TESTS,
                                                         *MANAGED_DETAIL_HOST_TESTS, *MANAGED_COLLECTION_HOST_TESTS,
                                                         *MANAGED_PRICING_SOURCE_HOST_TESTS))):
-            if only_kinds is not None and kind not in only_kinds:
+            if (only_kinds is None and kind in dedicated_kinds) or (only_kinds is not None and kind not in only_kinds):
                 continue
             members = shard_members_by_kind[kind]
             self.assertEqual(len(members), len(set(members)))
@@ -2042,6 +2072,10 @@ for shard in 0 1 2 3 4 5; do run_python_main "$shard"; done
             self._check_optional_native_exclusions(only_capability=capability)
 
     def _check_optional_native_exclusions(self, only_capability=None):
+        dedicated_capabilities = (
+            MANAGED_PRICING_SOURCE_CAPABILITY, REGISTRY_SOURCE_LIFECYCLE_CAPABILITY,
+            REGISTRY_PREPARATION_CAPABILITY, REGISTRY_CUSTODY_CAPABILITY,
+        )
         for capability, dependencies, host_tests in (
             (COMPANY_GROUP_CAPABILITY, COMPANY_GROUP_DEPENDENCIES, COMPANY_GROUP_HOST_TESTS),
             (MANUAL_SOURCE_SWAP_CAPABILITY, MANUAL_SOURCE_SWAP_DEPENDENCIES, (MANUAL_SOURCE_SWAP_CAPABILITY[-1],)),
@@ -2069,7 +2103,8 @@ for shard in 0 1 2 3 4 5; do run_python_main "$shard"; done
             (REGISTRY_CUSTODY_CAPABILITY, REGISTRY_CUSTODY_DEPENDENCIES,
              (REGISTRY_PREPARATION_CAPABILITY[-1], REGISTRY_CUSTODY_CAPABILITY[-1])),
         ):
-            if only_capability is not None and capability != only_capability:
+            if ((only_capability is None and capability in dedicated_capabilities)
+                    or (only_capability is not None and capability != only_capability)):
                 continue
             required = (*capability, *dependencies)
             cases = [("legacy", "", ""), ("complete", "", "")]
@@ -5423,40 +5458,42 @@ exit "$status"
         cases += [("all", required_test_paths, "", "")]
         cases += [(lane, (*required_test_paths, *snapshot_test_paths), "", "") for lane in ("all", "legacy")]
         complete_routes_by_lane = {}
-        for lane, present_paths, failure_path, missing_path in cases:
-            if acquisition_test_path in present_paths:
-                present_paths = tuple(dict.fromkeys((*present_paths, *acquisition_dependencies)))
-            if CUSTOM_IMPORT_REJECTION_CAPABILITY[-1] in present_paths:
-                present_paths = tuple(dict.fromkeys((*present_paths, *CUSTOM_IMPORT_REJECTION_CAPABILITY)))
-            with self.subTest(lane=lane, present_paths=present_paths, failure=failure_path), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                source = root / "source"
-                (source / "tests").mkdir(parents=True)
-                for test_path in present_paths:
-                    (source / test_path).parent.mkdir(parents=True, exist_ok=True)
-                    (source / test_path).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
-                if missing_path in acquisition_dependencies:
-                    (source / missing_path).unlink()
-                for test_path in historical_tail_paths[:3]:
-                    (source / test_path).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
-                call_log = root / "calls"
-                env = {
-                    **os.environ,
-                    "SOURCE_ROOT": str(source),
-                    "CI_ROOT": str(ROOT),
-                    "CI_DEPS_READY": "1",
-                    "COVERAGE_BASE_SHA": "a" * 40,
-                    "HLTHPRT_DB_USER": "postgres",
-                    "HLTHPRT_DB_PASSWORD": "postgres",
-                    "HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN": "",
-                    "RUNNER_TEMP": str(root),
-                    "COVERAGE_FILE": str(root / "coverage"),
-                    "CALL_LOG": str(call_log),
-                    "FAILURE_PATH": failure_path,
-                    "ROUTE_LANE": lane,
-                    "PYTHON_BIN": sys.executable,
-                }
-                script = CHECK_FUNCTIONS + r'''
+        for offset in range(0, len(cases), 4):
+            with ExitStack() as temporaries:
+                prepared, pending = [], []
+                for lane, present_paths, failure_path, missing_path in cases[offset:offset + 4]:
+                    if acquisition_test_path in present_paths:
+                        present_paths = tuple(dict.fromkeys((*present_paths, *acquisition_dependencies)))
+                    if CUSTOM_IMPORT_REJECTION_CAPABILITY[-1] in present_paths:
+                        present_paths = tuple(dict.fromkeys((*present_paths, *CUSTOM_IMPORT_REJECTION_CAPABILITY)))
+                    root = Path(temporaries.enter_context(tempfile.TemporaryDirectory()))
+                    source = root / "source"
+                    (source / "tests").mkdir(parents=True)
+                    for test_path in present_paths:
+                        (source / test_path).parent.mkdir(parents=True, exist_ok=True)
+                        (source / test_path).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
+                    if missing_path in acquisition_dependencies:
+                        (source / missing_path).unlink()
+                    for test_path in historical_tail_paths[:3]:
+                        (source / test_path).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
+                    call_log = root / "calls"
+                    env = {
+                        **os.environ,
+                        "SOURCE_ROOT": str(source),
+                        "CI_ROOT": str(ROOT),
+                        "CI_DEPS_READY": "1",
+                        "COVERAGE_BASE_SHA": "a" * 40,
+                        "HLTHPRT_DB_USER": "postgres",
+                        "HLTHPRT_DB_PASSWORD": "postgres",
+                        "HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN": "",
+                        "RUNNER_TEMP": str(root),
+                        "COVERAGE_FILE": str(root / "coverage"),
+                        "CALL_LOG": str(call_log),
+                        "FAILURE_PATH": failure_path,
+                        "ROUTE_LANE": lane,
+                        "PYTHON_BIN": sys.executable,
+                    }
+                    script = CHECK_FUNCTIONS + r'''
 git() { return 0; }
 mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
 prepare_debug_rust_binaries() { :; }
@@ -5498,92 +5535,98 @@ else
   run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" "$ROUTE_LANE"
 fi
 '''
-                result = subprocess.run(["bash", "-eu"], input=script, cwd=source, env=env,
-                                        capture_output=True, text=True, check=False)
-                self.assertEqual(result.returncode, 1 if missing_path else (17 if failure_path else 0), result.stderr)
-                if missing_path:
-                    missing_kind = "installed import dependency" if missing_path in acquisition_dependencies else "native import test"
-                    self.assertIn(f"Missing required {missing_kind}: {missing_path}", result.stderr)
-                    if lane == "core-snapshots":
-                        self.assertFalse(any(call.startswith("hc_custom_import_test_")
-                                             for call in call_log.read_text().splitlines()))
-                    continue
-                calls = call_log.read_text().splitlines()
-                main_call = next(call for call in calls if "--ci-shard-count 6" in call)
-                for test_path in test_paths:
-                    if test_path in required_test_paths or (test_path in present_paths and test_path not in mixed_test_paths):
-                        self.assertIn(f"--ignore {test_path}", main_call)
-                        self.assertEqual(main_call.split().count(test_path), 1)
-                    else:
-                        self.assertNotIn(test_path, main_call)
-                executions = [
-                    call
-                    for call in calls
-                    if call.startswith(f"{dsn}\t-m pytest -q")
-                    and any(test_path in call for test_path in test_paths)
-                ]
-                routes = [call for call in calls if call.startswith("hc_custom_import_test_")]
-                for index, route in enumerate(routes):
-                    arguments = route.split()
-                    if "--junitxml" in arguments:
-                        self.assertEqual(arguments[-2], "--junitxml")
-                        self.assertFalse(Path(arguments[-1]).exists())
-                        routes[index] = " ".join(arguments[:-2])
-                expected_groups = [
-                    [path for path in group if path in present_paths]
-                    for group in groups_by_lane.get(lane, ()) if any(path in present_paths for path in group)
-                ]
-                if failure_path:
-                    failed_group = next(i for i, group in enumerate(expected_groups) if failure_path in group)
-                    expected_groups = expected_groups[:failed_group + 1]
-                self.assertEqual(executions, [])
-                expected_route_count = sum(2 if group == list(family_test_paths) else 1 for group in expected_groups)
-                self.assertEqual(len(routes), expected_route_count)
-                if not failure_path and all(path in present_paths for path in test_paths):
-                    if lane in ("core-snapshots", "core-snapshots-2"):
-                        self.assertEqual(len(routes), 4)
-                databases = [route.split()[0] for route in routes]
-                self.assertEqual(len(databases), len(set(databases)))
-                for route in routes:
-                    self.assertRegex(
-                        route,
-                        rf"^hc_custom_import_test_[0-9a-f]{{32}} "
-                        rf"HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN {re.escape(archive_url)}(?: |$)",
-                    )
-                route_index = 0
-                for expected_paths in expected_groups:
-                    if expected_paths == list(family_test_paths):
-                        self.assertCountEqual(
-                            [route.split()[3:] for route in routes[route_index:route_index + 2]],
-                            [[path] for path in family_test_paths],
-                        )
-                        route_index += 2
-                        continue
-                    expected_arguments = list(expected_paths)
-                    if expected_paths[0] == installed_test_path:
-                        expected_arguments += ["-n", "2", "--dist", "worksteal", "--durations=9", "-vv"]
-                    self.assertEqual(routes[route_index].split()[3:], expected_arguments)
-                    route_index += 1
-                combines = [call.split("\t", 1)[1].split() for call in calls if "\t-m coverage combine" in call]
-                combines_expected = list(family_test_paths) in expected_groups and failure_path not in family_test_paths
-                self.assertEqual(len(combines), int(combines_expected))
-                if combines:
-                    self.assertEqual(combines[0][:4], ["-m", "coverage", "combine", "--append"])
-                    self.assertEqual([Path(path).name for path in combines[0][4:]],
-                                     [Path(path).name for path in family_test_paths])
-                    self.assertEqual(len({Path(path).parent for path in combines[0][4:]}), 1)
-                    self.assertFalse(Path(combines[0][4]).parent.exists())
-                tails = [path for call in calls if "--ignore" not in call
-                         for path in historical_tail_paths if path in call.split()]
-                expected_tails = list(historical_tail_paths) if lane in ("core-imports-2", "all", "legacy") and not failure_path else []
-                self.assertEqual(tails, expected_tails)
-                if not failure_path and all(path in present_paths for path in test_paths):
-                    import_paths = lifecycle_test_paths + materialization_test_paths + build_test_paths[:4] + operator_test_paths
-                    complete_routes_by_lane[lane] = [route.split()[3:] for route in routes
-                                                     if route.split()[3] in import_paths]
-                    complete_routes_by_lane[lane] += [call.split("\t", 1)[1].split()[3:] for call in calls
-                                                      if "\t-m pytest -q " in call
-                                                      and call.split("\t", 1)[1].split()[3] in historical_tail_paths]
+                    prepared.append((lane, present_paths, failure_path, missing_path))
+                    pending.append((root, source, root, call_log, script, env, ""))
+                results = self._run_optional_native_cases(pending, timeout=None)
+                for (lane, present_paths, failure_path, missing_path), (root, source, _, call_log, result) in zip(
+                        prepared, results, strict=True):
+                    with self.subTest(lane=lane, present_paths=present_paths, failure=failure_path):
+                        if isinstance(result, (OSError, subprocess.SubprocessError)):
+                            raise result
+                        self.assertEqual(result.returncode, 1 if missing_path else (17 if failure_path else 0), result.stderr)
+                        if missing_path:
+                            missing_kind = "installed import dependency" if missing_path in acquisition_dependencies else "native import test"
+                            self.assertIn(f"Missing required {missing_kind}: {missing_path}", result.stderr)
+                            if lane == "core-snapshots":
+                                self.assertFalse(any(call.startswith("hc_custom_import_test_")
+                                                     for call in call_log.read_text().splitlines()))
+                            continue
+                        calls = call_log.read_text().splitlines()
+                        main_call = next(call for call in calls if "--ci-shard-count 6" in call)
+                        for test_path in test_paths:
+                            if test_path in required_test_paths or (test_path in present_paths and test_path not in mixed_test_paths):
+                                self.assertIn(f"--ignore {test_path}", main_call)
+                                self.assertEqual(main_call.split().count(test_path), 1)
+                            else:
+                                self.assertNotIn(test_path, main_call)
+                        executions = [
+                            call
+                            for call in calls
+                            if call.startswith(f"{dsn}\t-m pytest -q")
+                            and any(test_path in call for test_path in test_paths)
+                        ]
+                        routes = [call for call in calls if call.startswith("hc_custom_import_test_")]
+                        for index, route in enumerate(routes):
+                            arguments = route.split()
+                            if "--junitxml" in arguments:
+                                self.assertEqual(arguments[-2], "--junitxml")
+                                self.assertFalse(Path(arguments[-1]).exists())
+                                routes[index] = " ".join(arguments[:-2])
+                        expected_groups = [
+                            [path for path in group if path in present_paths]
+                            for group in groups_by_lane.get(lane, ()) if any(path in present_paths for path in group)
+                        ]
+                        if failure_path:
+                            failed_group = next(i for i, group in enumerate(expected_groups) if failure_path in group)
+                            expected_groups = expected_groups[:failed_group + 1]
+                        self.assertEqual(executions, [])
+                        expected_route_count = sum(2 if group == list(family_test_paths) else 1 for group in expected_groups)
+                        self.assertEqual(len(routes), expected_route_count)
+                        if not failure_path and all(path in present_paths for path in test_paths):
+                            if lane in ("core-snapshots", "core-snapshots-2"):
+                                self.assertEqual(len(routes), 4)
+                        databases = [route.split()[0] for route in routes]
+                        self.assertEqual(len(databases), len(set(databases)))
+                        for route in routes:
+                            self.assertRegex(
+                                route,
+                                rf"^hc_custom_import_test_[0-9a-f]{{32}} "
+                                rf"HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN {re.escape(archive_url)}(?: |$)",
+                            )
+                        route_index = 0
+                        for expected_paths in expected_groups:
+                            if expected_paths == list(family_test_paths):
+                                self.assertCountEqual(
+                                    [route.split()[3:] for route in routes[route_index:route_index + 2]],
+                                    [[path] for path in family_test_paths],
+                                )
+                                route_index += 2
+                                continue
+                            expected_arguments = list(expected_paths)
+                            if expected_paths[0] == installed_test_path:
+                                expected_arguments += ["-n", "2", "--dist", "worksteal", "--durations=9", "-vv"]
+                            self.assertEqual(routes[route_index].split()[3:], expected_arguments)
+                            route_index += 1
+                        combines = [call.split("\t", 1)[1].split() for call in calls if "\t-m coverage combine" in call]
+                        combines_expected = list(family_test_paths) in expected_groups and failure_path not in family_test_paths
+                        self.assertEqual(len(combines), int(combines_expected))
+                        if combines:
+                            self.assertEqual(combines[0][:4], ["-m", "coverage", "combine", "--append"])
+                            self.assertEqual([Path(path).name for path in combines[0][4:]],
+                                             [Path(path).name for path in family_test_paths])
+                            self.assertEqual(len({Path(path).parent for path in combines[0][4:]}), 1)
+                            self.assertFalse(Path(combines[0][4]).parent.exists())
+                        tails = [path for call in calls if "--ignore" not in call
+                                 for path in historical_tail_paths if path in call.split()]
+                        expected_tails = list(historical_tail_paths) if lane in ("core-imports-2", "all", "legacy") and not failure_path else []
+                        self.assertEqual(tails, expected_tails)
+                        if not failure_path and all(path in present_paths for path in test_paths):
+                            import_paths = lifecycle_test_paths + materialization_test_paths + build_test_paths[:4] + operator_test_paths
+                            complete_routes_by_lane[lane] = [route.split()[3:] for route in routes
+                                                             if route.split()[3] in import_paths]
+                            complete_routes_by_lane[lane] += [call.split("\t", 1)[1].split()[3:] for call in calls
+                                                              if "\t-m pytest -q " in call
+                                                              and call.split("\t", 1)[1].split()[3] in historical_tail_paths]
         combined = complete_routes_by_lane["core-imports"] + complete_routes_by_lane["core-imports-2"]
         self.assertEqual(combined, complete_routes_by_lane["all"])
         self.assertEqual(combined, complete_routes_by_lane["legacy"])
