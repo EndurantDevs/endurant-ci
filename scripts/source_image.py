@@ -32,6 +32,8 @@ PRODUCERS = {"EndurantDevs/healthcare-mrf-api": "Container build", "EndurantDevs
 UPLOAD = "Upload tested DEV image"
 INTENT_UPLOAD = "Upload DEV image publication intent"
 RECEIPT_UPLOAD = "Upload DEV image receipt"
+# Nearly 10,000 version IDs need more room than an image receipt.
+INTENT_MAX_BYTES = 256 * 1024
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 SLSA_PREDICATE = "https://slsa.dev/provenance/v0.2"
 IDENTITY_FIELDS = ("repository", "source_sha", "base_sha", "source_branch", "pr_number")
@@ -166,10 +168,10 @@ def file_digest(path):
         return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
-def read_json(path):
+def read_json(path, *, max_bytes=65536):
     with path.open("rb") as handle:
-        content = handle.read(65537)
-    if len(content) > 65536:
+        content = handle.read(max_bytes + 1)
+    if len(content) > max_bytes:
         raise ValueError("image identity exceeds the bounded metadata limit")
     return json.loads(content)
 
@@ -558,6 +560,7 @@ def upload_snapshot(expected, run, job, *, intent=False):
     """Authenticate the immutable uploaded ZIP and its single bounded JSON payload."""
     identity = expected["identity"]
     repository = identity["repository"]
+    max_bytes = INTENT_MAX_BYTES if intent else 65536
     name = proof_name(identity, intent)
     items = [item for item in github.pages(repository, f"actions/runs/{run['id']}/artifacts", "artifacts") if item.get("name") == name]
     steps = [step for step in job.get("steps", []) if step.get("name") == (INTENT_UPLOAD if intent else RECEIPT_UPLOAD)]
@@ -578,7 +581,7 @@ def upload_snapshot(expected, run, job, *, intent=False):
         raise UploadPending("current publication upload is missing or incomplete")
     if (len(items) != 1 or len(steps) != 1 or steps[0].get("status") != "completed"
             or steps[0].get("conclusion") != "success" or not artifacts.current_evidence(items[0], run)
-            or not 0 < items[0].get("size_in_bytes", 0) <= 131072 or not DIGEST.fullmatch(items[0].get("digest", ""))
+            or not 0 < items[0].get("size_in_bytes", 0) <= 2 * max_bytes or not DIGEST.fullmatch(items[0].get("digest", ""))
             or not (artifacts.timestamp(steps[0]["started_at"]) <= artifacts.timestamp(items[0]["created_at"])
                     <= artifacts.timestamp(steps[0]["completed_at"]))):
         raise ValueError("current publication upload is missing, ambiguous, or incomplete")
@@ -586,12 +589,12 @@ def upload_snapshot(expected, run, job, *, intent=False):
     if snapshot(github.api(repository, f"actions/artifacts/{item['id']}")) != snapshot(item):
         raise ValueError("durable publication artifact identity changed")
     raw = command("gh", "api", f"repos/{repository}/actions/artifacts/{item['id']}/zip")
-    if len(raw) > 131072 or "sha256:" + hashlib.sha256(raw).hexdigest() != item["digest"]:
+    if len(raw) > 2 * max_bytes or "sha256:" + hashlib.sha256(raw).hexdigest() != item["digest"]:
         raise ValueError("durable publication artifact bytes changed")
     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
         entries = archive.infolist()
         if (len(entries) != 1 or entries[0].filename != ("intent.json" if intent else "image.json")
-                or not 0 < entries[0].file_size <= 65536 or (entries[0].external_attr >> 16) & 0o170000 == 0o120000):
+                or not 0 < entries[0].file_size <= max_bytes or (entries[0].external_attr >> 16) & 0o170000 == 0o120000):
             raise ValueError("durable publication artifact has unexpected files")
         return json.loads(archive.read(entries[0]))
 
@@ -628,7 +631,7 @@ def stage(expected, directory):
               "package_id": identifier, "prior_version_ids": sorted(item["id"] for item in versions),
               "created_at": created.isoformat(), "expires_at": (created + timedelta(minutes=30)).isoformat()}
     content = json.dumps(intent, sort_keys=True, separators=(",", ":")) + "\n"
-    if len(content.encode()) > 65536:
+    if len(content.encode()) > INTENT_MAX_BYTES:
         raise ValueError("complete publication intent exceeds its metadata bound")
     destination = Path(os.environ["RUNNER_TEMP"]) / "public-image-intent"
     destination.mkdir(mode=0o700)
@@ -639,7 +642,7 @@ def authenticated_intent(expected):
     path = Path(os.environ["RUNNER_TEMP"]) / "public-image-intent/intent.json"
     if path.is_symlink() or not path.is_file():
         raise ValueError("publication requires its fresh local intent")
-    intent = read_json(path)
+    intent = read_json(path, max_bytes=INTENT_MAX_BYTES)
     run, job = active_publisher(expected)
     now = datetime.now(timezone.utc)
     if (intent.get("schema") != "public-source-image-intent-v1" or intent.get("publication") != expected
