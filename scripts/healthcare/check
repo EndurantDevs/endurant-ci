@@ -4169,7 +4169,7 @@ run_postgres() {
   elif [[ "$shard" = registry-* ]]; then
     run_network_registry_postgres "${shard#registry-}"
   fi
-  if [[ "$shard" = directory-source* || "$shard" = directory-address || "$shard" = profile-publication || "$shard" = provider-directory || "$shard" = provider-profile ]]; then
+  if [[ "$shard" = core-services || "$shard" = directory-source* || "$shard" = directory-address || "$shard" = profile-publication || "$shard" = provider-directory || "$shard" = provider-profile ]]; then
     install_address_canon_wheel
   fi
   ci_phase_begin postgres-tests

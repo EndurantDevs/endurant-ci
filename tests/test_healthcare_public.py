@@ -1259,7 +1259,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                             report_paths[0].unlink()
                         self.assertEqual(list(runner.iterdir()), [])
                         if not selected or missing or failure == "rust-version":
-                            if lane in ("directory-source", "directory-source-2", "directory-address", "profile-publication"):
+                            if lane in ("core-services", "directory-source", "directory-source-2", "directory-address", "profile-publication"):
                                 self.assertEqual(len(calls), 3)
                                 self.assertTrue(calls[0].startswith("build\t-m maturin build "))
                                 self.assertTrue(calls[1].startswith("uv\t--no-config pip install "))
@@ -2232,6 +2232,7 @@ for shard in 0 1 2 3 4 5; do run_python_main "$shard"; done
                     log.touch()
                     script = CHECK_FUNCTIONS + r'''
 install_python_dependencies() { :; }
+install_address_canon_wheel() { :; }
 prepare_debug_rust_binaries() { :; }
 wait_for_service() { :; }
 prepare_postgres() { :; }
@@ -2651,11 +2652,14 @@ test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
                     else:
                         self.assertFalse(leftovers)
 
-    def test_directory_native_wheel_install_order(self):
+    def test_postgres_native_wheel_install_order(self):
         cases = [("directory-source", "build", ""), ("provider-directory", "build", ""),
                  ("directory-source", "build", "build"), ("directory-source", "build", "install"),
                  ("directory-source", "reuse", ""), ("provider-directory", "reuse", ""),
                  ("directory-source", "reuse", "digest"), ("directory-source", "reuse", "install")]
+        cases += [("core-services", mode, failure) for mode, failure in (
+            ("build", ""), ("reuse", ""), ("reuse", "digest"), ("reuse", "install"),
+        )]
         for lane, mode, failure in cases:
             with self.subTest(lane=lane, mode=mode, failure=failure), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -2663,6 +2667,8 @@ test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
                 (source_root / "support/ptg2_scanner").mkdir(parents=True)
                 (source_root / "tests").mkdir()
                 (source_root / "tests/test_cms_npd_admission_postgres.py").touch()
+                if lane == "core-services":
+                    (source_root / "tests/test_mrf_publication_receipt_postgres.py").touch()
                 runner.mkdir()
                 calls_path = root / "calls"
                 environment_by_name = {
@@ -2703,7 +2709,9 @@ test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
                 self.assertEqual([int(status) for _name, status in endings],
                                  [0] * (len(expected_phases) - 1) + [expected])
                 calls = calls_path.read_text().splitlines() if calls_path.exists() else []
-                native_runs = [call for call in calls if "tests/test_provider_directory_insurance_network_identity.py" in call]
+                native_path = ("tests/test_mrf_publication_receipt_postgres.py" if lane == "core-services"
+                               else "tests/test_provider_directory_insurance_network_identity.py")
+                native_runs = [call for call in calls if native_path in call]
                 if mode == "build":
                     self.assertEqual(sum(call.startswith("build\t") for call in calls), 1)
                     self.assertTrue(calls[0].startswith("build\t-m maturin build --locked --features python-extension --out "))
@@ -6321,9 +6329,17 @@ run_postgres "$ROUTE_LANE"
                            f"profile\t{dsn} registry-3"],
             "registry-47": ["registry\t47", f"core\t{dsn} registry-47", f"directory\t{dsn} registry-47",
                             f"profile\t{dsn} registry-47"],
-            "core-services": [f"core\t{dsn} core-services"],
+            "core-services": ["wheel", f"core\t{dsn} core-services"],
+            "core-services-2": [f"core\t{dsn} core-services-2"],
+            "core-imports": [f"core\t{dsn} core-imports"],
             "directory-source": ["wheel", f"directory\t{dsn} directory-source"],
+            "directory-source-2": ["wheel", f"directory\t{dsn} directory-source-2"],
+            "directory-address": ["wheel", f"directory\t{dsn} directory-address"],
+            "directory-storage": [f"directory\t{dsn} directory-storage"],
             "profile-storage": [f"profile\t{dsn} profile-storage"],
+            "profile-publication": ["wheel", f"profile\t{dsn} profile-publication"],
+            "provider-directory": ["wheel", f"directory\t{dsn}"],
+            "provider-profile": ["wheel", f"profile\t{dsn}"],
             "core": ["registry\t", f"core\t{dsn}"],
         }
         for lane, expected in expected_by_lane.items():
