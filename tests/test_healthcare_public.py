@@ -2945,6 +2945,79 @@ run_candidates postgresql://synthetic/test
                     self.assertEqual(shlex.split(call[3]),
                                      ["--foreground", "295s", "python", "-m", "pytest", "-q", *batch])
 
+    def test_reference_family_cohorts_preserve_limits_inputs_and_failure_cleanup(self):
+        body = "  local geo_reference_test\n" + CHECK_FUNCTIONS.split(
+            "  local geo_reference_test\n", 1
+        )[1].split('\n  if [ -f "$repository_root/tests/test_entity_address_result_generation_postgres.py" ]; then', 1)[0]
+        archive = "tests/test_reference_family_archive_postgres.py"
+        publication = "tests/test_mrf_publication_receipt_postgres.py"
+        geo = "tests/test_geo_reference_family_postgres.py"
+        places = "tests/test_places_zcta_cancel_postgres.py"
+        all_paths = (archive, geo, publication, places)
+        cases = [(present, "", "", 0) for present in ((), (archive,), (publication,), all_paths)]
+        cases.append((all_paths, geo, "", 0))
+        cases.extend((all_paths, geo, stage, cohort) for stage in ("pytest", "drop") for cohort in (1, 2))
+        for present, dedicated_geo, failure, failed_cohort in cases:
+            with self.subTest(present=present, geo=dedicated_geo, failure=failure, cohort=failed_cohort), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "source"
+                (source / "tests").mkdir(parents=True)
+                for path in present:
+                    (source / path).touch()
+                call_log = root / "calls"
+                script = CHECK_FUNCTIONS + "\nrun_reference_cases() { local dsn=$1 test_path\n" + body + "\n}\n" + r'''
+cohort=0
+geo_reference_native_test_path() { printf '%s' "$DEDICATED_GEO"; }
+run_geo_reference_postgres() { printf 'geo\t%s\n' "$@" >> "$CALL_LOG"; }
+create_test_database() {
+  cohort=$((cohort + 1))
+  printf 'create\t%s\n' "$1" >> "$CALL_LOG"
+}
+drop_test_database() {
+  printf 'drop\t%s\n' "$1" >> "$CALL_LOG"
+  [ "$FAIL_STAGE:$FAIL_COHORT" != "drop:$cohort" ] || return 19
+}
+timeout() {
+  printf 'test\t%s\t%s\t%s\t%s\n' "$HLTHPRT_REFERENCE_FAMILY_ARCHIVE_TEST_DSN" \
+    "$COVERAGE_FILE" "$PYTEST_ADDOPTS" "$*" >> "$CALL_LOG"
+  [ "$FAIL_STAGE:$FAIL_COHORT" != "pytest:$cohort" ] || return 17
+}
+run_reference_cases postgresql://synthetic/test
+'''
+                environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                               "CALL_LOG": str(call_log), "DEDICATED_GEO": dedicated_geo,
+                               "FAIL_STAGE": failure, "FAIL_COHORT": str(failed_cohort),
+                               "COVERAGE_FILE": ".coverage.postgres.synthetic",
+                               "PYTEST_ADDOPTS": "--cov=process --cov-branch --cov-append --cov-report="}
+                result = subprocess.run(["bash", "-eu"], input=script, env=environment,
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 1 if failure == "pytest" else 19 if failure else 0,
+                                 result.stderr)
+                calls = [line.split("\t") for line in call_log.read_text().splitlines()] if call_log.exists() else []
+                batches = [[path for path in present if path not in (publication, dedicated_geo)],
+                           [publication] if publication in present else []]
+                batches = [batch for batch in batches if batch]
+                if failure:
+                    batches = batches[:failed_cohort]
+                executions = [call for call in calls if call[0] == "test"]
+                self.assertEqual(len(executions), len(batches))
+                databases = []
+                for execution, batch in zip(executions, batches):
+                    self.assertRegex(execution[1], r"^postgresql://synthetic/hc_reference_family_[0-9a-f]{32}$")
+                    database = execution[1].rsplit("/", 1)[1]
+                    databases.append(database)
+                    self.assertEqual(execution[2:4], [environment["COVERAGE_FILE"], environment["PYTEST_ADDOPTS"]])
+                    self.assertEqual(shlex.split(execution[4]),
+                                     ["--foreground", "295s", "python", "-m", "pytest", "-q", *batch])
+                    self.assertLess(calls.index(["create", database]), calls.index(execution))
+                    self.assertGreater(calls.index(["drop", database]), calls.index(execution))
+                self.assertEqual(len(databases), len(set(databases)))
+                self.assertEqual([call[1] for call in calls if call[0] == "create"], databases)
+                self.assertEqual([call[1] for call in calls if call[0] == "drop"], databases)
+                self.assertEqual([call[1] for call in calls if call[0] == "geo"],
+                                 [dedicated_geo] if dedicated_geo and not failure else [])
+
     def test_services_primary_shards_keep_the_same_corpus_and_single_optional_routes(self):
         core_body = CHECK_FUNCTIONS.split("run_core_postgres() {", 1)[1].split("\nrun_postgres() {", 1)[0]
         available_paths = set(re.findall(r"tests/[a-z0-9_]+\.py", core_body))
@@ -5975,13 +6048,15 @@ run_core_postgres "$BASE_DSN" "$ROUTE_LANE"
             "tests/test_places_zcta_cancel_postgres.py",
         )
         dsn = "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
+        publication = "tests/test_mrf_publication_receipt_postgres.py"
         routes = (
-            (test_paths[2:], 0, "hc_reference_family_"),
+            (tuple(path for path in test_paths[2:] if path != publication), 0, "hc_reference_family_"),
+            ((publication,), 0, "hc_reference_family_"),
             ((test_paths[0],), 1, "hc_address_generation_"),
             ((test_paths[1],), 2, "hc_mrf_archive_"),
         )
         cases = [(lane, failed_path) for lane in ("core-services", "core-imports", "all")
-                 for failed_path in ("", test_paths[2], test_paths[0], test_paths[1], *test_paths[-5:])]
+                 for failed_path in ("", test_paths[2], publication, test_paths[0], test_paths[1], *test_paths[-5:])]
         for lane, failed_path in cases:
             with self.subTest(lane=lane, failed_path=failed_path), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -6036,13 +6111,13 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                     self.assertIn(f"--ignore {test_path}", main_call)
 
                 stopped = False
+                expected_databases = []
                 for paths, column, prefix in routes:
                     executions = [call for call in calls if "--ignore" not in call
                                   and any(test_path in call for test_path in paths)]
                     selected = lane != "core-imports" and not stopped
                     self.assertEqual(len(executions), int(selected))
                     if not selected:
-                        self.assertFalse(any(prefix in call for call in calls))
                         continue
                     execution = executions[0]
                     fields = execution.split("\t")
@@ -6050,11 +6125,18 @@ run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecyc
                     actual_dsn = fields[column]
                     self.assertRegex(actual_dsn, rf"^{dsn.rsplit('/', 1)[0]}/{prefix}[0-9a-f]{{32}}$")
                     database = actual_dsn.rsplit("/", 1)[1]
+                    expected_databases.append(database)
                     self.assertEqual(calls.count(f"create\t{database}"), 1)
                     self.assertEqual(calls.count(f"drop\t{database}"), 1)
                     self.assertLess(calls.index(f"create\t{database}"), calls.index(execution))
                     self.assertGreater(calls.index(f"drop\t{database}"), calls.index(execution))
                     stopped = failed_path in paths
+                created = [call.removeprefix("create\t") for call in calls if call.startswith("create\t")]
+                dropped = [call.removeprefix("drop\t") for call in calls if call.startswith("drop\t")]
+                prefixes = tuple(prefix for _paths, _column, prefix in routes)
+                self.assertEqual([database for database in created if database.startswith(prefixes)], expected_databases)
+                self.assertEqual(created, dropped)
+                self.assertEqual(len(created), len(set(created)))
 
 
     def test_native_wheel_staging_and_reuse_validate_one_digest_bound_wheel(self):
