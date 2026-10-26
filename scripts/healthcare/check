@@ -2986,7 +2986,7 @@ run_core_postgres() {
   if [[ "$lane" = core-services || "$lane" = all ]]; then
   local geo_reference_test
   geo_reference_test=$(geo_reference_native_test_path) || return "$?"
-  local reference_family_postgres_tests=()
+  local reference_family_postgres_tests=() mrf_publication_postgres_tests=()
   for test_path in \
     tests/test_reference_family_archive_postgres.py \
     tests/test_reference_family_result_generation_postgres.py \
@@ -3002,19 +3002,31 @@ run_core_postgres() {
     tests/test_places_zcta_handoff_postgres.py \
     tests/test_places_zcta_cancel_postgres.py; do
     if [ "$test_path" != "$geo_reference_test" ] && [ -f "$repository_root/$test_path" ]; then
-      reference_family_postgres_tests+=("$test_path")
+      if [ "$test_path" = tests/test_mrf_publication_receipt_postgres.py ]; then
+        mrf_publication_postgres_tests+=("$test_path")
+      else
+        reference_family_postgres_tests+=("$test_path")
+      fi
     fi
   done
-  if [ "${#reference_family_postgres_tests[@]}" -gt 0 ]; then
+  local reference_family_cohort reference_family_cohort_tests=()
+  for reference_family_cohort in family publication; do
+    if [ "$reference_family_cohort" = family ]; then
+      [ "${#reference_family_postgres_tests[@]}" -gt 0 ] || continue
+      reference_family_cohort_tests=("${reference_family_postgres_tests[@]}")
+    else
+      [ "${#mrf_publication_postgres_tests[@]}" -gt 0 ] || continue
+      reference_family_cohort_tests=("${mrf_publication_postgres_tests[@]}")
+    fi
     local database="hc_reference_family_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
     create_test_database "$database"
     if ! HLTHPRT_REFERENCE_FAMILY_ARCHIVE_TEST_DSN="${dsn%/*}/$database" \
-      timeout --foreground 295s python -m pytest -q "${reference_family_postgres_tests[@]}"; then
+      timeout --foreground 295s python -m pytest -q "${reference_family_cohort_tests[@]}"; then
       drop_test_database "$database"
       return 1
     fi
     drop_test_database "$database"
-  fi
+  done
   if [ -n "$geo_reference_test" ]; then
     run_geo_reference_postgres "$geo_reference_test"
   fi

@@ -151,12 +151,22 @@ run_reference_lane() {
                 )
                 self.assertEqual(outcome.returncode, 0, outcome.stderr)
                 calls = log.read_text().splitlines()
-                references = calls[0].split()
+                references = [call.split() for call in calls if call.startswith("reference\t")]
+                self.assertEqual(len(references), 2)
+                publication = "tests/test_mrf_publication_receipt_postgres.py"
+                self.assertEqual(references[1][7:], [publication])
                 self.assertEqual(
-                    set(references[7:]),
-                    reference_paths - ({GEO_TEST} if current else set()),
+                    set(references[0][7:]),
+                    reference_paths - {publication} - ({GEO_TEST} if current else set()),
                 )
-                self.assertEqual(calls[1:], ["geo\t" + GEO_TEST] if current else [])
+                selected = [path for reference in references for path in reference[7:]]
+                self.assertEqual(len(selected), len(set(selected)))
+                for reference in references:
+                    self.assertEqual(
+                        reference[:7],
+                        ["reference", "--foreground", "295s", "python", "-m", "pytest", "-q"],
+                    )
+                self.assertEqual(calls[2:], ["geo\t" + GEO_TEST] if current else [])
                 self.assertEqual(sum(call.split().count(GEO_TEST) for call in calls), 1)
 
     def test_geo_owned_database_and_exact_receipt_fail_closed_and_clean_up(self):
