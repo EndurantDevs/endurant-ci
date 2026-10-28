@@ -158,7 +158,7 @@ class PublicWorkflowPermissions(unittest.TestCase):
         self.assertEqual(set(download["with"]["artifact-ids"].split(",")), set(artifact_ids))
         self.assertEqual(len(download["with"]["artifact-ids"].split(",")), 69)
         self.assertEqual(sum(len(job.get("strategy", {}).get("matrix", {}).get("include", [None]))
-                             for job in jobs.values()), 78)
+                             for job in jobs.values()), 79)
         self.assertEqual(jobs["python-tests"]["timeout-minutes"], 20)
 
     def test_cheap_lint_blocks_heavy_jobs_without_changing_measurement_producers(self):

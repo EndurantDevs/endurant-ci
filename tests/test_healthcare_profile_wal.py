@@ -255,7 +255,7 @@ class ProfileWalCollectionTests(unittest.TestCase):
                     )
                     for job in workflow["jobs"].values()
                 ),
-                80,
+                81,
             )
 
     def test_only_current_wal_case_moves_and_legacy_modules_keep_their_route(self):

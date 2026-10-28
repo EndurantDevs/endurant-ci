@@ -72,7 +72,8 @@ MODE is one of:
   container-package
   security
   redis
-  postgres core-services|core-services-2|core-imports|core-imports-2|core-snapshots|core-snapshots-2|core-ptg|registry-0..47|directory-source|directory-source-2|directory-storage|directory-address|profile-storage|profile-publication
+  postgres core-services|core-services-2|core-imports|core-imports-2|core-snapshots|core-snapshots-2|core-ptg|registry-0..47|fhir-catalog-integration|directory-source|directory-source-2|directory-storage|directory-address|profile-storage|profile-publication
+  fhir-catalog-capability
   native-wheel OUTPUT_DIRECTORY
 EOF
   exit 2
@@ -877,6 +878,78 @@ registry_source_lifecycle_native_test_paths() {
     tests/test_registry_composition_session_bridge_postgres.py
 }
 
+fhir_catalog_native_test_paths() {
+  local tests=(
+    tests/test_registry_fhir_catalog_custody_postgres.py
+    tests/test_registry_fhir_catalog_grant_postgres.py
+    tests/test_registry_fhir_catalog_identity_postgres.py
+    tests/test_registry_fhir_catalog_permissions_postgres.py
+    tests/test_registry_fhir_catalog_publication_postgres.py
+    tests/test_registry_fhir_catalog_read_postgres.py
+    tests/test_registry_fhir_catalog_reference_rollup_postgres.py
+    tests/test_registry_fhir_catalog_retained_postgres.py
+    tests/test_registry_fhir_catalog_sources_postgres.py
+    tests/test_registry_fhir_catalog_store_postgres.py
+    tests/test_registry_fhir_catalog_sync_postgres.py
+  )
+  local capability=(
+    alembic/versions/20261028010000_registry_fhir_catalog.py
+    api/network_catalog_fhir_query.py
+    db/registry_fhir_catalog.py
+    process/registry_fhir_catalog_custody.py
+    process/registry_fhir_catalog_enrichment.py
+    process/registry_fhir_catalog_extraction.py
+    process/registry_fhir_catalog_fingerprints.py
+    process/registry_fhir_catalog_grant.py
+    process/registry_fhir_catalog_identity.py
+    process/registry_fhir_catalog_permissions.py
+    process/registry_fhir_catalog_projection.py
+    process/registry_fhir_catalog_publication.py
+    process/registry_fhir_catalog_read.py
+    process/registry_fhir_catalog_reference_rollup.py
+    process/registry_fhir_catalog_retained.py
+    process/registry_fhir_catalog_source_fence.py
+    process/registry_fhir_catalog_sources.py
+    process/registry_fhir_catalog_store.py
+    process/registry_fhir_catalog_sync.py
+    process/registry_fhir_catalog_validation.py
+    process/registry_fhir_catalog_worker.py
+    tests/fhir_catalog_sync_integration_support.py
+    tests/fixtures/fhir_network_catalog.json
+    tests/test_network_catalog_fhir_routes.py
+    tests/test_registry_fhir_catalog_end_to_end.py
+    tests/test_registry_fhir_catalog_enrichment.py
+    tests/test_registry_fhir_catalog_extraction.py
+    tests/test_registry_fhir_catalog_grant.py
+    tests/test_registry_fhir_catalog_projection.py
+    tests/test_registry_fhir_catalog_read.py
+    tests/test_registry_fhir_catalog_retained.py
+    tests/test_registry_fhir_catalog_sources.py
+  )
+  local source_path present=0
+  for source_path in "${capability[@]}" "${tests[@]}"; do
+    if [[ -e "$repository_root/$source_path" || -L "$repository_root/$source_path" ]]; then present=1; fi
+  done
+  [[ "$present" = 1 ]] || return 0
+  require_native_source_files "${capability[@]}" "${tests[@]}" \
+    api/endpoint/network_catalog.py db/models/network_serving.py \
+    process/network_fhir_retained_capture.py process/network_fhir_retained_capture_contract.py \
+    process/registry_publication_consumer.py process/registry_publication_queue.py \
+    tests/test_network_fhir_retained_capture.py tests/test_network_fhir_retained_capture_postgres.py \
+    tests/test_network_serving_schema_postgres.py || return 1
+  printf '%s\n' "${tests[@]}"
+}
+
+fhir_catalog_capability() {
+  local tests
+  tests=$(fhir_catalog_native_test_paths) || return 1
+  if [[ -n "$tests" ]]; then
+    printf 'present=true\n'
+  else
+    printf 'present=false\n'
+  fi
+}
+
 run_python_main() {
   local shard=${1:-}
   case "$shard" in 0|1|2|3|4|5) ;; *) usage ;; esac
@@ -905,6 +978,8 @@ run_python_main() {
   registry_source_lifecycle_tests=$(registry_source_lifecycle_native_test_paths) || return 1
   local registry_migration_tests
   registry_migration_tests=$(registry_migration_native_test_paths) || return 1
+  local fhir_catalog_tests
+  fhir_catalog_tests=$(fhir_catalog_native_test_paths) || return 1
   local naic_tests
   naic_tests=$(naic_native_test_paths) || return 1
   local publication_worker_tests publication_ptg_runtime_tests manual_location_commands_tests
@@ -955,6 +1030,12 @@ run_python_main() {
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
   done <<< "$registry_migration_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
+  done <<< "$fhir_catalog_tests"
+  if [[ -n "$fhir_catalog_tests" ]]; then
+    collection_args+=(--ignore tests/test_registry_fhir_catalog_end_to_end.py)
+  fi
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
   done <<< "$managed_provider_detail_tests"
@@ -1909,18 +1990,18 @@ run_scoped_archive_postgres_body() {
     --command 'CREATE EXTENSION IF NOT EXISTS intarray WITH SCHEMA public' \
     --command 'CREATE EXTENSION IF NOT EXISTS btree_gin WITH SCHEMA public' \
     --command 'CREATE EXTENSION IF NOT EXISTS postgis WITH SCHEMA public' || exit "$?"
-  local manual_source_swap_selected=0 test_path
+  local trigram_selected=0 test_path
   for test_path in "$@"; do
     case "$test_path" in
-      tests/test_registry_manual_source_swap_postgres.py|tests/test_registry_manual_source_swap_postgres.py::*)
-        manual_source_swap_selected=1 ;;
+      tests/test_registry_manual_source_swap_postgres.py|tests/test_registry_manual_source_swap_postgres.py::*|tests/test_registry_fhir_catalog_*.py|tests/test_registry_fhir_catalog_*.py::*)
+        trigram_selected=1 ;;
       @*)
-        if grep -q '^tests/test_registry_manual_source_swap_postgres[.]py::' "${test_path#@}"; then
-          manual_source_swap_selected=1
+        if grep -Eq '^tests/(test_registry_manual_source_swap_postgres|test_registry_fhir_catalog_[^/]+)[.]py::' "${test_path#@}"; then
+          trigram_selected=1
         fi ;;
     esac
   done
-  if [[ "$manual_source_swap_selected" = 1 ]]; then
+  if [[ "$trigram_selected" = 1 ]]; then
     psql --no-psqlrc --set=ON_ERROR_STOP=1 \
       --command 'CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public' || exit "$?"
   fi
@@ -1940,7 +2021,11 @@ run_scoped_archive_postgres_body() {
     python "$CI_ROOT/scripts/healthcare/supervise_installed.py" "$scoped_archive_drain_file" "$@" &
     wait "$!" || exit "$?"
   else
-    timeout --foreground 295s python -m pytest -q "$@" || exit "$?"
+    local deadline=295s
+    if [[ "$#" = 3 && "$1" = tests/test_registry_fhir_catalog_end_to_end.py::test_import_sync_query_replay_and_disappearance && "$2" = --junitxml ]]; then
+      deadline=1500s
+    fi
+    timeout --foreground "$deadline" python -m pytest -q "$@" || exit "$?"
   fi
   exit 0
 }
@@ -2197,6 +2282,8 @@ run_network_registry_postgres() (
   registry_source_lifecycle_tests=$(registry_source_lifecycle_native_test_paths) || return 1
   local registry_migration_tests
   registry_migration_tests=$(registry_migration_native_test_paths) || return 1
+  local fhir_catalog_tests
+  fhir_catalog_tests=$(fhir_catalog_native_test_paths) || return 1
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$company_group_tests"
@@ -2224,6 +2311,9 @@ run_network_registry_postgres() (
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$registry_migration_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || registry_tests+=("$test_path")
+  done <<< "$fhir_catalog_tests"
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$managed_provider_detail_tests"
@@ -2360,6 +2450,57 @@ run_network_registry_postgres() (
     run_scoped_archive_postgres "$database" NETWORK_REGISTRY_TEST_DSN "$archive_url" \
       "${registry_arguments[@]}" --verbosity=1 --junitxml "$registry_report"
   validate_registry_native_report "$registry_report" "$registry_nodeids" "${registry_tests[@]}"
+)
+
+run_fhir_catalog_integration() (
+  local components nodeid report selection receipt
+  components=$(fhir_catalog_native_test_paths) || exit "$?"
+  [[ -n "$components" ]] || { printf 'FHIR catalog integration requires the complete native capability\n' >&2; exit 1; }
+  require_base_sha
+  install_address_canon_wheel
+  nodeid=tests/test_registry_fhir_catalog_end_to_end.py::test_import_sync_query_replay_and_disappearance
+  report=$(artifact_path fhir-catalog-integration.xml)
+  selection=$(artifact_path fhir-catalog-integration.selection)
+  receipt=$(artifact_path fhir-catalog-integration.json)
+  mkdir -p "$(dirname "$report")"
+  rm -f -- "$report" "$selection" "$receipt"
+  printf '%s\n' "$nodeid" > "$selection"
+  ci_phase_begin fhir-catalog-integration
+  PYTEST_ADDOPTS='' run_scoped_archive_postgres \
+    "hc_fhir_catalog_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')" \
+    NETWORK_REGISTRY_TEST_DSN "postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440" \
+    "$nodeid" --junitxml "$report" || exit "$?"
+  validate_registry_native_report "$report" "$selection" || exit "$?"
+  python - "$report" "$selection" "$receipt" <<'PY' || exit "$?"
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+def revision(root, name):
+    return subprocess.check_output(["git", "-C", root, "rev-parse", name], text=True).strip()
+
+source = os.environ["SOURCE_ROOT"]
+head = revision(source, "HEAD")
+assert head == os.environ["SOURCE_SHA"], "Integration source differs from the selected commit"
+assert revision(os.environ["CI_ROOT"], "HEAD") == os.environ["CI_REVISION"], "Integration recipe differs from the pinned commit"
+subprocess.run(["git", "-C", source, "diff", "--exit-code", "HEAD", "--"], check=True)
+subprocess.run(["git", "-C", source, "merge-base", "--is-ancestor", os.environ["COVERAGE_BASE_SHA"], head], check=True)
+report, selection, receipt = map(Path, sys.argv[1:])
+receipt.write_text(json.dumps({
+    "schema_version": 1,
+    "head_sha": head,
+    "source_tree": revision(source, "HEAD^{tree}"),
+    "base_sha": os.environ["COVERAGE_BASE_SHA"],
+    "ci_revision": os.environ["CI_REVISION"],
+    "nodeid": selection.read_text().strip(),
+    "report_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+    "selection_sha256": hashlib.sha256(selection.read_bytes()).hexdigest(),
+}, sort_keys=True) + "\n")
+PY
+  ci_phase_end
 )
 
 run_registry_ptg_scope_postgres() (
@@ -4127,7 +4268,7 @@ run_postgres() {
     printf '%s\n' 'Full PostgreSQL execution required: native preparation, owned databases and required reports share this stage'
   fi
   case "$shard" in
-    core|provider-directory|provider-profile|core-services|core-services-2|core-imports|core-imports-2|core-snapshots|core-snapshots-2|core-ptg|registry-[0-9]|registry-[123][0-9]|registry-4[0-7]|directory-source|directory-source-2|directory-storage|directory-address|profile-storage|profile-publication) ;;
+    core|provider-directory|provider-profile|core-services|core-services-2|core-imports|core-imports-2|core-snapshots|core-snapshots-2|core-ptg|registry-[0-9]|registry-[123][0-9]|registry-4[0-7]|fhir-catalog-integration|directory-source|directory-source-2|directory-storage|directory-address|profile-storage|profile-publication) ;;
     *) usage ;;
   esac
   if [ "${CI_DEPS_READY:-0}" = 1 ]; then
@@ -4164,6 +4305,10 @@ run_postgres() {
       --timeout=1
   prepare_postgres
   ci_phase_end
+  if [[ "$shard" = fhir-catalog-integration ]]; then
+    run_fhir_catalog_integration
+    return
+  fi
   if [[ "$shard" = core ]]; then
     run_network_registry_postgres
   elif [[ "$shard" = registry-* ]]; then
@@ -4211,6 +4356,7 @@ case "${1:-}" in
   security) [ "$#" -eq 1 ] || usage; run_security ;;
   redis) [ "$#" -eq 1 ] || usage; run_redis ;;
   postgres) [ "$#" -eq 2 ] || usage; run_postgres "$2" ;;
+  fhir-catalog-capability) [ "$#" -eq 1 ] || usage; fhir_catalog_capability ;;
   native-wheel) [ "$#" -eq 2 ] && [ -n "$2" ] || usage; stage_native_wheel "$2" ;;
   *) usage ;;
 esac

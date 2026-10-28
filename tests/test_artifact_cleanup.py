@@ -987,6 +987,10 @@ class ArtifactCleanupChecks(unittest.TestCase):
                     self.assertEqual(upload["retention-days"], "90" if durable else "1")
                     if step.get("name") == "Upload verified common-test measurements":
                         continue  # Expiring common-cache data must survive intermediate cleanup.
+                    if step.get("name") == "Upload exact-source catalog integration evidence":
+                        self.assertEqual(kind, "healthcare")
+                        self.assertEqual(upload["name"], "mrf-fhir-catalog-integration-${{ github.run_id }}-${{ github.run_attempt }}")
+                        continue  # Keep independent integration proof until its one-day expiry.
                     if upload["name"].startswith("healthcare-rust-debug-"):
                         self.assertEqual(upload["compression-level"], "6")
                     if "public-measurement" in upload["name"]:

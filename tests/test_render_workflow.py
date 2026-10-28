@@ -160,7 +160,7 @@ class RenderWorkflowChecks(unittest.TestCase):
                     workflow = yaml.safe_load(rendered)
                     if kind == "healthcare":
                         self.assertEqual(sum(len(job.get("strategy", {}).get("matrix", {}).get("include", [None]))
-                                             for job in workflow["jobs"].values()), 80)
+                                             for job in workflow["jobs"].values()), 81)
                     self.assertEqual(workflow["on"], original["on"])
                     expected_jobs = {"smoke", "dev-image-publication", *canonical["jobs"]}
                     if kind == "drug":
@@ -205,6 +205,39 @@ class RenderWorkflowChecks(unittest.TestCase):
                     self.assertEqual(RENDERER.render_workflow(kind, "1" * 40, caller), rendered)
                     refreshed = yaml.safe_load(RENDERER.render_workflow(kind, "2" * 40, caller))
                     self.assertEqual(refreshed["jobs"]["smoke"], workflow["jobs"]["smoke"])
+
+    def test_catalog_integration_is_rendered_as_a_conditional_required_job_outside_coverage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            caller = Path(directory) / "ci.yml"
+            caller.write_text(yaml.safe_dump({"on": {"push": {"branches": ["main"]}}, "jobs": {
+                "smoke": {"name": "portable checks", "runs-on": "ubuntu-latest", "steps": [{"run": "true"}]}}}))
+            workflow = yaml.safe_load(RENDERER.render_workflow("healthcare", "1" * 40, caller))
+        jobs = workflow["jobs"]
+        job = jobs["fhir-catalog-integration"]
+        self.assertEqual(job["timeout-minutes"], 30)
+        self.assertNotIn("strategy", job)
+        self.assertNotIn("continue-on-error", job)
+        self.assertEqual(job["services"], jobs["address-canonical-db-tests"]["services"])
+        self.assertEqual(job["env"]["CI_SHARD"], "fhir-catalog-integration")
+        steps = job["steps"]
+        self.assertEqual(steps[0]["with"]["ref"], "1" * 40)
+        self.assertEqual(steps[1]["uses"], "./ci/scripts/healthcare/setup")
+        self.assertEqual(steps[2], {
+            "name": "Check catalog integration capability", "id": "catalog-capability",
+            "run": 'bash "$CI_ROOT/scripts/healthcare/check" fhir-catalog-capability >> "$GITHUB_OUTPUT"',
+        })
+        for step in steps[3:]:
+            self.assertEqual(step["if"], "steps.catalog-capability.outputs.present == 'true'")
+        self.assertIn('postgres "$CI_SHARD"', steps[-2]["run"])
+        self.assertEqual(steps[-1]["with"]["if-no-files-found"], "error")
+        self.assertIn("fhir-catalog-integration", jobs["measurement"]["needs"])
+        measurement = jobs["measurement"]["steps"]
+        self.assertIn('all(. == "success")', measurement[0]["run"])
+        download = next(step for step in measurement if step.get("name") == "Download immutable measurement artifacts")
+        self.assertNotIn("fhir-catalog-integration", download["with"]["artifact-ids"])
+        self.assertNotIn("fhir-catalog-integration", {
+            row["shard"] for row in jobs["address-canonical-db-tests"]["strategy"]["matrix"]["include"]
+        })
 
     def test_only_trusted_publication_and_drug_final_cleanup_get_write_access(self):
         with tempfile.TemporaryDirectory() as directory:

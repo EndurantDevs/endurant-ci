@@ -37,6 +37,7 @@ SKIPPED = {
         "Security scans",
         "Worker queue tests",
         "address-canonical-db-tests",
+        "FHIR catalog integration",
         "Coverage results",
         "DEV image publication",
     ),
