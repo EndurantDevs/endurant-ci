@@ -919,6 +919,45 @@ def _stop_import_family_workers(root):
 
 
 class HealthcarePublicChecks(unittest.TestCase):
+    def test_publication_worker_additional_native_modules_are_closed_and_optional(self):
+        modules = (
+            "tests/test_registry_publication_address_preparation_postgres.py",
+            "tests/test_registry_publication_heartbeat_postgres.py",
+        )
+        cases = [((), "", ""), ((modules[0],), "", ""), ((modules[1],), "", ""), (modules, "", "")]
+        cases += [(modules, path, stage) for path in modules
+                  for stage in ("dirty", "staged", "untracked", "symlink", "dangling")]
+        cases += [((path,), path, stage) for path in modules for stage in ("deleted", "staged-deleted")]
+        for selected, changed, stage in cases:
+            with self.subTest(selected=selected, changed=changed, stage=stage), tempfile.TemporaryDirectory() as temporary:
+                source = Path(temporary)
+                self._initial_inventory_source(source, "historical", "", "")
+                for name in selected:
+                    path = source / name
+                    path.touch()
+                    if name == changed and stage in {"deleted", "staged-deleted"}:
+                        path.unlink()
+                    if name == changed and stage in {"symlink", "dangling"}:
+                        path.unlink()
+                        path.symlink_to(source / ("process/__init__.py" if stage == "symlink" else "missing"))
+                result = subprocess.run(
+                    ["bash", "-eu"], input=CHECK_FUNCTIONS + r'''
+git() {
+  if [[ "$3" = ls-tree && "${!#}" = "$CHANGED_PATH" ]] &&
+      [[ "$FAIL_STAGE" = deleted || "$FAIL_STAGE" = staged-deleted ]]; then
+    printf '%s\n' "$CHANGED_PATH"; return 0
+  fi
+  if [[ "${!#}" = "$CHANGED_PATH" ]] &&
+      [[ "$FAIL_STAGE" = dirty || "$FAIL_STAGE" = staged || "$FAIL_STAGE" = untracked ]]; then return 1; fi
+  return 0
+}
+publication_worker_native_test_paths
+''', cwd=source, text=True, capture_output=True, timeout=10,
+                    env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                         "CHANGED_PATH": changed, "FAIL_STAGE": stage})
+                self.assertEqual(result.returncode, int(bool(changed)), result.stderr)
+                self.assertEqual(result.stdout.splitlines(), [] if changed else [*PUBLICATION_WORKER_HOST_TESTS, *selected])
+
     def test_initial_inventory_extends_only_a_complete_publication_worker(self):
         cases = [("historical", "", ""), ("current", "", ""), ("comments", "", ""),
                  ("operation-only", "", ""), ("import-only", "", "")]
