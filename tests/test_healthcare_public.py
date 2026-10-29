@@ -923,8 +923,10 @@ class HealthcarePublicChecks(unittest.TestCase):
         modules = (
             "tests/test_registry_publication_address_preparation_postgres.py",
             "tests/test_registry_publication_heartbeat_postgres.py",
+            "tests/test_registry_execution_catalog_postgres.py",
         )
-        cases = [((), "", ""), ((modules[0],), "", ""), ((modules[1],), "", ""), (modules, "", "")]
+        cases = [((), "", ""), (modules, "", "")]
+        cases += [((path,), "", "") for path in modules]
         cases += [(modules, path, stage) for path in modules
                   for stage in ("dirty", "staged", "untracked", "symlink", "dangling")]
         cases += [((path,), path, stage) for path in modules for stage in ("deleted", "staged-deleted")]

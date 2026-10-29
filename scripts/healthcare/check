@@ -427,7 +427,8 @@ publication_worker_native_test_paths() {
   local source_path present=0 initial_inventory_test
   for source_path in \
     tests/test_registry_publication_address_preparation_postgres.py \
-    tests/test_registry_publication_heartbeat_postgres.py; do
+    tests/test_registry_publication_heartbeat_postgres.py \
+    tests/test_registry_execution_catalog_postgres.py; do
     if [ -e "$repository_root/$source_path" ] || [ -L "$repository_root/$source_path" ] ||
        git -C "$repository_root" ls-tree --name-only HEAD -- "$source_path" | grep -Fxq "$source_path"; then
       capability+=("$source_path")
