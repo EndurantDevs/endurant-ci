@@ -768,7 +768,7 @@ env() {
   done
   "$@"
 }
-run_owned_provider_directory_postgres() { shift 2; timeout --foreground 295s python -m pytest -q "$@"; }
+run_owned_provider_directory_postgres() { shift 2; timeout --foreground 420s python -m pytest -q "$@"; }
 run_scoped_archive_postgres() { :; }
 run_scoped_archive_postgres_body() { run_scoped_archive_postgres "$@"; }
 prepare_debug_rust_binaries() { :; }
@@ -810,7 +810,7 @@ run_scoped_archive_postgres_body() {
   exit 0
 }
 timeout() {
-  test "$1:$2" = '--foreground:295s'
+  test "$1:$2" = '--foreground:420s'
   shift 2
   "$@"
 }
@@ -1688,7 +1688,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                             timeout.write_text(f"#!{sys.executable}\n" + r'''
 import json, os, pathlib, signal, sys, xml.etree.ElementTree as ET
 arguments = sys.argv[1:]
-assert arguments[:6] == ["--foreground", "295s", "python", "-m", "pytest", "-q"]
+assert arguments[:6] == ["--foreground", "420s", "python", "-m", "pytest", "-q"]
 record = {"event": "pytest", "arguments": arguments, "registry": os.getenv("NETWORK_REGISTRY_TEST_DSN"),
           "migration": os.getenv("HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN"), "map": os.getenv("HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST"),
           "profile": os.getenv("HLTHPRT_PROVIDER_DIRECTORY_PROFILE_POSTGRES_DSN"),
@@ -1945,7 +1945,7 @@ python() { command python3 "$@"; }
 install_address_canon_wheel() { printf 'wheel\n' >> "$CALL_LOG"; }
 verify_registry_native_wheel() { [[ "$2" = 1 ]]; printf 'exports\n' >> "$CALL_LOG"; }
 timeout() {
-  [[ "$1 $2 $3 $4 $5 $6" = '--foreground 295s python -m pytest -q' ]] || return 98
+  [[ "$1 $2 $3 $4 $5 $6" = '--foreground 420s python -m pytest -q' ]] || return 98
   printf 'native\t%s\n' "$*" >> "$CALL_LOG"
   [[ "$FAIL_STAGE" != pytest ]] || return 17
   command python3 - "$@" <<'REPORT'
@@ -2410,7 +2410,7 @@ test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
                     self.assertIsNone(call["override"])
                     self.assertEqual(call["coverage"], environment["COVERAGE_FILE"])
                     self.assertEqual(call["addopts"], environment["PYTEST_ADDOPTS"])
-                    self.assertEqual(call["arguments"][:7], ["--foreground", "295s", "python", "-m", "pytest", "-q",
+                    self.assertEqual(call["arguments"][:7], ["--foreground", "420s", "python", "-m", "pytest", "-q",
                                                            REGISTRY_ADDRESS_EQUIVALENCE_TEST])
                     self.assertEqual(call["arguments"][7], "--junitxml")
                     self.assertEqual(Path(call["arguments"][8]).parent, runner)
@@ -2649,7 +2649,7 @@ test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
                     elif failure:
                         self.assertIn(failure, observed)
                     for call in calls:
-                        self.assertEqual(call["arguments"][:6], ["--foreground", "295s", "python", "-m", "pytest", "-q"])
+                        self.assertEqual(call["arguments"][:6], ["--foreground", "420s", "python", "-m", "pytest", "-q"])
                         self.assertIsNone(call["schema_alias"])
                         self.assertIsNone(call["override"])
                         self.assertEqual(call["schema"], "mrf")
@@ -2854,7 +2854,7 @@ run_provider_directory_postgres postgresql://synthetic/test registry-19
                     for path in optional:
                         self.assertEqual(sum(call.count(path) for call in arguments), int(path in present))
                 for call in arguments:
-                    self.assertEqual(call[:6], ["--foreground", "295s", "python", "-m", "pytest", "-q"])
+                    self.assertEqual(call[:6], ["--foreground", "420s", "python", "-m", "pytest", "-q"])
                 for _, schema_alias, runtime_schema, call in calls:
                     owned = any(path in call.split() for path in required + optional[:2])
                     self.assertEqual(schema_alias, "<unset>" if owned else "mrf")
@@ -2879,7 +2879,8 @@ run_provider_directory_postgres postgresql://synthetic/test registry-19
             (source / "tests").mkdir(parents=True)
             for relative in available_paths:
                 (source / relative).touch()
-            for lane in ("directory-source", "registry-19", "directory-source-2", "registry-12", "registry-28", "all"):
+            for lane in ("directory-source", "registry-27", "registry-35", "registry-19", "directory-source-2",
+                         "registry-12", "registry-28", "all"):
                 call_log = Path(temporary) / lane
                 script = CHECK_FUNCTIONS + "\nrun_source_routes() {" + body + "}\n" + r'''
 log_call() {
@@ -2905,9 +2906,10 @@ run_source_routes postgresql://synthetic/test "$ROUTE_LANE"
                 calls_by_lane[lane] = [line.rstrip("\0").split("\0") for line in call_log.read_text().splitlines()]
         first, second = (calls_by_lane[lane] for lane in ("directory-source", "directory-source-2"))
         admission, candidates, rooted_graph = (calls_by_lane[lane] for lane in ("registry-19", "registry-12", "registry-28"))
-        self.assertEqual((len(first), len(second)), (5, 4))
+        retirement = calls_by_lane["registry-27"] + calls_by_lane["registry-35"]
+        self.assertEqual((len(first), len(second), len(retirement)), (3, 4, 2))
         self.assertEqual([len(admission), len(candidates), len(rooted_graph)], [1, 1, 1])
-        shards = first + admission + candidates + second[:2] + rooted_graph + second[2:]
+        shards = first[:1] + retirement + first[1:] + admission + candidates + second[:2] + rooted_graph + second[2:]
         self.assertEqual(len(first[0][9:]), 18)
         retirement_tests = [
             "tests/test_provider_directory_terminal_root_retirement_postgres.py",
@@ -2915,12 +2917,12 @@ run_source_routes postgresql://synthetic/test "$ROUTE_LANE"
             "tests/test_provider_directory_terminal_root_retirement_v2_postgres.py",
             "tests/test_provider_directory_terminal_root_retirement_v2_topology_postgres.py",
         ]
-        for shard, call in enumerate(first[1:3]):
+        for shard, call in enumerate(retirement):
             self.assertEqual(call[9:15], [
                 "-p", "scripts.ci.shard_pytest_nodeids", "--ci-shard-count", "2", "--ci-shard-index", str(shard),
             ])
             self.assertEqual(call[15:], retirement_tests)
-        for call in first[:3]:
+        for call in first[:1] + retirement:
             self.assertEqual(call[:2], ["postgresql://synthetic/test", ""])
         self.assertEqual(shards, calls_by_lane["all"])
         selectors = [argument for call in shards for argument in call if argument.startswith("tests/")]
@@ -2933,7 +2935,7 @@ run_source_routes postgresql://synthetic/test "$ROUTE_LANE"
             self.assertEqual(call[:2], ["", "postgresql://synthetic/test"])
         for call in shards:
             if call[2] == "timeout":
-                self.assertEqual(call[3:9], ["--foreground", "295s", "python", "-m", "pytest", "-q"])
+                self.assertEqual(call[3:9], ["--foreground", "420s", "python", "-m", "pytest", "-q"])
 
     def test_directory_source_cohorts_fail_before_later_invocations(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -2949,7 +2951,7 @@ timeout() {
 }
 run_owned_provider_directory_postgres() { return 99; }
 '''
-                    invoke = "run_provider_directory_postgres postgresql://synthetic/test directory-source"
+                    invoke = "run_provider_directory_postgres postgresql://synthetic/test all"
                     script += (f'if {invoke}; then exit 99; else exit "$?"; fi\n'
                                if conditional else invoke + "\n")
                     result = subprocess.run(
@@ -2962,7 +2964,7 @@ run_owned_provider_directory_postgres() { return 99; }
                     self.assertEqual(len(calls), failed_batch)
                     for call in calls:
                         self.assertTrue(call.startswith(
-                            "postgresql://synthetic/test\t--foreground 295s python -m pytest -q "))
+                            "postgresql://synthetic/test\t--foreground 420s python -m pytest -q "))
 
     def test_provider_candidate_batches_keep_optional_modules_and_failures(self):
         body = "  local provider_candidate_tests=()" + CHECK_FUNCTIONS.split(
@@ -3004,7 +3006,7 @@ run_candidates postgresql://synthetic/test
                     self.assertEqual(call[:3], ["postgresql://synthetic/test", environment["COVERAGE_FILE"],
                                                environment["PYTEST_ADDOPTS"]])
                     self.assertEqual(shlex.split(call[3]),
-                                     ["--foreground", "295s", "python", "-m", "pytest", "-q", *batch])
+                                     ["--foreground", "420s", "python", "-m", "pytest", "-q", *batch])
 
     def test_reference_family_cohorts_preserve_limits_inputs_and_failure_cleanup(self):
         body = "  local geo_reference_test\n" + CHECK_FUNCTIONS.split(
@@ -3070,7 +3072,7 @@ run_reference_cases postgresql://synthetic/test
                     databases.append(database)
                     self.assertEqual(execution[2:4], [environment["COVERAGE_FILE"], environment["PYTEST_ADDOPTS"]])
                     self.assertEqual(shlex.split(execution[4]),
-                                     ["--foreground", "295s", "python", "-m", "pytest", "-q", *batch])
+                                     ["--foreground", "420s", "python", "-m", "pytest", "-q", *batch])
                     self.assertLess(calls.index(["create", database]), calls.index(execution))
                     self.assertGreater(calls.index(["drop", database]), calls.index(execution))
                 self.assertEqual(len(databases), len(set(databases)))
@@ -3111,7 +3113,7 @@ run_core_postgres postgresql://postgres:postgres@localhost:5432/test "$ROUTE_LAN
                 self.assertEqual(result.returncode, 0, result.stderr)
                 calls_by_lane[lane] = [line.rstrip("\0").split("\0") for line in call_log.read_text().splitlines()]
         first, second = (calls_by_lane[lane][0] for lane in ("core-services", "core-services-2"))
-        prefix = ["--foreground", "295s", "python", "-m", "pytest", "-q", "-p",
+        prefix = ["--foreground", "420s", "python", "-m", "pytest", "-q", "-p",
                   "scripts.ci.shard_pytest_nodeids", "--ci-shard-count", "2", "--ci-shard-index"]
         self.assertEqual(first[:11], prefix)
         self.assertEqual(second[:11], prefix)
@@ -3686,7 +3688,7 @@ ci_phase_end
                         arguments = shlex.split(native[0][6])
                         selected = (*REGISTRY_PTG_SCOPE_TESTS, *((REGISTRY_PTG_OFFICE_TEST,) if office else ()),
                                     *((REGISTRY_PTG_OFFICE_WITNESS_TEST,) if witness else ()))
-                        self.assertEqual(arguments[:-2], ["--foreground", "295s", "python", "-m", "pytest", "-q", *selected])
+                        self.assertEqual(arguments[:-2], ["--foreground", "420s", "python", "-m", "pytest", "-q", *selected])
                         self.assertEqual(arguments[-2], "--junitxml")
                         self.assertEqual(Path(arguments[-1]).parent, runner)
                         self.assertLess(events.index("exports"), events.index("\t".join(native[0])))
@@ -4111,7 +4113,7 @@ run_provider_profile_postgres postgresql://synthetic/original
                 self.assertEqual(lifecycle.read_text().splitlines(), [event + ":" + database
                     for database, _, _ in batches[:count] for event in ("create", "drop")])
                 for (arguments, env), (database, key, files) in zip(calls, batches[:count]):
-                    self.assertEqual(arguments, ["--foreground", "295s", "python", "-m", "pytest", "-q",
+                    self.assertEqual(arguments, ["--foreground", "420s", "python", "-m", "pytest", "-q",
                                                  *("tests/" + name for name in files)])
                     self.assertEqual(env[key], database if key == "HLTHPRT_DB_DATABASE"
                                      else "postgresql://synthetic/" + database)
@@ -4850,7 +4852,7 @@ run_wheel_tests() {
                 result = subprocess.run(["bash", "-euc", script], cwd=source, env=environment,
                                         capture_output=True, text=True, timeout=30)
                 self.assertEqual(result.returncode == 0, success, result.stderr)
-                expected = "--foreground 295s python -m pytest -q tests/test_address_canon_pyo3.py"
+                expected = "--foreground 420s python -m pytest -q tests/test_address_canon_pyo3.py"
                 if present:
                     expected += " " + scalar_test
                 self.assertEqual(result.stdout.strip(), expected if success else "")
@@ -4914,7 +4916,7 @@ run_wheel_tests() {
                 result = subprocess.run(["bash", "-euc", script], cwd=source, env=environment,
                                         capture_output=True, text=True, timeout=30)
                 self.assertEqual(result.returncode == 0, success, result.stderr)
-                expected = "--foreground 295s python -m pytest -q tests/test_address_canon_pyo3.py"
+                expected = "--foreground 420s python -m pytest -q tests/test_address_canon_pyo3.py"
                 if present:
                     expected += " " + " ".join(present)
                 self.assertEqual(result.stdout.strip(), expected if success else "")
@@ -4991,7 +4993,7 @@ run_wheel_tests() {
                 result = subprocess.run(["bash", "-euc", script], cwd=source, env=environment,
                                         capture_output=True, text=True, timeout=30)
                 self.assertEqual(result.returncode == 0, success, result.stderr)
-                expected = "--foreground 295s python -m pytest -q tests/test_address_canon_pyo3.py"
+                expected = "--foreground 420s python -m pytest -q tests/test_address_canon_pyo3.py"
                 if present:
                     expected += " " + " ".join(present)
                 self.assertEqual(result.stdout.strip(), expected if success else "")
@@ -5451,7 +5453,7 @@ printf 'complete\n' >> "$CALL_LOG"
                 for _, dsn, database, deadline, report, *_paths in native:
                     self.assertRegex(database, r"^hc_custom_import_test_[0-9a-f]{32}$")
                     self.assertEqual(dsn, "postgresql://synthetic:synthetic@127.0.0.1:5440/" + database)
-                    self.assertEqual(deadline, "295s")
+                    self.assertEqual(deadline, "420s")
                     self.assertEqual(calls.count("create\t" + database), 1)
                     self.assertEqual(calls.count("drop\t" + database), 1)
                     self.assertFalse(Path(report).exists())
@@ -5555,7 +5557,7 @@ exit "$status"
                 )
                 self.assertEqual(
                     [call for call in calls if call[0] == "timeout"],
-                    [["timeout", "--foreground", "295s"] for _ in expected],
+                    [["timeout", "--foreground", "420s"] for _ in expected],
                 )
                 self.assertEqual(calls.count(["complete"]), int(not failure))
                 self.assertEqual(
@@ -6335,7 +6337,8 @@ install_address_canon_wheel
                  "custom-import-build": "core-imports", "custom-import-capture": "core-services",
                  "profile-prepared-doctors-ranges": "profile-publication", "organization-partition-v4": "directory-address",
                  "profile-prepared-doctors-cancellation": "profile-publication", "semantic-proof-v3": "directory-address",
-                 "profile-initial-publication": "profile-publication"}
+                 "profile-initial-publication": "profile-publication",
+                 "directory-retirement-0": "directory-source", "directory-retirement-1": "directory-source"}
         self.assertEqual(set(placements), set(homes))
         self.assertEqual(len(set(placements.values())), len(placements), "one block per receiving shard")
         self.assertTrue(all(target != home for home, target in ((homes[block], placements[block]) for block in homes)))
