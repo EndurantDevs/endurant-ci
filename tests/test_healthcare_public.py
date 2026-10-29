@@ -3090,7 +3090,7 @@ run_reference_cases postgresql://synthetic/test
             (source / "tests").mkdir(parents=True)
             for relative in available_paths:
                 (source / relative).touch()
-            for lane in ("core-services", "core-services-2", "registry-7", "registry-31"):
+            for lane in ("core-services", "core-services-2", "registry-31"):
                 call_log = Path(temporary) / lane
                 script = CHECK_FUNCTIONS + r'''
 log_call() { printf '%s\0' "$@" >> "$CALL_LOG"; printf '\n' >> "$CALL_LOG"; }
@@ -3112,16 +3112,14 @@ run_core_postgres postgresql://postgres:postgres@localhost:5432/test "$ROUTE_LAN
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 calls_by_lane[lane] = [line.rstrip("\0").split("\0") for line in call_log.read_text().splitlines()]
-        first, second, third = (calls_by_lane[lane][0] for lane in ("core-services", "core-services-2", "registry-7"))
+        first, second = (calls_by_lane[lane][0] for lane in ("core-services", "core-services-2"))
         prefix = ["--foreground", "420s", "python", "-m", "pytest", "-q", "-p",
-                  "scripts.ci.shard_pytest_nodeids", "--ci-shard-count", "3", "--ci-shard-index"]
+                  "scripts.ci.shard_pytest_nodeids", "--ci-shard-count", "2", "--ci-shard-index"]
         self.assertEqual(first[:11], prefix)
         self.assertEqual(second[:11], prefix)
-        self.assertEqual(third[:11], prefix)
-        self.assertEqual([first[11], second[11], third[11]], ["0", "1", "2"])
+        self.assertEqual(first[11], "0")
+        self.assertEqual(second[11], "1")
         self.assertEqual(first[12:], second[12:])
-        self.assertEqual(first[12:], third[12:])
-        self.assertEqual(calls_by_lane["registry-7"], [third])
         self.assertEqual(len(first[12:]), 51)
         self.assertEqual(len(set(first[12:])), 51)
         self.assertEqual(calls_by_lane["core-services-2"][1:], [["plan-release"]])
@@ -6339,7 +6337,7 @@ install_address_canon_wheel
                  "custom-import-build": "core-imports", "custom-import-capture": "core-services",
                  "profile-prepared-doctors-ranges": "profile-publication", "organization-partition-v4": "directory-address",
                  "profile-prepared-doctors-cancellation": "profile-publication", "semantic-proof-v3": "directory-address",
-                 "profile-initial-publication": "profile-publication", "services-primary-3": "core-services",
+                 "profile-initial-publication": "profile-publication",
                  "directory-retirement-0": "directory-source", "directory-retirement-1": "directory-source"}
         self.assertEqual(set(placements), set(homes))
         self.assertEqual(len(set(placements.values())), len(placements), "one block per receiving shard")

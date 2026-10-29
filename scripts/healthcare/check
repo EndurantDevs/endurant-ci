@@ -47,7 +47,6 @@ postgres_block_lane() {
     profile-prepared-doctors-cancellation) printf 'registry-13\n' ;;
     semantic-proof-v3) printf 'registry-18\n' ;;
     profile-initial-publication) printf 'registry-20\n' ;;
-    services-primary-3) printf 'registry-7\n' ;;
     directory-retirement-0) printf 'registry-27\n' ;;
     directory-retirement-1) printf 'registry-35\n' ;;
     *) return 1 ;;
@@ -1193,7 +1192,7 @@ run_python_main() {
   export COVERAGE_FILE=${COVERAGE_FILE:-$(artifact_path ".coverage.main.${shard}")}
   ci_phase_begin python-tests
   public_common_test_run "healthcare-python-main-${shard}" "$COVERAGE_FILE" \
-    timeout --foreground 420s python -m pytest -q -n 2 --dist loadscope --durations=20 \
+    timeout --foreground 420s python -m pytest -q -n 4 --dist loadscope --durations=20 \
     -p scripts.ci.shard_pytest_nodeids --ci-shard-count 6 --ci-shard-index "$shard" \
     --cov-config=test-coverage.ini \
     --cov=api --cov=db --cov=process --cov=public_evidence --cov=service --cov=main \
@@ -2771,13 +2770,11 @@ run_registry_ptg_scope_postgres() (
 run_core_postgres() {
   local dsn=$1
   local lane=${2:-all}
-  local services_shard_options=() services_lane_3
-  services_lane_3=$(postgres_block_lane services-primary-3)
-  if [[ "$lane" = core-services || "$lane" = core-services-2 || "$lane" = "$services_lane_3" || "$lane" = all ]]; then
+  if [[ "$lane" = core-services || "$lane" = core-services-2 || "$lane" = all ]]; then
+  local services_shard_options=()
   case "$lane" in
-    core-services) services_shard_options=(-p scripts.ci.shard_pytest_nodeids --ci-shard-count 3 --ci-shard-index 0) ;;
-    core-services-2) services_shard_options=(-p scripts.ci.shard_pytest_nodeids --ci-shard-count 3 --ci-shard-index 1) ;;
-    "$services_lane_3") services_shard_options=(-p scripts.ci.shard_pytest_nodeids --ci-shard-count 3 --ci-shard-index 2) ;;
+    core-services) services_shard_options=(-p scripts.ci.shard_pytest_nodeids --ci-shard-count 2 --ci-shard-index 0) ;;
+    core-services-2) services_shard_options=(-p scripts.ci.shard_pytest_nodeids --ci-shard-count 2 --ci-shard-index 1) ;;
   esac
   HLTHPRT_PROVIDER_DIRECTORY_MIGRATION_POSTGRES_DSN=$dsn \
   HLTHPRT_OBSERVED_NPI_INDEX_MIGRATION_POSTGRES_DSN=$dsn \
