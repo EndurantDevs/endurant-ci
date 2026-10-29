@@ -3799,6 +3799,22 @@ run_provider_directory_postgres() {
     tests/test_provider_directory_dataset_rehydrate_db.py \
     tests/test_provider_directory_proof_store_db.py \
     tests/test_provider_directory_dataset_resource_mutation_fence_db.py
+  local serving_tests=() serving_test
+  for serving_test in \
+    tests/test_provider_directory_global_serving_migration_postgres.py \
+    tests/test_provider_directory_held_owner_binding_postgres.py \
+    tests/test_provider_directory_profile_historical_capacity_postgres.py \
+    tests/test_provider_directory_serving_capacity_migration_postgres.py \
+    tests/test_provider_directory_serving_read_catalog_postgres.py \
+    tests/test_provider_directory_serving_recovery_postgres.py; do
+    if [ -f "$repository_root/$serving_test" ]; then
+      serving_tests+=("$serving_test")
+    fi
+  done
+  if [ "${#serving_tests[@]}" -gt 0 ]; then
+    run_owned_provider_directory_postgres hc_directory_entities HLTHPRT_DIRECTORY_ENTITIES_TEST_DSN \
+      "${serving_tests[@]}"
+  fi
   fi
   if postgres_block_runs "$lane" directory-address semantic-proof-v3; then
   run_available_cms_postgres owned \
@@ -4140,7 +4156,8 @@ run_provider_profile_postgres() {
   if [[ "$lane" = profile-publication || "$lane" = all ]]; then
   run_profile_control_maintenance_postgres
   run_available_cms_postgres owned \
-    tests/test_cms_doctors_preparation_postgres.py
+    tests/test_cms_doctors_preparation_postgres.py \
+    tests/test_cms_doctors_dual_owner_postgres.py
   run_available_cms_postgres owned \
     tests/test_cms_doctors_preparation_seal_postgres.py
   run_available_cms_postgres owned \
