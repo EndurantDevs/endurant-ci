@@ -2424,6 +2424,14 @@ test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
                     self.assertFalse(leftovers)
 
     def test_cms_native_coverage_routes_and_owns_required_fixture_environments(self):
+        serving_tests = (
+            "tests/test_provider_directory_global_serving_migration_postgres.py",
+            "tests/test_provider_directory_held_owner_binding_postgres.py",
+            "tests/test_provider_directory_profile_historical_capacity_postgres.py",
+            "tests/test_provider_directory_serving_capacity_migration_postgres.py",
+            "tests/test_provider_directory_serving_read_catalog_postgres.py",
+            "tests/test_provider_directory_serving_recovery_postgres.py",
+        )
         routes = {
             "registry-19": (
                 "tests/test_cms_npd_admission_postgres.py",
@@ -2464,6 +2472,7 @@ test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
                 "tests/test_provider_directory_dataset_rehydrate_db.py",
                 "tests/test_provider_directory_proof_store_db.py",
                 "tests/test_provider_directory_dataset_resource_mutation_fence_db.py",
+                *serving_tests,
             ),
             "registry-18": (
                 "tests/test_provider_directory_semantic_proof_v3_db.py",
@@ -2489,6 +2498,7 @@ test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
             ),
             "profile-publication": (
                 "tests/test_cms_doctors_preparation_postgres.py",
+                "tests/test_cms_doctors_dual_owner_postgres.py",
                 "tests/test_cms_doctors_preparation_seal_postgres.py",
                 "tests/test_cms_doctors_source_provenance_postgres.py",
                 "tests/test_entity_address_prepared_doctors_postgres.py",
@@ -2522,6 +2532,8 @@ test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
                         + routes["directory-address"][7:] + routes["registry-18"] + routes["registry-39"]
                         + routes["profile-storage"][:4])
         entities_paths = set(routes["profile-storage"][4:6])
+        cms_paths -= set(serving_tests)
+        entities_paths.update(serving_tests)
         cases = [
             (lane, present, "", "", 0)
             for lane, paths in routes.items()
