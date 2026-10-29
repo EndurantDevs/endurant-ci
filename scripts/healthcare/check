@@ -1192,7 +1192,7 @@ run_python_main() {
   export COVERAGE_FILE=${COVERAGE_FILE:-$(artifact_path ".coverage.main.${shard}")}
   ci_phase_begin python-tests
   public_common_test_run "healthcare-python-main-${shard}" "$COVERAGE_FILE" \
-    timeout --foreground 420s python -m pytest -q -n 2 --dist loadscope --durations=20 \
+    timeout --foreground 720s python -m pytest -q -n 1 --dist loadscope --durations=20 \
     -p scripts.ci.shard_pytest_nodeids --ci-shard-count 6 --ci-shard-index "$shard" \
     --cov-config=test-coverage.ini \
     --cov=api --cov=db --cov=process --cov=public_evidence --cov=service --cov=main \

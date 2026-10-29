@@ -2105,7 +2105,7 @@ run_registry_ptg_scope_postgres postgresql://synthetic/runtime_test
 mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
 prepare_debug_rust_binaries() { :; }
 python() { printf '%s\n' "$*" >> "$CALL_LOG"; }
-timeout() { shift 2; "$@"; }
+timeout() { printf 'timeout %s %s\n' "$1" "$2" >> "$CALL_LOG"; shift 2; "$@"; }
 for shard in 0 1 2 3 4 5; do run_python_main "$shard"; done
 '''
                 environment_map = {
@@ -2122,6 +2122,8 @@ for shard in 0 1 2 3 4 5; do run_python_main "$shard"; done
                     self.assertEqual(arguments[arguments.index("--ci-shard-index") + 1], str(shard))
                     self.assertEqual(arguments[arguments.index("--ci-shard-count") + 1], "6")
                     self.assertIn("scripts.ci.shard_pytest_nodeids", arguments)
+                    self.assertEqual(arguments[2:7], ["-q", "-n", "1", "--dist", "loadscope"])
+                    self.assertEqual(calls[calls.index(arguments) - 1], ["timeout", "--foreground", "720s"])
                     for path in offline_paths:
                         self.assertNotIn(path, arguments)
                     for path in native_paths:
