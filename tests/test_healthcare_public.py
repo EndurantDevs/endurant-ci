@@ -1,5 +1,7 @@
 """Exercise hosted artifact placement and exact-image cleanup without services."""
 
+import ast
+import asyncio
 import base64
 import hashlib
 import json
@@ -17,6 +19,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from importlib import metadata
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import yaml
 
@@ -916,6 +920,19 @@ def _stop_import_family_workers(root):
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+def _postgres_preparation_functions():
+    body = CHECK_FUNCTIONS.split("prepare_postgres() {", 1)[1].split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    definitions = [node for node in ast.parse(body).body if isinstance(node, ast.AsyncFunctionDef)]
+    namespace = {"os": os, "sys": SimpleNamespace(argv=["-", "1"])}
+    exec(compile(ast.Module(body=definitions, type_ignores=[]), "postgres-preparation", "exec"), namespace)
+    return namespace
+
+
+def _ordinary_ci_role():
+    return dict(rolcanlogin=True, rolinherit=False, rolsuper=False, rolcreatedb=False, rolcreaterole=False,
+                rolreplication=False, rolbypassrls=False, memberships=False)
 
 
 class HealthcarePublicChecks(unittest.TestCase):
@@ -5001,18 +5018,112 @@ run_wheel_tests() {
                     self.assertIn(error, result.stderr)
                     self.assertNotIn("unexpected extension import", result.stderr)
 
+    def test_postgres_roles_create_only_missing_and_reuse_matching_roles(self):
+        roles = ("ci_schema_owner", "ci_serving_reader")
+        for existing in ((), roles[:1], roles[1:], roles):
+            with self.subTest(existing=existing):
+                catalog = {role: _ordinary_ci_role() for role in existing}
+                connection = SimpleNamespace(
+                    fetchrow=AsyncMock(side_effect=lambda _query, role: catalog.get(role)), execute=AsyncMock(),
+                )
+                prepare = _postgres_preparation_functions()["_prepare_ordinary_roles"]
+                asyncio.run(prepare(connection, "'synthetic'"))
+                self.assertEqual([call.args[1] for call in connection.fetchrow.await_args_list], list(roles))
+                self.assertEqual([call.args[0] for call in connection.execute.await_args_list], [
+                    f"CREATE ROLE {role} LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                    "NOREPLICATION NOBYPASSRLS PASSWORD 'synthetic'" for role in roles if role not in existing
+                ])
+                self.assertEqual(catalog, {role: _ordinary_ci_role() for role in existing})
+
+    def test_postgres_roles_refuse_incompatible_attributes_without_altering_roles(self):
+        for role in ("ci_schema_owner", "ci_serving_reader"):
+            for field, expected in _ordinary_ci_role().items():
+                with self.subTest(role=role, field=field):
+                    catalog = {name: _ordinary_ci_role() for name in ("ci_schema_owner", "ci_serving_reader")}
+                    catalog[role][field] = not expected
+                    before = json.dumps(catalog, sort_keys=True)
+                    connection = SimpleNamespace(
+                        fetchrow=AsyncMock(side_effect=lambda _query, name: catalog[name]), execute=AsyncMock(),
+                    )
+                    prepare = _postgres_preparation_functions()["_prepare_ordinary_roles"]
+                    with self.assertRaisesRegex(RuntimeError, "incompatible: " + role):
+                        asyncio.run(prepare(connection, "'synthetic'"))
+                    connection.execute.assert_not_awaited()
+                    self.assertEqual(json.dumps(catalog, sort_keys=True), before)
+
+    def test_postgres_roles_reject_bad_credentials_before_creating_serving_roots(self):
+        for rejected_role in ("ci_serving_reader", "ci_schema_owner"):
+            with self.subTest(role=rejected_role):
+                connections = []
+                administrator = SimpleNamespace(
+                    fetchrow=AsyncMock(side_effect=lambda *_args: _ordinary_ci_role()),
+                    fetchval=AsyncMock(side_effect=["'synthetic'", '"baseline_test"']),
+                    execute=AsyncMock(), close=AsyncMock(),
+                )
+                reader = SimpleNamespace(close=AsyncMock())
+
+                async def connect(**settings):
+                    connections.append(settings)
+                    if settings["user"] == rejected_role:
+                        raise RuntimeError("synthetic authentication rejected")
+                    return administrator if settings["user"] == "postgres" else reader
+
+                namespace = _postgres_preparation_functions()
+                namespace["asyncpg"] = SimpleNamespace(connect=connect)
+                environment = dict(HLTHPRT_DB_HOST="127.0.0.1", HLTHPRT_DB_PORT="5440",
+                                   HLTHPRT_DB_USER="postgres", HLTHPRT_DB_PASSWORD="synthetic",
+                                   HLTHPRT_DB_DATABASE="baseline_test")
+                with patch.dict(os.environ, environment), self.assertRaisesRegex(RuntimeError, "authentication rejected"):
+                    asyncio.run(namespace["main"]())
+                expected = ["postgres", "ci_serving_reader"]
+                if rejected_role == "ci_schema_owner":
+                    expected.append("ci_schema_owner")
+                    reader.close.assert_awaited_once_with()
+                self.assertEqual([settings["user"] for settings in connections], expected)
+                self.assertTrue(all(settings["password"] == "synthetic" for settings in connections))
+                administrator.close.assert_awaited_once_with()
+                self.assertFalse(any("CREATE TABLE" in call.args[0] or "ALTER ROLE" in call.args[0]
+                                     for call in administrator.execute.await_args_list))
+
     def test_postgres_baseline_cleanup_follows_migrations_and_refuses_failure(self):
-        for failure in ("", "stamp", "upgrade", "vacuum"):
-            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+        cases = [(ordinary, failure) for ordinary in (False, True)
+                 for failure in ("", "schema", "stamp", "upgrade", "vacuum")]
+        for ordinary, failure in cases:
+            with self.subTest(ordinary=ordinary, failure=failure), tempfile.TemporaryDirectory() as temporary:
                 log = Path(temporary) / "calls"
+                if ordinary:
+                    migration = Path(temporary) / "alembic/versions/20261028110000_provider_directory_global_serving.py"
+                    migration.parent.mkdir(parents=True)
+                    migration.touch()
                 environment = {**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT),
                                "CALL_LOG": str(log), "FAIL_STAGE": failure,
+                               "ORDINARY_MIGRATIONS": str(int(ordinary)),
+                               "DB_USER": "legacy_login", "DB_PASSWORD": "legacy_password",
+                               "HLTHPRT_DB_READER_USER": "existing_reader",
                                "HLTHPRT_DB_HOST": "127.0.0.1", "HLTHPRT_DB_PORT": "5440",
                                "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "synthetic",
                                "HLTHPRT_DB_DATABASE": "baseline_test"}
                 script = CHECK_FUNCTIONS + r'''
-python() { cat >/dev/null; printf 'schema\n' >> "$CALL_LOG"; }
-alembic() { printf '%s\n' "$1" >> "$CALL_LOG"; [[ "$1" != "$FAIL_STAGE" ]] || return 17; }
+python() {
+  [[ "$*" = "- $ORDINARY_MIGRATIONS" ]] || return 98
+  [[ "$HLTHPRT_DB_USER" = postgres && "$DB_USER" = legacy_login ]] || return 98
+  cat >/dev/null
+  printf 'schema\n' >> "$CALL_LOG"
+  [[ "$FAIL_STAGE" != schema ]] || return 17
+}
+alembic() {
+  if [[ "$ORDINARY_MIGRATIONS" = 1 ]]; then
+    [[ "$DB_USER" = ci_schema_owner && "$HLTHPRT_DB_USER" = ci_schema_owner ]] || return 98
+    [[ "$DB_PASSWORD" = synthetic && "$HLTHPRT_DB_PASSWORD" = synthetic ]] || return 98
+    [[ "$HLTHPRT_DB_READER_USER" = ci_serving_reader ]] || return 98
+  else
+    [[ "$DB_USER" = legacy_login && "$HLTHPRT_DB_USER" = postgres ]] || return 98
+    [[ "$DB_PASSWORD" = legacy_password && "$HLTHPRT_DB_PASSWORD" = synthetic ]] || return 98
+    [[ "$HLTHPRT_DB_READER_USER" = existing_reader ]] || return 98
+  fi
+  printf '%s\n' "$1" >> "$CALL_LOG"
+  [[ "$1" != "$FAIL_STAGE" ]] || return 17
+}
 psql() {
   [[ "$PGPASSWORD" = synthetic ]] || return 98
   [[ "$*" = '--host 127.0.0.1 --port 5440 --username postgres --dbname baseline_test --set ON_ERROR_STOP=1 --command VACUUM (FREEZE, ANALYZE)' ]] || return 99
@@ -5020,6 +5131,9 @@ psql() {
   [[ "$FAIL_STAGE" != vacuum ]] || return 17
 }
 prepare_postgres
+[[ "$DB_USER" = legacy_login && "$HLTHPRT_DB_USER" = postgres ]] || exit 98
+[[ "$DB_PASSWORD" = legacy_password && "$HLTHPRT_DB_PASSWORD" = synthetic ]] || exit 98
+[[ "$HLTHPRT_DB_READER_USER" = existing_reader ]] || exit 98
 printf 'tests\n' >> "$CALL_LOG"
 '''
                 result = subprocess.run(["bash", "-eu"], input=script, env=environment,
