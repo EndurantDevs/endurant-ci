@@ -47,6 +47,9 @@ postgres_block_lane() {
     profile-prepared-doctors-cancellation) printf 'registry-13\n' ;;
     semantic-proof-v3) printf 'registry-18\n' ;;
     profile-initial-publication) printf 'registry-20\n' ;;
+    services-primary-3) printf 'registry-7\n' ;;
+    directory-retirement-0) printf 'registry-27\n' ;;
+    directory-retirement-1) printf 'registry-35\n' ;;
     *) return 1 ;;
   esac
 }
@@ -2768,11 +2771,13 @@ run_registry_ptg_scope_postgres() (
 run_core_postgres() {
   local dsn=$1
   local lane=${2:-all}
-  if [[ "$lane" = core-services || "$lane" = core-services-2 || "$lane" = all ]]; then
-  local services_shard_options=()
+  local services_shard_options=() services_lane_3
+  services_lane_3=$(postgres_block_lane services-primary-3)
+  if [[ "$lane" = core-services || "$lane" = core-services-2 || "$lane" = "$services_lane_3" || "$lane" = all ]]; then
   case "$lane" in
-    core-services) services_shard_options=(-p scripts.ci.shard_pytest_nodeids --ci-shard-count 2 --ci-shard-index 0) ;;
-    core-services-2) services_shard_options=(-p scripts.ci.shard_pytest_nodeids --ci-shard-count 2 --ci-shard-index 1) ;;
+    core-services) services_shard_options=(-p scripts.ci.shard_pytest_nodeids --ci-shard-count 3 --ci-shard-index 0) ;;
+    core-services-2) services_shard_options=(-p scripts.ci.shard_pytest_nodeids --ci-shard-count 3 --ci-shard-index 1) ;;
+    "$services_lane_3") services_shard_options=(-p scripts.ci.shard_pytest_nodeids --ci-shard-count 3 --ci-shard-index 2) ;;
   esac
   HLTHPRT_PROVIDER_DIRECTORY_MIGRATION_POSTGRES_DSN=$dsn \
   HLTHPRT_OBSERVED_NPI_INDEX_MIGRATION_POSTGRES_DSN=$dsn \
@@ -3651,9 +3656,11 @@ run_provider_directory_postgres() {
       tests/test_provider_directory_reviewed_subset_terminal_disposition_postgres.py \
       tests/test_provider_directory_reviewed_subset_direct_v4_disposition_postgres.py \
       tests/test_provider_directory_reviewed_subset_v5_http410_disposition_postgres.py
+  fi
 
   local retirement_shard
   for retirement_shard in 0 1; do
+    if postgres_block_runs "$lane" directory-source "directory-retirement-$retirement_shard"; then
     HLTHPRT_TIN_NPI_CONNECTOR_POSTGRES_DSN=$dsn \
       timeout --foreground 420s python -m pytest -q \
         -p scripts.ci.shard_pytest_nodeids --ci-shard-count 2 --ci-shard-index "$retirement_shard" \
@@ -3661,8 +3668,10 @@ run_provider_directory_postgres() {
         tests/test_provider_directory_terminal_root_retirement_repair_postgres.py \
         tests/test_provider_directory_terminal_root_retirement_v2_postgres.py \
         tests/test_provider_directory_terminal_root_retirement_v2_topology_postgres.py || return "$?"
+    fi
   done
 
+  if [[ "$lane" = directory-source || "$lane" = all ]]; then
   local directory_entity_tests=(
     tests/test_provider_directory_entities_postgres.py
     tests/test_provider_directory_cms_entities.py

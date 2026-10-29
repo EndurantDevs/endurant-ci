@@ -2879,7 +2879,8 @@ run_provider_directory_postgres postgresql://synthetic/test registry-19
             (source / "tests").mkdir(parents=True)
             for relative in available_paths:
                 (source / relative).touch()
-            for lane in ("directory-source", "registry-19", "directory-source-2", "registry-12", "registry-28", "all"):
+            for lane in ("directory-source", "registry-27", "registry-35", "registry-19", "directory-source-2",
+                         "registry-12", "registry-28", "all"):
                 call_log = Path(temporary) / lane
                 script = CHECK_FUNCTIONS + "\nrun_source_routes() {" + body + "}\n" + r'''
 log_call() {
@@ -2905,9 +2906,10 @@ run_source_routes postgresql://synthetic/test "$ROUTE_LANE"
                 calls_by_lane[lane] = [line.rstrip("\0").split("\0") for line in call_log.read_text().splitlines()]
         first, second = (calls_by_lane[lane] for lane in ("directory-source", "directory-source-2"))
         admission, candidates, rooted_graph = (calls_by_lane[lane] for lane in ("registry-19", "registry-12", "registry-28"))
-        self.assertEqual((len(first), len(second)), (5, 4))
+        retirement = calls_by_lane["registry-27"] + calls_by_lane["registry-35"]
+        self.assertEqual((len(first), len(second), len(retirement)), (3, 4, 2))
         self.assertEqual([len(admission), len(candidates), len(rooted_graph)], [1, 1, 1])
-        shards = first + admission + candidates + second[:2] + rooted_graph + second[2:]
+        shards = first[:1] + retirement + first[1:] + admission + candidates + second[:2] + rooted_graph + second[2:]
         self.assertEqual(len(first[0][9:]), 18)
         retirement_tests = [
             "tests/test_provider_directory_terminal_root_retirement_postgres.py",
@@ -2915,12 +2917,12 @@ run_source_routes postgresql://synthetic/test "$ROUTE_LANE"
             "tests/test_provider_directory_terminal_root_retirement_v2_postgres.py",
             "tests/test_provider_directory_terminal_root_retirement_v2_topology_postgres.py",
         ]
-        for shard, call in enumerate(first[1:3]):
+        for shard, call in enumerate(retirement):
             self.assertEqual(call[9:15], [
                 "-p", "scripts.ci.shard_pytest_nodeids", "--ci-shard-count", "2", "--ci-shard-index", str(shard),
             ])
             self.assertEqual(call[15:], retirement_tests)
-        for call in first[:3]:
+        for call in first[:1] + retirement:
             self.assertEqual(call[:2], ["postgresql://synthetic/test", ""])
         self.assertEqual(shards, calls_by_lane["all"])
         selectors = [argument for call in shards for argument in call if argument.startswith("tests/")]
@@ -2949,7 +2951,7 @@ timeout() {
 }
 run_owned_provider_directory_postgres() { return 99; }
 '''
-                    invoke = "run_provider_directory_postgres postgresql://synthetic/test directory-source"
+                    invoke = "run_provider_directory_postgres postgresql://synthetic/test all"
                     script += (f'if {invoke}; then exit 99; else exit "$?"; fi\n'
                                if conditional else invoke + "\n")
                     result = subprocess.run(
@@ -3088,7 +3090,7 @@ run_reference_cases postgresql://synthetic/test
             (source / "tests").mkdir(parents=True)
             for relative in available_paths:
                 (source / relative).touch()
-            for lane in ("core-services", "core-services-2", "registry-31"):
+            for lane in ("core-services", "core-services-2", "registry-7", "registry-31"):
                 call_log = Path(temporary) / lane
                 script = CHECK_FUNCTIONS + r'''
 log_call() { printf '%s\0' "$@" >> "$CALL_LOG"; printf '\n' >> "$CALL_LOG"; }
@@ -3110,14 +3112,16 @@ run_core_postgres postgresql://postgres:postgres@localhost:5432/test "$ROUTE_LAN
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 calls_by_lane[lane] = [line.rstrip("\0").split("\0") for line in call_log.read_text().splitlines()]
-        first, second = (calls_by_lane[lane][0] for lane in ("core-services", "core-services-2"))
+        first, second, third = (calls_by_lane[lane][0] for lane in ("core-services", "core-services-2", "registry-7"))
         prefix = ["--foreground", "420s", "python", "-m", "pytest", "-q", "-p",
-                  "scripts.ci.shard_pytest_nodeids", "--ci-shard-count", "2", "--ci-shard-index"]
+                  "scripts.ci.shard_pytest_nodeids", "--ci-shard-count", "3", "--ci-shard-index"]
         self.assertEqual(first[:11], prefix)
         self.assertEqual(second[:11], prefix)
-        self.assertEqual(first[11], "0")
-        self.assertEqual(second[11], "1")
+        self.assertEqual(third[:11], prefix)
+        self.assertEqual([first[11], second[11], third[11]], ["0", "1", "2"])
         self.assertEqual(first[12:], second[12:])
+        self.assertEqual(first[12:], third[12:])
+        self.assertEqual(calls_by_lane["registry-7"], [third])
         self.assertEqual(len(first[12:]), 51)
         self.assertEqual(len(set(first[12:])), 51)
         self.assertEqual(calls_by_lane["core-services-2"][1:], [["plan-release"]])
@@ -6335,7 +6339,8 @@ install_address_canon_wheel
                  "custom-import-build": "core-imports", "custom-import-capture": "core-services",
                  "profile-prepared-doctors-ranges": "profile-publication", "organization-partition-v4": "directory-address",
                  "profile-prepared-doctors-cancellation": "profile-publication", "semantic-proof-v3": "directory-address",
-                 "profile-initial-publication": "profile-publication"}
+                 "profile-initial-publication": "profile-publication", "services-primary-3": "core-services",
+                 "directory-retirement-0": "directory-source", "directory-retirement-1": "directory-source"}
         self.assertEqual(set(placements), set(homes))
         self.assertEqual(len(set(placements.values())), len(placements), "one block per receiving shard")
         self.assertTrue(all(target != home for home, target in ((homes[block], placements[block]) for block in homes)))
