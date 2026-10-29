@@ -164,7 +164,7 @@ run_reference_lane() {
                 for reference in references:
                     self.assertEqual(
                         reference[:7],
-                        ["reference", "--foreground", "295s", "python", "-m", "pytest", "-q"],
+                        ["reference", "--foreground", "420s", "python", "-m", "pytest", "-q"],
                     )
                 self.assertEqual(calls[2:], ["geo\t" + GEO_TEST] if current else [])
                 self.assertEqual(sum(call.split().count(GEO_TEST) for call in calls), 1)
@@ -297,7 +297,7 @@ test -z "${HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN:-}"
                         call["arguments"][:6],
                         [
                             "--foreground",
-                            "295s",
+                            "420s",
                             "python",
                             "-m",
                             "pytest",
@@ -565,7 +565,7 @@ test "$DB_SCHEMA:$HLTHPRT_DB_DATABASE_OVERRIDE:$HLTHPRT_DB_DATABASE" = sentinel:
                     self.assertEqual(call["addopts"], environment["PYTEST_ADDOPTS"])
                     self.assertEqual(
                         call["arguments"][:6],
-                        ["--foreground", "295s", "python", "-m", "pytest", "-q"],
+                        ["--foreground", "420s", "python", "-m", "pytest", "-q"],
                     )
                     self.assertEqual(call["arguments"][6], "@" + collections[0][5])
                     self.assertEqual(

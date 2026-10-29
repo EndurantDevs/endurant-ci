@@ -386,7 +386,7 @@ run_profile_liveness_postgres
         )
         self.assertTrue(
             any(
-                line.startswith("--foreground 295s python -m pytest")
+                line.startswith("--foreground 420s python -m pytest")
                 for line in (root / "timeouts").read_text().splitlines()
             )
         )

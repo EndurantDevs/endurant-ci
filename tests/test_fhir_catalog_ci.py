@@ -134,11 +134,11 @@ run_scoped_archive_postgres hc_catalog_test NETWORK_REGISTRY_TEST_DSN postgresql
 """
         selections = (
             (f"{NODEID} --junitxml report.xml", "1500s", True),
-            (f"{NODEID} --junitxml report.xml tests/test_other.py", "295s", True),
-            ("tests/test_registry_fhir_catalog_store_postgres.py", "295s", True),
-            ("tests/test_registry_manual_source_swap_postgres.py", "295s", True),
-            ("tests/test_network_registry_postgres.py", "295s", False),
-            ("@catalog-selection", "295s", True),
+            (f"{NODEID} --junitxml report.xml tests/test_other.py", "420s", True),
+            ("tests/test_registry_fhir_catalog_store_postgres.py", "420s", True),
+            ("tests/test_registry_manual_source_swap_postgres.py", "420s", True),
+            ("tests/test_network_registry_postgres.py", "420s", False),
+            ("@catalog-selection", "420s", True),
         )
         (self.root / "catalog-selection").write_text(NATIVE_TESTS[0] + "::test_store\n")
         for arguments, deadline, trigram in selections:

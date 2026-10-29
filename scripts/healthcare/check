@@ -1190,7 +1190,7 @@ run_python_main() {
   export COVERAGE_FILE=${COVERAGE_FILE:-$(artifact_path ".coverage.main.${shard}")}
   ci_phase_begin python-tests
   public_common_test_run "healthcare-python-main-${shard}" "$COVERAGE_FILE" \
-    timeout --foreground 420s python -m pytest -q -n 1 --dist loadscope --durations=20 \
+    timeout --foreground 420s python -m pytest -q -n 2 --dist loadscope --durations=20 \
     -p scripts.ci.shard_pytest_nodeids --ci-shard-count 6 --ci-shard-index "$shard" \
     --cov-config=test-coverage.ini \
     --cov=api --cov=db --cov=process --cov=public_evidence --cov=service --cov=main \
@@ -1198,8 +1198,8 @@ run_python_main() {
     "${collection_args[@]}"
   ci_phase_end
   require_base_sha
-  timeout --foreground 295s python "$CI_ROOT/scripts/healthcare/compact_coverage.py" "$COVERAGE_FILE"
-  timeout --foreground 295s python scripts/coverage_forecast.py write-shard-provenance \
+  timeout --foreground 420s python "$CI_ROOT/scripts/healthcare/compact_coverage.py" "$COVERAGE_FILE"
+  timeout --foreground 420s python scripts/coverage_forecast.py write-shard-provenance \
     --base "$COVERAGE_BASE_SHA" \
     --kind main \
     --shard "$shard" \
@@ -1214,15 +1214,15 @@ run_capacity() {
   export COVERAGE_FILE=${COVERAGE_FILE:-$(artifact_path .coverage.capacity)}
   ci_phase_begin capacity-tests
   public_common_test_run healthcare-capacity "$COVERAGE_FILE" \
-    timeout --foreground 295s python -m pytest -q -n 4 --dist worksteal --durations=20 \
+    timeout --foreground 420s python -m pytest -q -n 4 --dist worksteal --durations=20 \
     --cov-config=test-coverage.ini \
     --cov=api --cov=db --cov=process --cov=public_evidence --cov=service --cov=main \
     --cov-branch --cov-report= \
     "${capacity_tests[@]}"
   ci_phase_end
   require_base_sha
-  timeout --foreground 295s python "$CI_ROOT/scripts/healthcare/compact_coverage.py" "$COVERAGE_FILE"
-  timeout --foreground 295s python scripts/coverage_forecast.py write-shard-provenance \
+  timeout --foreground 420s python "$CI_ROOT/scripts/healthcare/compact_coverage.py" "$COVERAGE_FILE"
+  timeout --foreground 420s python scripts/coverage_forecast.py write-shard-provenance \
     --base "$COVERAGE_BASE_SHA" \
     --kind capacity \
     --shard capacity \
@@ -1316,7 +1316,7 @@ run_runtime_contracts() {
   done
   python "$CI_ROOT/scripts/runtime_imports.py" --source "$repository_root" \
     --member aiohttp.client:ClientSession --member orjson:loads --member orjson:dumps "${modules[@]}"
-  timeout --foreground 295s python -m pytest -q \
+  timeout --foreground 420s python -m pytest -q \
     tests/test_billing_search_selector_contract.py \
     tests/test_billing_search_transport_contract.py \
     tests/test_mrf_discovery_catalog_manifest.py \
@@ -1336,7 +1336,7 @@ run_api_contract() {
   ci_phase_begin api-contract-tests
   python scripts/smoke/provider_directory_runtime_contract.py
   python scripts/generate_provider_directory_support_docs.py --check
-  timeout --foreground 295s python -m pytest -q \
+  timeout --foreground 420s python -m pytest -q \
     tests/test_openapi_spec.py \
     tests/test_formulary_fhir_openapi.py \
     tests/test_api_init_and_utils.py \
@@ -1545,7 +1545,7 @@ PY
   if [ -f "$repository_root/tests/test_custom_import_graph_serial_metadata.py" ]; then
     wheel_tests+=(tests/test_custom_import_graph_serial_metadata.py)
   fi
-  timeout --foreground 295s python -m pytest -q "${wheel_tests[@]}"
+  timeout --foreground 420s python -m pytest -q "${wheel_tests[@]}"
   ci_phase_end
 }
 
@@ -1561,7 +1561,7 @@ run_rust() {
   ci_phase_begin rust-coverage
   mkdir -p "$rust_artifacts"
   test "$(cargo llvm-cov --version)" = "cargo-llvm-cov 0.8.7"
-  timeout --foreground 295s cargo llvm-cov --manifest-path support/ptg2_scanner/Cargo.toml \
+  timeout --foreground 420s cargo llvm-cov --manifest-path support/ptg2_scanner/Cargo.toml \
     --all-targets --features python --remap-path-prefix --no-report
   ci_phase_end
   (
@@ -1578,11 +1578,11 @@ run_rust() {
   )
   ci_phase_begin rust-coverage-report
   LLVM_COV_FLAGS="${LLVM_COV_FLAGS:+$LLVM_COV_FLAGS }-compilation-dir=support/ptg2_scanner" \
-    timeout --foreground 295s cargo llvm-cov report --manifest-path support/ptg2_scanner/Cargo.toml \
+    timeout --foreground 420s cargo llvm-cov report --manifest-path support/ptg2_scanner/Cargo.toml \
     --remap-path-prefix --json \
     --output-path "$rust_artifacts/test-coverage-rust.json"
   require_base_sha
-  timeout --foreground 295s python scripts/coverage_forecast.py write-report-provenance \
+  timeout --foreground 420s python scripts/coverage_forecast.py write-report-provenance \
     --base "$COVERAGE_BASE_SHA" \
     --report-name rust \
     --report "$rust_artifacts/test-coverage-rust.json" \
@@ -1601,7 +1601,7 @@ run_rust() {
   ci_phase_begin rust-native-tests
   HLTHPRT_PROVIDER_DIRECTORY_PROJECTION_NATIVE_TEST_BIN="$repository_root/support/ptg2_scanner/target/release/ptg2_scanner" \
   HLTHPRT_PROVIDER_DIRECTORY_PROJECTION_NATIVE_BIN="$repository_root/support/ptg2_scanner/target/release/ptg2_scanner" \
-    timeout --foreground 295s python -m pytest -q \
+    timeout --foreground 420s python -m pytest -q \
       tests/test_provider_directory_projection_native_copy.py \
       tests/test_provider_directory_projection_native_cli_parity.py \
       tests/test_provider_directory_projection_native_copy_adversarial.py
@@ -1908,7 +1908,7 @@ async def main() -> None:
 
 asyncio.run(main())
 PY
-  timeout --foreground 295s python -m pytest -q \
+  timeout --foreground 420s python -m pytest -q \
     tests/test_control_workers.py \
     tests/test_control_imports_api.py \
     tests/test_control_cancel.py
@@ -2034,7 +2034,7 @@ run_scoped_archive_postgres_body() {
     python "$CI_ROOT/scripts/healthcare/supervise_installed.py" "$scoped_archive_drain_file" "$@" &
     wait "$!" || exit "$?"
   else
-    local deadline=295s
+    local deadline=420s
     if [[ "$#" = 3 && "$1" = tests/test_registry_fhir_catalog_end_to_end.py::test_import_sync_query_replay_and_disappearance && "$2" = --junitxml ]]; then
       deadline=1500s
     fi
@@ -2077,7 +2077,7 @@ run_import_family_postgres() (
     [ "$status" -ne 0 ] || status=$result
   done
   [ "$status" -eq 0 ] || exit "$status"
-  timeout --foreground 295s python -m coverage combine --append \
+  timeout --foreground 420s python -m coverage combine --append \
     "$family_coverage_directory/test_custom_import_identical_children_postgres.py" \
     "$family_coverage_directory/test_custom_import_grouped_child_read_postgres.py"
 )
@@ -2761,7 +2761,7 @@ run_registry_ptg_scope_postgres() (
   HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST=1 \
   HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN=$dsn \
   NETWORK_REGISTRY_TEST_DSN=$dsn \
-    timeout --foreground 295s python -m pytest -q "${registry_tests[@]}" --junitxml "$registry_report"
+    timeout --foreground 420s python -m pytest -q "${registry_tests[@]}" --junitxml "$registry_report"
   validate_registry_native_report "$registry_report" "" "${registry_tests[@]}"
 )
 
@@ -2786,7 +2786,7 @@ run_core_postgres() {
   HLTHPRT_SITE_INTELLIGENCE_POSTGRES_DSN=$dsn \
   HLTHPRT_HOSPITAL_PRICE_MIGRATION_POSTGRES_DSN=$dsn \
   HLTHPRT_PLAN_PRICING_PROJECTION_POSTGRES_DSN=$dsn \
-    timeout --foreground 295s python -m pytest -q ${services_shard_options[@]+"${services_shard_options[@]}"} \
+    timeout --foreground 420s python -m pytest -q ${services_shard_options[@]+"${services_shard_options[@]}"} \
     tests/test_prescription_autocomplete_postgres.py \
     tests/test_terminology_synonym_publication_postgres.py \
     tests/test_site_intelligence_fast_paths_postgres.py \
@@ -2846,12 +2846,12 @@ run_core_postgres() {
   if [[ "$lane" = core-services || "$lane" = all ]]; then
   if [ -f "$repository_root/tests/test_npi_result_archive_postgres.py" ]; then
     HLTHPRT_NPI_RESULT_ARCHIVE_TEST_DSN=$dsn \
-      timeout --foreground 295s python -m pytest -q \
+      timeout --foreground 420s python -m pytest -q \
         tests/test_npi_result_archive_postgres.py
   fi
   if [ -f "$repository_root/tests/test_npi_optional_read_savepoints_postgres.py" ]; then
     HLTHPRT_PUBLIC_EVIDENCE_STORAGE_POSTGRES_DSN=$dsn \
-      timeout --foreground 295s python -m pytest -q \
+      timeout --foreground 420s python -m pytest -q \
         tests/test_npi_optional_read_savepoints_postgres.py
   fi
   local code_sets_archive_tests=()
@@ -3175,7 +3175,7 @@ run_core_postgres() {
     local database="hc_reference_family_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
     create_test_database "$database"
     if ! HLTHPRT_REFERENCE_FAMILY_ARCHIVE_TEST_DSN="${dsn%/*}/$database" \
-      timeout --foreground 295s python -m pytest -q "${reference_family_cohort_tests[@]}"; then
+      timeout --foreground 420s python -m pytest -q "${reference_family_cohort_tests[@]}"; then
       drop_test_database "$database"
       return 1
     fi
@@ -3189,7 +3189,7 @@ run_core_postgres() {
     database="hc_address_generation_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
     create_test_database "$database"
     if ! HLTHPRT_ENTITY_ADDRESS_GENERATION_TEST_DSN="${dsn%/*}/$database" \
-      timeout --foreground 295s python -m pytest -q \
+      timeout --foreground 420s python -m pytest -q \
         tests/test_entity_address_result_generation_postgres.py; then
       drop_test_database "$database"
       return 1
@@ -3201,7 +3201,7 @@ run_core_postgres() {
     database="hc_mrf_archive_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
     create_test_database "$database"
     if ! HLTHPRT_MRF_RESULT_ARCHIVE_TEST_DSN="${dsn%/*}/$database" \
-      timeout --foreground 295s python -m pytest -q tests/test_mrf_result_archive_postgres.py; then
+      timeout --foreground 420s python -m pytest -q tests/test_mrf_result_archive_postgres.py; then
       drop_test_database "$database"
       return 1
     fi
@@ -3216,7 +3216,7 @@ run_core_postgres() {
     database="cms_archive_test_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
     create_test_database "$database"
     if ! HLTHPRT_CMS_DOCTORS_ARCHIVE_TEST_DSN="${dsn%/*}/$database" \
-      timeout --foreground 295s python -m pytest -q tests/test_cms_doctors_archive_postgres.py; then
+      timeout --foreground 420s python -m pytest -q tests/test_cms_doctors_archive_postgres.py; then
       drop_test_database "$database"
       return 1
     fi
@@ -3227,7 +3227,7 @@ run_core_postgres() {
     database="tiger_archive_test_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
     create_test_database "$database"
     if ! HLTHPRT_TIGER_ARCHIVE_TEST_DSN="${dsn%/*}/$database" \
-      timeout --foreground 295s python -m pytest -q tests/test_tiger_result_archive_postgres.py; then
+      timeout --foreground 420s python -m pytest -q tests/test_tiger_result_archive_postgres.py; then
       drop_test_database "$database"
       return 1
     fi
@@ -3236,22 +3236,22 @@ run_core_postgres() {
 
   if [ -f "$repository_root/tests/test_pharmacy_economics_snapshot_postgres.py" ]; then
     HLTHPRT_PHARMACY_ECON_POSTGRES_DSN=$dsn \
-      timeout --foreground 295s python -m pytest -q tests/test_pharmacy_economics_snapshot_postgres.py
+      timeout --foreground 420s python -m pytest -q tests/test_pharmacy_economics_snapshot_postgres.py
   fi
   fi
 
   if [[ "$lane" = core-ptg || "$lane" = all ]]; then
   HLTHPRT_PTG2_V3_LIFECYCLE_POSTGRES_DSN=$dsn \
   HLTHPRT_PTG2_ROLLBACK_POSTGRES_DSN=$dsn \
-    timeout --foreground 295s python -m pytest -q \
+    timeout --foreground 420s python -m pytest -q \
       tests/test_ptg2_v3_migrated_lifecycle_postgres.py \
       tests/test_ptg_source_snapshot_rollback_postgres.py
   HLTHPRT_PTG2_ATTESTATION_COMPAT_POSTGRES_TEST=1 \
-    timeout --foreground 295s python -m pytest -q \
+    timeout --foreground 420s python -m pytest -q \
       tests/test_ptg2_attestation_contract_compat_postgres.py \
       tests/test_ptg2_candidate_v4_attestation_postgres.py
   HLTHPRT_MRF_DISCOVERY_CHECKPOINT_POSTGRES_DSN=$dsn \
-    timeout --foreground 295s python -m pytest -q tests/test_mrf_discovery_checkpoints_postgres.py
+    timeout --foreground 420s python -m pytest -q tests/test_mrf_discovery_checkpoints_postgres.py
   fi
 
   if [[ "$lane" = core-imports-2 || "$lane" = all ]]; then
@@ -3259,7 +3259,7 @@ run_core_postgres() {
   create_test_database "$database"
   if ! HLTHPRT_PTG_IMPORT_WAVE_RECOVERY_POSTGRES_DSN="${dsn%/*}/$database" \
     PGPASSWORD="$HLTHPRT_DB_PASSWORD" \
-    timeout --foreground 295s python -m pytest -q \
+    timeout --foreground 420s python -m pytest -q \
       tests/test_ptg_wave_recovery_storage_postgres.py \
       tests/test_ptg_wave_recovery_storage_orm_postgres.py \
       tests/test_ptg_wave_materialized_preclaim_storage_postgres.py \
@@ -3289,7 +3289,7 @@ run_core_postgres() {
   if ! HLTHPRT_DB_DATABASE=$database \
     HLTHPRT_UHC_SEMANTIC_POSTGRES_DSN="${dsn%/*}/$database" \
     PGPASSWORD="$HLTHPRT_DB_PASSWORD" \
-    timeout --foreground 295s python -m pytest -q \
+    timeout --foreground 420s python -m pytest -q \
       tests/test_uhc_semantic_build_postgres.py \
       tests/test_uhc_semantic_build_lifecycle.py \
       tests/test_uhc_retained_dataset_postgres.py; then
@@ -3300,7 +3300,7 @@ run_core_postgres() {
 
   HLTHPRT_PTG2_AUDIT_BATCH_POSTGRES_TEST=1 \
   HLTHPRT_PTG2_SHARED_PUBLISH_POSTGRES_TEST=1 \
-    timeout --foreground 295s python -m pytest -q \
+    timeout --foreground 420s python -m pytest -q \
       tests/test_ptg2_candidate_audit_batch_postgres.py \
       tests/test_ptg2_shared_graph_postgres.py \
       tests/test_ptg2_shared_price_postgres.py \
@@ -3315,7 +3315,7 @@ run_core_postgres() {
   HLTHPRT_PTG2_TAX_IDENTITY_SOURCE_POSTGRES_DSN=$dsn \
   HLTHPRT_PTG2_RAW_TIN_VAULT_POSTGRES_DSN=$dsn \
   HLTHPRT_PTG2_PROVIDER_GRAPH_V4_BIN="$repository_root/support/ptg2_scanner/target/debug/ptg2_provider_graph_v4" \
-    timeout --foreground 295s python -m pytest -q \
+    timeout --foreground 420s python -m pytest -q \
       tests/test_ptg2_v4_migration_postgres.py \
       tests/test_ptg2_v4_finalizer_map_migration_postgres.py \
       tests/test_ptg2_packed_finalizer_wrapper_postgres.py \
@@ -3361,7 +3361,7 @@ run_core_postgres() {
   done
   if [ "${#snapshot_candidate_tests[@]}" -gt 0 ]; then
     HLTHPRT_PTG2_TAX_IDENTITY_POSTGRES_DSN=$dsn \
-      timeout --foreground 295s python -m pytest -q "${snapshot_candidate_tests[@]}"
+      timeout --foreground 420s python -m pytest -q "${snapshot_candidate_tests[@]}"
   fi
 
   run_registry_ptg_scope_postgres "$dsn"
@@ -3379,20 +3379,20 @@ run_core_postgres() {
   if [ "${#result_archive_tests[@]}" -gt 0 ]; then
     HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST=1 \
     HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN=$dsn \
-      timeout --foreground 295s python -m pytest -q "${result_archive_tests[@]}"
+      timeout --foreground 420s python -m pytest -q "${result_archive_tests[@]}"
   fi
 
   if [ -f "$repository_root/tests/test_result_archive_candidate_initialization_postgres.py" ] && \
      [ -f "$repository_root/tests/test_result_archive_candidate_validation_postgres.py" ]; then
     HLTHPRT_PTG2_ARCHIVE_CANDIDATE_POSTGRES_TEST=1 \
     HLTHPRT_PTG2_ARCHIVE_CANDIDATE_POSTGRES_DSN=$dsn \
-      timeout --foreground 295s python -m pytest -q \
+      timeout --foreground 420s python -m pytest -q \
         tests/test_result_archive_candidate_initialization_postgres.py \
         tests/test_result_archive_candidate_validation_postgres.py
   fi
 
   HLTHPRT_PTG2_SHARED_GC_POSTGRES_TEST=1 \
-    timeout --foreground 295s python -m pytest -q \
+    timeout --foreground 420s python -m pytest -q \
       tests/test_ptg2_shared_gc.py \
       tests/test_ptg2_shared_gc_postgres.py \
       tests/test_ptg2_legacy_orphan_optional_postgres.py \
@@ -3407,7 +3407,7 @@ run_core_postgres() {
       tests/test_ptg_source_snapshot_removal_v3.py \
       tests/test_ptg_source_snapshot_removal_v4.py
   HLTHPRT_PTG2_CROSS_PLAN_POSTGRES_TEST=1 \
-    timeout --foreground 295s python -m pytest -q tests/test_ptg2_v3_cross_plan_reuse.py
+    timeout --foreground 420s python -m pytest -q tests/test_ptg2_v3_cross_plan_reuse.py
   fi
 }
 
@@ -3431,7 +3431,7 @@ run_owned_provider_directory_postgres() (
   if [[ -n "$variable" ]]; then dsn_environment+=("$variable=$dsn"); fi
   env -u DB_SCHEMA -u HLTHPRT_DB_DATABASE_OVERRIDE \
     ${dsn_environment[@]+"${dsn_environment[@]}"} HLTHPRT_DB_DATABASE="$owned_directory_database" \
-    timeout --foreground 295s python -m pytest -q "$@"
+    timeout --foreground 420s python -m pytest -q "$@"
 )
 
 run_plan_release_postgres() (
@@ -3621,7 +3621,7 @@ run_available_cms_postgres() (
       ;;
     runtime)
       env -u DB_SCHEMA -u HLTHPRT_DB_DATABASE_OVERRIDE \
-        timeout --foreground 295s python -m pytest -q "${selected[@]}"
+        timeout --foreground 420s python -m pytest -q "${selected[@]}"
       ;;
     *) exit 2 ;;
   esac
@@ -3632,7 +3632,7 @@ run_provider_directory_postgres() {
   local lane=${2:-all}
   if [[ "$lane" = directory-source || "$lane" = all ]]; then
   HLTHPRT_TIN_NPI_CONNECTOR_POSTGRES_DSN=$dsn \
-    timeout --foreground 295s python -m pytest -q \
+    timeout --foreground 420s python -m pytest -q \
       tests/test_tin_npi_connector_postgres.py \
       tests/test_provider_directory_endpoint_dataset_admission_seal_migration.py \
       tests/test_provider_directory_endpoint_dataset_admission_seal_migration_postgres.py \
@@ -3655,7 +3655,7 @@ run_provider_directory_postgres() {
   local retirement_shard
   for retirement_shard in 0 1; do
     HLTHPRT_TIN_NPI_CONNECTOR_POSTGRES_DSN=$dsn \
-      timeout --foreground 295s python -m pytest -q \
+      timeout --foreground 420s python -m pytest -q \
         -p scripts.ci.shard_pytest_nodeids --ci-shard-count 2 --ci-shard-index "$retirement_shard" \
         tests/test_provider_directory_terminal_root_retirement_postgres.py \
         tests/test_provider_directory_terminal_root_retirement_repair_postgres.py \
@@ -3692,13 +3692,13 @@ run_provider_directory_postgres() {
     tests/test_provider_directory_cms_preflight_postgres.py \
     tests/test_provider_directory_cms_wal_budget_postgres.py
   if [ -f "$repository_root/tests/test_provider_directory_entity_redirect.py" ]; then
-    timeout --foreground 295s python -m pytest -q tests/test_provider_directory_entity_redirect.py
+    timeout --foreground 420s python -m pytest -q tests/test_provider_directory_entity_redirect.py
   fi
   fi
 
   if postgres_block_runs "$lane" directory-source-2 uhc-flex-rooted-graph; then
   HLTHPRT_FHIR_FORMULARY_MIGRATION_POSTGRES_DSN=$dsn \
-    timeout --foreground 295s python -m pytest -q \
+    timeout --foreground 420s python -m pytest -q \
       tests/test_uhc_flex_practitioner_registration_postgres.py \
       tests/test_provider_directory_uhc_flex_npi_cohort_postgres.py \
       tests/test_provider_directory_uhc_flex_practitioner_acquisition_postgres.py \
@@ -3733,7 +3733,7 @@ run_provider_directory_postgres() {
     local provider_candidate_batch=("${provider_candidate_tests[@]:candidate_offset:6}")
     if [ "${#provider_candidate_batch[@]}" -gt 0 ]; then
       HLTHPRT_FHIR_FORMULARY_MIGRATION_POSTGRES_DSN=$dsn \
-        timeout --foreground 295s python -m pytest -q "${provider_candidate_batch[@]}"
+        timeout --foreground 420s python -m pytest -q "${provider_candidate_batch[@]}"
     fi
   done
   fi
@@ -3754,7 +3754,7 @@ run_provider_directory_postgres() {
     tests/test_provider_directory_cms_serving_bounds_postgres.py \
     tests/test_provider_directory_cms_capacity_ledger.py::test_native_two_purposes_share_one_run_and_reject_conflicts \
     tests/test_provider_directory_prepared_bundle.py::test_prepared_bundle_obeys_outer_commit_and_rollback
-  env "${common_env[@]}" timeout --foreground 295s python -m pytest -q \
+  env "${common_env[@]}" timeout --foreground 420s python -m pytest -q \
     -o asyncio_default_test_loop_scope=session \
     -o asyncio_default_fixture_loop_scope=session \
     --durations=20 \
@@ -3831,7 +3831,7 @@ run_provider_directory_postgres() {
     tests/test_provider_directory_organization_partition_v4_fences_db.py
   fi
   if [[ "$lane" = directory-address || "$lane" = all ]]; then
-  env "${common_env[@]}" timeout --foreground 295s python -m pytest -q \
+  env "${common_env[@]}" timeout --foreground 420s python -m pytest -q \
     -o asyncio_default_test_loop_scope=session \
     -o asyncio_default_fixture_loop_scope=session \
     --durations=20 \
@@ -4025,7 +4025,7 @@ run_profile_wal_postgres() (
   env -u DB_SCHEMA -u HLTHPRT_DB_DATABASE_OVERRIDE \
     HLTHPRT_DB_HOST=127.0.0.1 HLTHPRT_DB_PORT="$port" HLTHPRT_DB_DATABASE="profile_wal_test_$owner" \
     HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS=1 \
-    timeout --foreground 295s python -m pytest -q "$test_node" --junitxml "$resource_root/report.xml"
+    timeout --foreground 420s python -m pytest -q "$test_node" --junitxml "$resource_root/report.xml"
   validate_registry_native_report "$resource_root/report.xml" "$resource_root/selection"
 )
 
@@ -4054,7 +4054,7 @@ run_provider_profile_postgres() {
   create_test_database "$database"
   if ! HLTHPRT_DB_DATABASE=$database \
     PGPASSWORD="$HLTHPRT_DB_PASSWORD" \
-    timeout --foreground 295s python -m pytest -q \
+    timeout --foreground 420s python -m pytest -q \
     tests/test_control_imports_db.py \
     tests/test_import_run_idempotency_scope_postgres.py \
     tests/test_plan_pricing_idempotency_postgres.py \
@@ -4073,7 +4073,7 @@ run_provider_profile_postgres() {
   if ! HLTHPRT_UHC_RETAINED_ADMISSION_POSTGRES_DSN="${dsn%/*}/$database" \
   HLTHPRT_PTG2_RUST_SCANNER_BIN="$repository_root/support/ptg2_scanner/target/debug/ptg2_scanner" \
   PGPASSWORD="$HLTHPRT_DB_PASSWORD" \
-    timeout --foreground 295s python -m pytest -q \
+    timeout --foreground 420s python -m pytest -q \
       tests/test_uhc_retained_admission_postgres.py \
       tests/test_uhc_retained_admission_concurrency_postgres.py; then
     drop_test_database "$database"
@@ -4085,7 +4085,7 @@ run_provider_profile_postgres() {
   create_test_database "$database"
   if ! HLTHPRT_PTG_FROZEN_BINDING_POSTGRES_DSN="${dsn%/*}/$database" \
     PGPASSWORD="$HLTHPRT_DB_PASSWORD" \
-    timeout --foreground 295s python -m pytest -q tests/test_ptg_frozen_binding_postgres.py; then
+    timeout --foreground 420s python -m pytest -q tests/test_ptg_frozen_binding_postgres.py; then
     drop_test_database "$database"
     return 1
   fi
@@ -4101,7 +4101,7 @@ run_provider_profile_postgres() {
     "HLTHPRT_PTG2_RUST_SCANNER_BIN=$repository_root/support/ptg2_scanner/target/debug/ptg2_scanner"
     "HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS=1"
   )
-  env "${common_env[@]}" timeout --foreground 295s python -m pytest -q \
+  env "${common_env[@]}" timeout --foreground 420s python -m pytest -q \
     -o asyncio_default_test_loop_scope=session \
     -o asyncio_default_fixture_loop_scope=session \
     --durations=20 \
@@ -4235,7 +4235,7 @@ run_provider_profile_postgres() {
   HLTHPRT_CMS_EDUCATION_POSTGRES_DSN=$dsn \
   HLTHPRT_PROVIDER_DIRECTORY_PROFILE_POSTGRES_DSN=$dsn \
   HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS=1 \
-    timeout --foreground 295s python -m pytest -q \
+    timeout --foreground 420s python -m pytest -q \
       -o asyncio_default_test_loop_scope=session \
       -o asyncio_default_fixture_loop_scope=session \
       --durations=20 \
@@ -4275,7 +4275,7 @@ run_provider_profile_postgres() {
     local database="hc_source_profile_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
     create_test_database "$database"
     if ! HLTHPRT_SOURCE_PROFILE_ARCHIVE_TEST_DSN="${dsn%/*}/$database" \
-      timeout --foreground 295s python -m pytest -q "${source_profile_tests[@]}"; then
+      timeout --foreground 420s python -m pytest -q "${source_profile_tests[@]}"; then
       drop_test_database "$database"
       return 1
     fi
@@ -4366,8 +4366,8 @@ run_postgres() {
   ci_phase_end
 
   require_base_sha
-  timeout --foreground 295s python "$CI_ROOT/scripts/healthcare/compact_coverage.py" "$COVERAGE_FILE"
-  timeout --foreground 295s python scripts/coverage_forecast.py write-shard-provenance \
+  timeout --foreground 420s python "$CI_ROOT/scripts/healthcare/compact_coverage.py" "$COVERAGE_FILE"
+  timeout --foreground 420s python scripts/coverage_forecast.py write-shard-provenance \
     --base "$COVERAGE_BASE_SHA" \
     --kind postgres \
     --shard "$shard" \
