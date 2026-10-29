@@ -1917,30 +1917,99 @@ PY
 }
 
 prepare_postgres() {
-  python - <<'PY'
+  local ordinary_migrations=0
+  if [ -f "$repository_root/alembic/versions/20261028110000_provider_directory_global_serving.py" ]; then
+    ordinary_migrations=1
+  fi
+  python - "$ordinary_migrations" <<'PY'
 import asyncio
 import os
+import sys
 
 import asyncpg
 
 
+async def _prepare_ordinary_roles(conn, password):
+    expected = {
+        "rolcanlogin": True,
+        "rolinherit": False,
+        "rolsuper": False,
+        "rolcreatedb": False,
+        "rolcreaterole": False,
+        "rolreplication": False,
+        "rolbypassrls": False,
+        "memberships": False,
+    }
+    for role in ("ci_schema_owner", "ci_serving_reader"):
+        current = await conn.fetchrow(
+            "SELECT rolcanlogin,rolinherit,rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls,"
+            "EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.member=r.oid) AS memberships "
+            "FROM pg_catalog.pg_roles r WHERE rolname=$1",
+            role,
+        )
+        if current is None:
+            await conn.execute(
+                f"CREATE ROLE {role} LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                f"NOREPLICATION NOBYPASSRLS PASSWORD {password}"
+            )
+        elif dict(current) != expected:
+            raise RuntimeError(f"Existing CI database role is incompatible: {role}")
+
+
 async def main() -> None:
-    conn = await asyncpg.connect(
+    settings = dict(
         host=os.environ["HLTHPRT_DB_HOST"],
         port=int(os.environ["HLTHPRT_DB_PORT"]),
         user=os.environ["HLTHPRT_DB_USER"],
         password=os.environ["HLTHPRT_DB_PASSWORD"],
         database=os.environ["HLTHPRT_DB_DATABASE"],
     )
+    conn = await asyncpg.connect(**settings)
+    ordinary_migrations = sys.argv[1] == "1"
     await conn.execute("CREATE EXTENSION IF NOT EXISTS postgis")
-    await conn.execute('CREATE SCHEMA IF NOT EXISTS "mrf"')
+    if ordinary_migrations:
+        for extension in ("pg_trgm", "intarray", "btree_gist"):
+            await conn.execute("CREATE EXTENSION IF NOT EXISTS " + extension + " WITH SCHEMA public")
+        password = await conn.fetchval("SELECT quote_literal($1::text)", os.environ["HLTHPRT_DB_PASSWORD"])
+        await _prepare_ordinary_roles(conn, password)
+        database = await conn.fetchval("SELECT quote_ident(current_database())")
+        await conn.execute(f"GRANT CREATE ON DATABASE {database} TO ci_schema_owner")
+        await conn.execute('CREATE SCHEMA IF NOT EXISTS "mrf" AUTHORIZATION ci_schema_owner')
+        await conn.execute('GRANT USAGE ON SCHEMA "mrf" TO ci_serving_reader')
+    else:
+        await conn.execute('CREATE SCHEMA IF NOT EXISTS "mrf"')
     await conn.close()
+    if ordinary_migrations:
+        reader = await asyncpg.connect(**{**settings, "user": "ci_serving_reader"})
+        await reader.close()
+        settings["user"] = "ci_schema_owner"
+        conn = await asyncpg.connect(**settings)
+        try:
+            from sqlalchemy.dialects import postgresql
+            from sqlalchemy.schema import CreateTable
+
+            from db.models import EntityAddressUnified
+            from process import provider_directory_profile as profile
+
+            async with conn.transaction():
+                unified = CreateTable(EntityAddressUnified.__table__).compile(dialect=postgresql.dialect())
+                await conn.execute(str(unified))
+                await conn.execute(profile.profile_table_sql("mrf", logged=True))
+                await conn.execute(profile.profile_evidence_table_sql("mrf", logged=True))
+        finally:
+            await conn.close()
 
 
 asyncio.run(main())
 PY
-  alembic stamp 20260610143000_address_checksums_bigint
-  alembic upgrade head
+  (
+    if [ "$ordinary_migrations" = 1 ]; then
+      export DB_USER=ci_schema_owner HLTHPRT_DB_USER=ci_schema_owner
+      export DB_PASSWORD="$HLTHPRT_DB_PASSWORD" HLTHPRT_DB_READER_USER=ci_serving_reader
+    fi
+    alembic stamp 20260610143000_address_checksums_bigint
+    alembic upgrade head
+  )
   PGPASSWORD="$HLTHPRT_DB_PASSWORD" psql \
     --host "$HLTHPRT_DB_HOST" --port "$HLTHPRT_DB_PORT" \
     --username "$HLTHPRT_DB_USER" --dbname "$HLTHPRT_DB_DATABASE" \
