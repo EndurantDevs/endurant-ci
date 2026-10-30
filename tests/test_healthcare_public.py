@@ -5105,7 +5105,8 @@ run_wheel_tests() {
                 if cache == "hit":
                     cache_root.mkdir()
                     (cache_root / "baseline.sql").write_text("CREATE SCHEMA mrf;\nCOPY mrf.alembic_version FROM stdin;\n")
-                    (cache_root / "baseline.sql.data").write_text("\\restrict abc\nCOPY mrf.alembic_version FROM stdin;\nhead\n\\unrestrict abc\n")
+                    (cache_root / "baseline.sql.data").write_text(
+                        "\\restrict abc\nCOPY mrf.alembic_version FROM stdin;\nhead\n\\.\nCOPY mrf.seed FROM stdin;\nrow\n\\.\n\\unrestrict abc\n")
                 if ordinary:
                     migration = Path(temporary) / "alembic/versions/20261028110000_provider_directory_global_serving.py"
                     migration.parent.mkdir(parents=True)
@@ -5164,11 +5165,11 @@ pg_dump() {
     '--host 127.0.0.1 --port 5440 --username postgres --dbname baseline_test --data-only --exclude-schema tiger --exclude-schema tiger_data --exclude-schema topology')
       if [[ "$SCHEMA_RESTORE" = 1 ]]; then
         printf 'parity\n' >> "$CALL_LOG"
-        printf '\\restrict xyz\nCOPY mrf.alembic_version FROM stdin;\n%s\n\\unrestrict xyz\n' "$([[ "$FAIL_STAGE" = parity ]] && echo drifted || echo head)"
+        printf '\\restrict xyz\nCOPY mrf.seed FROM stdin;\nrow\n\\.\nCOPY mrf.alembic_version FROM stdin;\n%s\n\\.\n\\unrestrict xyz\n' "$([[ "$FAIL_STAGE" = parity ]] && echo drifted || echo head)"
       else
         printf 'dump-data\n' >> "$CALL_LOG"
         [[ "$FAIL_STAGE" != dump-data ]] || return 17
-        printf '\\restrict abc\nCOPY mrf.alembic_version FROM stdin;\nhead\n\\unrestrict abc\n'
+        printf '\\restrict abc\nCOPY mrf.alembic_version FROM stdin;\nhead\n\\.\nCOPY mrf.seed FROM stdin;\nrow\n\\.\n\\unrestrict abc\n'
       fi ;;
     *) return 99 ;;
   esac
@@ -5194,7 +5195,7 @@ printf 'tests\n' >> "$CALL_LOG"
                 dump = cache_root / "baseline.sql"
                 if cache == "miss" and "dump-data" in expected and failure != "dump-data":
                     self.assertEqual(dump.read_text(), "CREATE SCHEMA mrf;\nCOPY mrf.alembic_version FROM stdin;\n")
-                    self.assertEqual((cache_root / "baseline.sql.data").read_text().splitlines()[2], "head")
+                    self.assertEqual((cache_root / "baseline.sql.data").read_text().splitlines()[2:4], ["head", "\\."])
                     self.assertEqual(sorted(path.name for path in cache_root.iterdir()), ["baseline.sql", "baseline.sql.data"])
                 elif cache == "miss":
                     self.assertFalse(dump.exists())
