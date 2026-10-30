@@ -74,7 +74,7 @@ runs:
     uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
     with:
       path: ${{ runner.temp }}/healthcare-schema-cache
-      key: healthcare-schema-${{ runner.os }}-${{ hashFiles('source/alembic/**', 'source/db/models/**', 'source/process/provider_directory_profile.py', 'source/requirements-ci.lock', 'source/.github/workflows/ci.yml', 'ci/scripts/healthcare/check') }}
+      key: healthcare-schema-${{ runner.os }}-${{ hashFiles('source/alembic/**', 'source/db/**', 'source/process/**', 'source/requirements-ci.lock', 'source/.github/workflows/ci.yml', 'ci/scripts/healthcare/check') }}
   - name: Expose migrated PostgreSQL schema cache
     if: inputs.postgres-schema-cache == 'true'
     run: printf 'CI_SCHEMA_CACHE=%s\n' "$RUNNER_TEMP/healthcare-schema-cache" >> "$GITHUB_ENV"
