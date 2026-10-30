@@ -925,7 +925,7 @@ def _stop_import_family_workers(root):
 def _postgres_preparation_functions():
     body = CHECK_FUNCTIONS.split("prepare_postgres() {", 1)[1].split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
     definitions = [node for node in ast.parse(body).body if isinstance(node, ast.AsyncFunctionDef)]
-    namespace = {"os": os, "sys": SimpleNamespace(argv=["-", "1"])}
+    namespace = {"os": os, "sys": SimpleNamespace(argv=["-", "1", "0"])}
     exec(compile(ast.Module(body=definitions, type_ignores=[]), "postgres-preparation", "exec"), namespace)
     return namespace
 
