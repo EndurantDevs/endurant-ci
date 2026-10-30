@@ -897,6 +897,8 @@ membership_refresh_native_test_paths() {
   local tests=(
     tests/test_registry_membership_refresh_execution_postgres.py
     tests/test_registry_membership_refresh_sources_postgres.py
+    tests/test_registry_aca_refresh_anchors_postgres.py
+    tests/test_registry_source_inventory_schema_postgres.py
   )
   local capability=(
     process/registry_membership_refresh_execution.py
@@ -928,9 +930,7 @@ membership_refresh_native_test_paths() {
     process/registry_refresh_anchor_service.py \
     tests/registry_membership_refresh_execution_support.py \
     tests/registry_aca_refresh_anchor_postgres_support.py \
-    tests/test_registry_aca_refresh_anchors_postgres.py \
-    tests/test_registry_membership_refresh_authority.py \
-    tests/test_registry_source_inventory_schema_postgres.py || return 1
+    tests/test_registry_membership_refresh_authority.py || return 1
   printf '%s\n' "${tests[@]}"
 }
 
