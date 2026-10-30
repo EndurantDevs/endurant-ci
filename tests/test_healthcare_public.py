@@ -5096,13 +5096,13 @@ run_wheel_tests() {
                  for failure in ("", "schema", "stamp", "upgrade", "vacuum") for cache in ("", "miss")]
         cases += [(ordinary, failure, "hit") for ordinary in (False, True)
                   for failure in ("", "schema", "restore", "parity", "vacuum")]
-        cases += [(True, "dump", "miss"), (True, "dump-data", "miss")]
+        cases += [(True, "dump", "miss"), (True, "dump-data", "miss"), (True, "", "exempt")]
         for ordinary, failure, cache in cases:
             with self.subTest(ordinary=ordinary, failure=failure, cache=cache), \
                     tempfile.TemporaryDirectory() as temporary:
                 log = Path(temporary) / "calls"
                 cache_root = Path(temporary) / "schema-cache"
-                if cache == "hit":
+                if cache in ("hit", "exempt"):
                     cache_root.mkdir()
                     (cache_root / "baseline.sql").write_text("CREATE SCHEMA mrf;\nCOPY mrf.alembic_version FROM stdin;\n")
                     (cache_root / "baseline.sql.data").write_text(
@@ -5115,6 +5115,7 @@ run_wheel_tests() {
                                "CALL_LOG": str(log), "FAIL_STAGE": failure,
                                "ORDINARY_MIGRATIONS": str(int(ordinary)),
                                "SCHEMA_RESTORE": str(int(cache == "hit")),
+                               "PREPARE_SHARD": "core-ptg" if cache == "exempt" else "",
                                "CI_SCHEMA_CACHE": str(cache_root) if cache else "",
                                "DB_USER": "legacy_login", "DB_PASSWORD": "legacy_password",
                                "HLTHPRT_DB_READER_USER": "existing_reader",
@@ -5174,7 +5175,7 @@ pg_dump() {
     *) return 99 ;;
   esac
 }
-prepare_postgres
+prepare_postgres "$PREPARE_SHARD"
 [[ "$DB_USER" = legacy_login && "$HLTHPRT_DB_USER" = postgres ]] || exit 98
 [[ "$DB_PASSWORD" = legacy_password && "$HLTHPRT_DB_PASSWORD" = synthetic ]] || exit 98
 [[ "$HLTHPRT_DB_READER_USER" = existing_reader ]] || exit 98
@@ -5185,6 +5186,9 @@ printf 'tests\n' >> "$CALL_LOG"
                 self.assertEqual(result.returncode, 1 if failure == "parity" else 17 if failure else 0, result.stderr)
                 if cache == "hit":
                     expected = ["schema", "restore", "parity", "vacuum", "tests"]
+                elif cache == "exempt":
+                    # The exempt lane neither restores the present dump nor writes one.
+                    expected = ["schema", "stamp", "upgrade", "vacuum", "tests"]
                 else:
                     expected = ["schema", "stamp", "upgrade", *(["dump", "dump-data"] if cache else []), "vacuum", "tests"]
                 if failure:
