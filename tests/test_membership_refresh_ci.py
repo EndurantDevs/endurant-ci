@@ -16,6 +16,8 @@ CAPABILITY = FUNCTIONS.split("membership_refresh_native_test_paths() {\n", 1)[1]
 NATIVE_TESTS = (
     "tests/test_registry_membership_refresh_execution_postgres.py",
     "tests/test_registry_membership_refresh_sources_postgres.py",
+    "tests/test_registry_aca_refresh_anchors_postgres.py",
+    "tests/test_registry_source_inventory_schema_postgres.py",
 )
 TRIGGERS = (
     "process/registry_membership_refresh_execution.py",
@@ -73,7 +75,7 @@ class MembershipRefreshChecks(unittest.TestCase):
             if name != "membership_refresh_native_test_paths"
         )
 
-    def test_optional_capability_requires_both_tests_and_clean_direct_dependencies(self):
+    def test_optional_capability_requires_all_tests_and_clean_direct_dependencies(self):
         script = "membership_refresh_native_test_paths\n"
         absent = self.shell(script)
         self.assertEqual((absent.returncode, absent.stdout), (0, ""), absent.stderr)
@@ -106,6 +108,14 @@ class MembershipRefreshChecks(unittest.TestCase):
         for relative in paths:
             (self.root / relative).unlink(missing_ok=True)
         self.assertNotEqual(self.shell(script, DELETED_PATH=NATIVE_TESTS[0]).returncode, 0)
+
+    def test_native_refresh_prerequisites_are_also_executed(self):
+        required_modules = set(re.findall(r"tests/test_[a-zA-Z0-9_]+_postgres\.py", CAPABILITY))
+        self.assertEqual(required_modules, set(NATIVE_TESTS))
+        self.populate()
+        result = self.shell("membership_refresh_native_test_paths\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), list(NATIVE_TESTS))
 
     def test_python_main_authenticates_wheel_before_collection_and_refuses_bad_artifacts(self):
         wheel = "ptg2_address_canon-0.0.0-cp314-cp314-linux_x86_64.whl"
