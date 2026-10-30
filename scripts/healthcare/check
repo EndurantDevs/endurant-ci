@@ -893,6 +893,47 @@ registry_source_lifecycle_native_test_paths() {
     tests/test_registry_composition_session_bridge_postgres.py
 }
 
+membership_refresh_native_test_paths() {
+  local tests=(
+    tests/test_registry_membership_refresh_execution_postgres.py
+    tests/test_registry_membership_refresh_sources_postgres.py
+  )
+  local capability=(
+    process/registry_membership_refresh_execution.py
+    process/registry_membership_refresh_sources.py
+  )
+  local source_path present=0
+  for source_path in "${capability[@]}" "${tests[@]}"; do
+    if [ -e "$repository_root/$source_path" ] || [ -L "$repository_root/$source_path" ] ||
+       git -C "$repository_root" ls-tree --name-only HEAD -- "$source_path" | grep -Fxq "$source_path"; then
+      present=1
+    fi
+  done
+  [ "$present" = 1 ] || return 0
+  require_native_source_files "${capability[@]}" "${tests[@]}" \
+    alembic/versions/20261028020000_registry_membership_refresh.py \
+    process/registry_company_approval_fence.py \
+    process/registry_membership_refresh_authority.py \
+    process/registry_membership_refresh_contract.py \
+    process/registry_membership_refresh_enrollment.py \
+    process/registry_membership_refresh_source_fence.py \
+    process/registry_membership_refresh_queue.py \
+    process/registry_membership_refresh_runtime.py \
+    process/registry_membership_refresh_aca.py \
+    process/registry_membership_refresh_cms.py \
+    process/registry_membership_refresh_generic.py \
+    process/registry_membership_refresh_generic_fence.py \
+    process/registry_membership_refresh_ptg_observation.py \
+    process/registry_refresh_anchor_contract.py \
+    process/registry_refresh_anchor_service.py \
+    tests/registry_membership_refresh_execution_support.py \
+    tests/registry_aca_refresh_anchor_postgres_support.py \
+    tests/test_registry_aca_refresh_anchors_postgres.py \
+    tests/test_registry_membership_refresh_authority.py \
+    tests/test_registry_source_inventory_schema_postgres.py || return 1
+  printf '%s\n' "${tests[@]}"
+}
+
 fhir_catalog_native_test_paths() {
   local tests=(
     tests/test_registry_fhir_catalog_custody_postgres.py
@@ -995,6 +1036,8 @@ run_python_main() {
   registry_migration_tests=$(registry_migration_native_test_paths) || return 1
   local fhir_catalog_tests
   fhir_catalog_tests=$(fhir_catalog_native_test_paths) || return 1
+  local membership_refresh_tests
+  membership_refresh_tests=$(membership_refresh_native_test_paths) || return 1
   local naic_tests
   naic_tests=$(naic_native_test_paths) || return 1
   local publication_worker_tests publication_ptg_runtime_tests manual_location_commands_tests
@@ -1014,6 +1057,7 @@ run_python_main() {
     wait "$install_pid"
     wait "$cargo_pid"
   fi
+  install_address_canon_wheel
 
   mapfile -t capacity_tests <<< "$capacity_test_paths"
   local collection_args=()
@@ -1048,6 +1092,9 @@ run_python_main() {
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
   done <<< "$fhir_catalog_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
+  done <<< "$membership_refresh_tests"
   if [[ -n "$fhir_catalog_tests" ]]; then
     collection_args+=(--ignore tests/test_registry_fhir_catalog_end_to_end.py)
   fi
@@ -2368,6 +2415,8 @@ run_network_registry_postgres() (
   registry_migration_tests=$(registry_migration_native_test_paths) || return 1
   local fhir_catalog_tests
   fhir_catalog_tests=$(fhir_catalog_native_test_paths) || return 1
+  local membership_refresh_tests
+  membership_refresh_tests=$(membership_refresh_native_test_paths) || return 1
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$company_group_tests"
@@ -2398,6 +2447,9 @@ run_network_registry_postgres() (
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$fhir_catalog_tests"
+  while IFS= read -r test_path; do
+    [ -z "$test_path" ] || registry_tests+=("$test_path")
+  done <<< "$membership_refresh_tests"
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$managed_provider_detail_tests"
