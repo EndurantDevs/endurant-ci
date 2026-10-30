@@ -925,7 +925,7 @@ def _stop_import_family_workers(root):
 def _postgres_preparation_functions():
     body = CHECK_FUNCTIONS.split("prepare_postgres() {", 1)[1].split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
     definitions = [node for node in ast.parse(body).body if isinstance(node, ast.AsyncFunctionDef)]
-    namespace = {"os": os, "sys": SimpleNamespace(argv=["-", "1"])}
+    namespace = {"os": os, "sys": SimpleNamespace(argv=["-", "1", "0"])}
     exec(compile(ast.Module(body=definitions, type_ignores=[]), "postgres-preparation", "exec"), namespace)
     return namespace
 
@@ -1215,6 +1215,7 @@ python() {
       command python3 "$@" ;;
     'scripts/ci/shard_pytest_nodeids.py '*)
       printf 'collection\t%s\n' "$*" >> "$CALL_LOG"
+      [ -z "${PYTEST_ADDOPTS-}" ] || { echo 'collection would be traced by coverage' >&2; return 97; }
       [ "$FAIL_STAGE" != collection ] || return 17
       command python3 - "$@" <<'PY'
 import pathlib
@@ -5091,11 +5092,20 @@ run_wheel_tests() {
                                      for call in administrator.execute.await_args_list))
 
     def test_postgres_baseline_cleanup_follows_migrations_and_refuses_failure(self):
-        cases = [(ordinary, failure) for ordinary in (False, True)
-                 for failure in ("", "schema", "stamp", "upgrade", "vacuum")]
-        for ordinary, failure in cases:
-            with self.subTest(ordinary=ordinary, failure=failure), tempfile.TemporaryDirectory() as temporary:
+        cases = [(ordinary, failure, cache) for ordinary in (False, True)
+                 for failure in ("", "schema", "stamp", "upgrade", "vacuum") for cache in ("", "miss")]
+        cases += [(ordinary, failure, "hit") for ordinary in (False, True)
+                  for failure in ("", "schema", "restore", "parity", "vacuum")]
+        cases += [(True, "dump", "miss"), (True, "dump-data", "miss")]
+        for ordinary, failure, cache in cases:
+            with self.subTest(ordinary=ordinary, failure=failure, cache=cache), \
+                    tempfile.TemporaryDirectory() as temporary:
                 log = Path(temporary) / "calls"
+                cache_root = Path(temporary) / "schema-cache"
+                if cache == "hit":
+                    cache_root.mkdir()
+                    (cache_root / "baseline.sql").write_text("CREATE SCHEMA mrf;\nCOPY mrf.alembic_version FROM stdin;\n")
+                    (cache_root / "baseline.sql.data").write_text("\\restrict abc\nCOPY mrf.alembic_version FROM stdin;\nhead\n\\unrestrict abc\n")
                 if ordinary:
                     migration = Path(temporary) / "alembic/versions/20261028110000_provider_directory_global_serving.py"
                     migration.parent.mkdir(parents=True)
@@ -5103,6 +5113,8 @@ run_wheel_tests() {
                 environment = {**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT),
                                "CALL_LOG": str(log), "FAIL_STAGE": failure,
                                "ORDINARY_MIGRATIONS": str(int(ordinary)),
+                               "SCHEMA_RESTORE": str(int(cache == "hit")),
+                               "CI_SCHEMA_CACHE": str(cache_root) if cache else "",
                                "DB_USER": "legacy_login", "DB_PASSWORD": "legacy_password",
                                "HLTHPRT_DB_READER_USER": "existing_reader",
                                "HLTHPRT_DB_HOST": "127.0.0.1", "HLTHPRT_DB_PORT": "5440",
@@ -5110,7 +5122,7 @@ run_wheel_tests() {
                                "HLTHPRT_DB_DATABASE": "baseline_test"}
                 script = CHECK_FUNCTIONS + r'''
 python() {
-  [[ "$*" = "- $ORDINARY_MIGRATIONS" ]] || return 98
+  [[ "$*" = "- $ORDINARY_MIGRATIONS $SCHEMA_RESTORE" ]] || return 98
   [[ "$HLTHPRT_DB_USER" = postgres && "$DB_USER" = legacy_login ]] || return 98
   cat >/dev/null
   printf 'schema\n' >> "$CALL_LOG"
@@ -5131,9 +5143,35 @@ alembic() {
 }
 psql() {
   [[ "$PGPASSWORD" = synthetic ]] || return 98
+  if [[ "$*" = "--host 127.0.0.1 --port 5440 --username postgres --dbname baseline_test --set ON_ERROR_STOP=1 --quiet --file $CI_SCHEMA_CACHE/baseline.sql" ]]; then
+    [[ "$SCHEMA_RESTORE" = 1 ]] || return 99
+    printf 'restore\n' >> "$CALL_LOG"
+    [[ "$FAIL_STAGE" != restore ]] || return 17
+    return 0
+  fi
   [[ "$*" = '--host 127.0.0.1 --port 5440 --username postgres --dbname baseline_test --set ON_ERROR_STOP=1 --command VACUUM (FREEZE, ANALYZE)' ]] || return 99
   printf 'vacuum\n' >> "$CALL_LOG"
   [[ "$FAIL_STAGE" != vacuum ]] || return 17
+}
+pg_dump() {
+  [[ "$PGPASSWORD" = synthetic && -n "$CI_SCHEMA_CACHE" ]] || return 98
+  case "$*" in
+    '--host 127.0.0.1 --port 5440 --username postgres --dbname baseline_test --exclude-schema tiger --exclude-schema tiger_data --exclude-schema topology')
+      [[ "$SCHEMA_RESTORE" = 0 ]] || return 98
+      printf 'dump\n' >> "$CALL_LOG"
+      [[ "$FAIL_STAGE" != dump ]] || return 17
+      printf 'CREATE SCHEMA mrf;\nCOPY mrf.alembic_version FROM stdin;\n' ;;
+    '--host 127.0.0.1 --port 5440 --username postgres --dbname baseline_test --data-only --exclude-schema tiger --exclude-schema tiger_data --exclude-schema topology')
+      if [[ "$SCHEMA_RESTORE" = 1 ]]; then
+        printf 'parity\n' >> "$CALL_LOG"
+        printf '\\restrict xyz\nCOPY mrf.alembic_version FROM stdin;\n%s\n\\unrestrict xyz\n' "$([[ "$FAIL_STAGE" = parity ]] && echo drifted || echo head)"
+      else
+        printf 'dump-data\n' >> "$CALL_LOG"
+        [[ "$FAIL_STAGE" != dump-data ]] || return 17
+        printf '\\restrict abc\nCOPY mrf.alembic_version FROM stdin;\nhead\n\\unrestrict abc\n'
+      fi ;;
+    *) return 99 ;;
+  esac
 }
 prepare_postgres
 [[ "$DB_USER" = legacy_login && "$HLTHPRT_DB_USER" = postgres ]] || exit 98
@@ -5143,11 +5181,23 @@ printf 'tests\n' >> "$CALL_LOG"
 '''
                 result = subprocess.run(["bash", "-eu"], input=script, env=environment,
                                         capture_output=True, text=True, timeout=15, check=False)
-                self.assertEqual(result.returncode, 17 if failure else 0, result.stderr)
-                expected = ["schema", "stamp", "upgrade", "vacuum", "tests"]
+                self.assertEqual(result.returncode, 1 if failure == "parity" else 17 if failure else 0, result.stderr)
+                if cache == "hit":
+                    expected = ["schema", "restore", "parity", "vacuum", "tests"]
+                else:
+                    expected = ["schema", "stamp", "upgrade", *(["dump", "dump-data"] if cache else []), "vacuum", "tests"]
                 if failure:
                     expected = expected[:expected.index(failure) + 1]
                 self.assertEqual(log.read_text().splitlines(), expected)
+                if failure == "parity":
+                    self.assertIn("Restored baseline rows differ", result.stderr)
+                dump = cache_root / "baseline.sql"
+                if cache == "miss" and "dump-data" in expected and failure != "dump-data":
+                    self.assertEqual(dump.read_text(), "CREATE SCHEMA mrf;\nCOPY mrf.alembic_version FROM stdin;\n")
+                    self.assertEqual((cache_root / "baseline.sql.data").read_text().splitlines()[2], "head")
+                    self.assertEqual(sorted(path.name for path in cache_root.iterdir()), ["baseline.sql", "baseline.sql.data"])
+                elif cache == "miss":
+                    self.assertFalse(dump.exists())
 
     def test_postgres_parallel_preparation_reports_each_failure_without_starting_tests(self):
         for failure in ("python-dependencies", "rust-debug-build", "postgres-prepare", "postgres-tests"):
