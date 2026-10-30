@@ -124,7 +124,7 @@ class MeasurementChecks(unittest.TestCase):
             self.assertEqual(manifest["run_attempt"], 2)
             self.assertEqual(manifest["producer_attempts"], producer_attempts)
             self.assertEqual(manifest["schema"], "public-source-measurement-v2")
-            self.assertEqual(len(manifest["sha256"]), 79)
+            self.assertEqual(len(manifest["sha256"]), 80)
             for shard in ("4", "5"):
                 producer = "mrf-python-coverage-main-" + shard
                 member = staging / f"{producer}-123-{producer_attempts[producer]}"
@@ -191,10 +191,10 @@ class MeasurementChecks(unittest.TestCase):
             output = root / "output"
             MEASUREMENT.publish(staging, output, IDENTITY, "123", "2", "c" * 40)
             measurement = MEASUREMENT.read_json(output / "measurement.json")
-            self.assertEqual(len(MEASUREMENT.producer_files()), 69)
+            self.assertEqual(len(MEASUREMENT.producer_files()), 70)
             self.assertEqual(len(MEASUREMENT.transport_files()), 9)
-            self.assertEqual(len(measurement["producer_attempts"]), 69)
-            self.assertEqual(len(measurement["sha256"]), 79)
+            self.assertEqual(len(measurement["producer_attempts"]), 70)
+            self.assertEqual(len(measurement["sha256"]), 80)
             expected = {kind: set() for kind in ("files", "contexts", "arcs")}
             for shard in MEASUREMENT.POSTGRES_SHARDS:
                 report = f".coverage.postgres.{shard}"
@@ -215,7 +215,7 @@ class MeasurementChecks(unittest.TestCase):
             for name, content in original_bytes.items():
                 (raw / name).write_bytes(content)
             with patch.object(MEASUREMENT, "MAX_TOTAL_BYTES", 1):
-                self.assertEqual(len(MEASUREMENT.validate_input_files(raw, IDENTITY)), 138)
+                self.assertEqual(len(MEASUREMENT.validate_input_files(raw, IDENTITY)), 140)
 
     def test_transport_rejects_missing_raw_mixed_and_extra_layouts(self):
         with tempfile.TemporaryDirectory() as temporary:

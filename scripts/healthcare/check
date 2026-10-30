@@ -74,7 +74,7 @@ MODE is one of:
   container-package
   security
   redis
-  postgres core-services|core-services-2|core-imports|core-imports-2|core-snapshots|core-snapshots-2|core-ptg|registry-0..47|fhir-catalog-integration|directory-source|directory-source-2|directory-storage|directory-address|profile-storage|profile-publication
+  postgres core-services|core-services-2|core-imports|core-imports-2|core-snapshots|core-snapshots-2|core-ptg|registry-0..47|cms-successor|fhir-catalog-integration|directory-source|directory-source-2|directory-storage|directory-address|profile-storage|profile-publication
   fhir-catalog-capability
   native-wheel OUTPUT_DIRECTORY
 EOF
@@ -934,6 +934,146 @@ membership_refresh_native_test_paths() {
   printf '%s\n' "${tests[@]}"
 }
 
+registry_serving_native_test_paths() {
+  local tests=(
+    tests/test_entity_address_rows_postgres.py
+    tests/test_network_address_artifact_concurrency_postgres.py
+    tests/test_network_address_artifact_postgres.py
+    tests/test_network_address_catalog_subjects_postgres.py
+    tests/test_network_address_read_race_postgres.py
+    tests/test_network_compact_address_carriers_postgres.py
+    tests/test_network_compact_address_origin_postgres.py
+    tests/test_network_compact_address_postgres.py
+    tests/test_network_compact_carrier_publication_postgres.py
+    tests/test_network_compact_core_readers_postgres.py
+    tests/test_network_compact_custom_offices_postgres.py
+    tests/test_network_compact_custom_publication_postgres.py
+    tests/test_network_compact_offices_postgres.py
+    tests/test_network_compact_publication_postgres.py
+    tests/test_network_compact_qualification_postgres.py
+    tests/test_network_compact_retention_postgres.py
+    tests/test_network_compact_slice_validation_postgres.py
+    tests/test_network_core_layer_provider_postgres.py
+    tests/test_network_custom_office_rows_postgres.py
+    tests/test_network_direct_heap_reads_postgres.py
+    tests/test_network_fhir_product_membership_postgres.py
+    tests/test_network_membership_slices_postgres.py
+    tests/test_network_npi_artifact_postgres.py
+    tests/test_network_optional_sql_recovery_postgres.py
+    tests/test_network_provider_only_read_postgres.py
+    tests/test_network_provider_only_routes_postgres.py
+    tests/test_network_retained_source_custody_postgres.py
+    tests/test_network_source_alias_compact_coverage_postgres.py
+    tests/test_network_source_office_aliases_postgres.py
+    tests/test_network_source_office_aliases_ptg_postgres.py
+    tests/test_plan_pricing_zip_api_activation_postgres.py
+    tests/test_plan_release_api_metadata_postgres.py
+    tests/test_provider_directory_generic_capture_continuation_postgres.py
+    tests/test_provider_directory_retained_fhir_metadata_postgres.py
+    tests/test_provider_profile_records_postgres.py
+    tests/test_registry_candidate_custody_ptg_postgres.py
+    tests/test_registry_cms_refresh_anchors_postgres.py
+    tests/test_registry_compact_source_offices_postgres.py
+    tests/test_registry_compact_target_coverage_postgres.py
+    tests/test_registry_compact_target_explain_postgres.py
+    tests/test_registry_composition_resume_postgres.py
+    tests/test_registry_fhir_catalog_observation_sync_postgres.py
+    tests/test_registry_fhir_catalog_observed_source_postgres.py
+    tests/test_registry_fhir_catalog_preparation_postgres.py
+    tests/test_registry_fhir_catalog_sealed_attachment_postgres.py
+    tests/test_registry_fhir_preservation_precedence_postgres.py
+    tests/test_registry_fhir_serving_preservation.py
+    tests/test_registry_generic_capture_continuation_postgres.py
+    tests/test_registry_generic_fhir_reuse_postgres.py
+    tests/test_registry_generic_source_successor_postgres.py
+    tests/test_registry_membership_refresh_cms_postgres.py
+    tests/test_registry_membership_refresh_generic_fence_postgres.py
+    tests/test_registry_membership_refresh_generic_postgres.py
+    tests/test_registry_membership_refresh_ptg_observation_postgres.py
+    tests/test_registry_membership_refresh_queue_postgres.py
+    tests/test_registry_membership_refresh_runtime_postgres.py
+    tests/test_registry_ptg_refresh_anchors_postgres.py
+    tests/test_registry_refresh_anchor_service_postgres.py
+    tests/test_registry_source_contribution_artifacts_postgres.py
+    tests/test_registry_source_fact_legacy_postgres.py
+    tests/test_registry_source_fact_offices_postgres.py
+    tests/test_registry_source_fact_references_postgres.py
+    tests/test_registry_source_inventory_publication_postgres.py
+    tests/test_registry_source_inventory_registration_postgres.py
+    tests/test_registry_source_inventory_store_postgres.py
+    tests/test_registry_source_office_custody_postgres.py
+    tests/test_registry_source_office_not_ready_postgres.py
+    tests/test_registry_source_office_origin_postgres.py
+    tests/test_registry_source_output_custody_postgres.py
+    tests/test_registry_source_retention_locks_postgres.py
+    tests/test_verified_office_source_witnesses_v2_postgres.py
+    tests/test_verified_witness_custom_publication_postgres.py
+    tests/test_verified_witness_office_aliases_postgres.py
+    tests/test_verified_witness_readiness_refusal_postgres.py
+  )
+  local capability=(
+    api/network_compact_address.py
+    process/network_membership_slices.py
+    process/registry_source_inventory_store.py
+    process/registry_fhir_catalog_observed_source.py
+  )
+  local source_path present=0
+  for source_path in "${capability[@]}" "${tests[@]}"; do
+    if [ -e "$repository_root/$source_path" ] || [ -L "$repository_root/$source_path" ]; then
+      present=1
+      break
+    fi
+  done
+  if [ "$present" != 1 ] &&
+     git -C "$repository_root" ls-tree --name-only HEAD -- "${capability[@]}" "${tests[@]}" | grep -E '.' >/dev/null; then
+    present=1
+  fi
+  [ "$present" = 1 ] || return 0
+  require_native_source_files "${capability[@]}" "${tests[@]}" \
+    tests/fhir_catalog_serving_rollover_support.py \
+    tests/fhir_catalog_sync_integration_support.py \
+    tests/generic_fhir_capture_postgres_support.py \
+    tests/generic_refresh_fence_postgres_support.py \
+    tests/generic_source_successor_postgres_support.py \
+    tests/registry_aca_refresh_anchor_postgres_support.py \
+    tests/registry_compact_source_office_postgres_support.py \
+    tests/registry_compact_target_postgres_support.py \
+    tests/registry_membership_refresh_execution_support.py \
+    tests/registry_membership_refresh_runtime_support.py \
+    tests/source_contribution_custody_postgres_support.py \
+    tests/test_network_fhir_retained_native.py \
+    tests/test_registry_aca_refresh_anchors_postgres.py \
+    tests/test_registry_composition_resume.py \
+    tests/test_registry_fhir_catalog_custody_postgres.py \
+    tests/test_registry_fhir_catalog_enrichment.py \
+    tests/test_registry_fhir_catalog_read.py \
+    tests/test_registry_fhir_catalog_sources.py \
+    tests/test_registry_fhir_catalog_sync_postgres.py \
+    tests/test_registry_membership_refresh_authority.py \
+    tests/test_registry_membership_refresh_contract.py \
+    tests/test_registry_membership_refresh_execution_postgres.py \
+    tests/test_registry_membership_refresh_runtime.py \
+    tests/test_registry_membership_refresh_sources_postgres.py \
+    tests/test_registry_refresh_anchor_contract.py \
+    tests/test_registry_source_contributions.py \
+    tests/test_registry_source_inventory_contract.py \
+    tests/test_registry_source_inventory_schema_postgres.py \
+    tests/test_registry_source_office_summary_v3.py \
+    tests/verified_witness_readiness_refusal_support.py || return 1
+  printf '%s\n' "${tests[@]}"
+}
+
+registry_serving_external_native_nodeids() {
+  # Connected router proofs require a separately prepared peer runtime.
+  printf '%s\n' \
+    'tests/test_network_core_layer_provider_postgres.py::test_real_core_layer_transport_preserves_two_custodied_generations[modern]' \
+    tests/test_registry_generic_source_successor_postgres.py::test_generic_source_successor_core_layer_transport
+}
+
+registry_cms_successor_native_nodeid() {
+  printf '%s\n' tests/test_registry_membership_refresh_cms_postgres.py::test_current_cms_edition_keeps_original_scope_and_pins_real_successor
+}
+
 fhir_catalog_native_test_paths() {
   local tests=(
     tests/test_registry_fhir_catalog_custody_postgres.py
@@ -1038,6 +1178,10 @@ run_python_main() {
   fhir_catalog_tests=$(fhir_catalog_native_test_paths) || return 1
   local membership_refresh_tests
   membership_refresh_tests=$(membership_refresh_native_test_paths) || return 1
+  local registry_serving_tests
+  registry_serving_tests=$(registry_serving_native_test_paths) || return 1
+  local cms_successor_nodeid
+  cms_successor_nodeid=$(registry_cms_successor_native_nodeid)
   local naic_tests
   naic_tests=$(naic_native_test_paths) || return 1
   local publication_worker_tests publication_ptg_runtime_tests manual_location_commands_tests
@@ -1095,8 +1239,16 @@ run_python_main() {
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
   done <<< "$membership_refresh_tests"
+  while IFS= read -r test_path; do
+    if [[ -n "$test_path" && "$test_path" != "${cms_successor_nodeid%%::*}" ]]; then
+      collection_args+=(--ignore "$test_path")
+    fi
+  done <<< "$registry_serving_tests"
+  if [[ -n "$registry_serving_tests" ]]; then
+    collection_args+=(--deselect "$cms_successor_nodeid")
+  fi
   if [[ -n "$fhir_catalog_tests" ]]; then
-    collection_args+=(--ignore tests/test_registry_fhir_catalog_end_to_end.py)
+    collection_args+=(--deselect tests/test_registry_fhir_catalog_end_to_end.py::test_import_sync_query_replay_and_disappearance)
   fi
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || collection_args+=(--ignore "$test_path")
@@ -2189,7 +2341,9 @@ run_scoped_archive_postgres_body() {
     wait "$!" || exit "$?"
   else
     local deadline=420s
-    if [[ "$#" = 3 && "$1" = tests/test_registry_fhir_catalog_end_to_end.py::test_import_sync_query_replay_and_disappearance && "$2" = --junitxml ]]; then
+    if [[ "$#" = 3 && "$2" = --junitxml &&
+          ( "$1" = tests/test_registry_fhir_catalog_end_to_end.py::test_import_sync_query_replay_and_disappearance ||
+            "$1" = "$(registry_cms_successor_native_nodeid)" ) ]]; then
       deadline=1500s
     fi
     timeout --foreground "$deadline" python -m pytest -q "$@" || exit "$?"
@@ -2453,6 +2607,10 @@ run_network_registry_postgres() (
   fhir_catalog_tests=$(fhir_catalog_native_test_paths) || return 1
   local membership_refresh_tests
   membership_refresh_tests=$(membership_refresh_native_test_paths) || return 1
+  local registry_serving_tests
+  registry_serving_tests=$(registry_serving_native_test_paths) || return 1
+  local cms_successor_nodeid
+  cms_successor_nodeid=$(registry_cms_successor_native_nodeid)
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$company_group_tests"
@@ -2486,6 +2644,11 @@ run_network_registry_postgres() (
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$membership_refresh_tests"
+  while IFS= read -r test_path; do
+    if [[ -n "$test_path" && "$test_path" != "${cms_successor_nodeid%%::*}" ]]; then
+      registry_tests+=("$test_path")
+    fi
+  done <<< "$registry_serving_tests"
   while IFS= read -r test_path; do
     [ -z "$test_path" ] || registry_tests+=("$test_path")
   done <<< "$managed_provider_detail_tests"
@@ -2583,6 +2746,7 @@ run_network_registry_postgres() (
   python -c 'import asyncpg; import ptg2_address_canon as native; assert all(callable(getattr(native, name, None)) for name in ("encode_network_membership_batch", "encode_cms_mlr_observations", "encode_cms_planfinder_observations", "validate_network_catalog_batch", "validate_company_network_assertions", "encode_network_source_binding_batch", "build_registry_network_coverage", "parse_registry_target_ledger", "encode_registry_target_ledger_artifact", "encode_registry_required_target_review_artifact", "validate_registry_required_target_review_artifacts", "validate_registry_required_target_ledger_artifact", "extract_fhir_network_identity_batch", "encode_fhir_network_identity_batch", "canonicalize_batch", "canon_version")), "Native registry extension is incomplete"'
   registry_report=""
   registry_nodeids=""
+  registry_explain_directory=""
   cleanup_registry_report() {
     local status=$?
     trap - EXIT
@@ -2592,18 +2756,26 @@ run_network_registry_postgres() (
     if [[ -n "$registry_nodeids" ]] && ! rm -f -- "$registry_nodeids"; then
       [ "$status" -ne 0 ] || status=1
     fi
+    if [[ -n "$registry_explain_directory" ]] && ! rm -rf -- "$registry_explain_directory"; then
+      [ "$status" -ne 0 ] || status=1
+    fi
     ci_phase_end "$status"
     exit "$status"
   }
   trap cleanup_registry_report EXIT
   registry_report=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-network-registry.XXXXXX")
   local registry_arguments=("${registry_tests[@]}")
+  if [[ -n "$registry_serving_tests" ]]; then
+    while IFS= read -r test_path; do
+      registry_arguments+=(--deselect "$test_path")
+    done < <(registry_serving_external_native_nodeids)
+  fi
   if [[ -n "$shard" ]]; then
     registry_nodeids=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-registry-nodeids.XXXXXX")
     ci_phase_begin network-registry-collection
     # Collection only lists node IDs; coverage tracing from PYTEST_ADDOPTS would just slow it down.
     PYTEST_ADDOPTS='' python scripts/ci/shard_pytest_nodeids.py --shard-count 48 --shard-index "$shard" \
-      --output "$registry_nodeids" -- "${registry_tests[@]}"
+      --output "$registry_nodeids" -- "${registry_arguments[@]}"
     ci_phase_end
     registry_arguments=("@$registry_nodeids")
   fi
@@ -2611,18 +2783,62 @@ run_network_registry_postgres() (
   local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
   if [[ -n "$cms_profile_tests" || -n "$cms_profile_directory_tests" ||
         -n "$managed_provider_detail_tests" || -n "$managed_provider_collection_tests" ||
-        -n "$managed_pricing_source_tests" || -n "$registry_source_lifecycle_tests" ]]; then
+        -n "$managed_pricing_source_tests" || -n "$registry_source_lifecycle_tests" ||
+        -n "$registry_serving_tests" ]]; then
     export HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN="$archive_url/$database"
   fi
   ci_phase_begin network-registry-postgres-tests
-  if [ "$company_present" = 1 ] || [ -n "$publication_ptg_runtime_tests" ] || [ -n "$benefit_plan_tests" ] || [ -n "$registry_source_lifecycle_tests" ]; then
+  if [ "$company_present" = 1 ] || [ -n "$publication_ptg_runtime_tests" ] ||
+     [ -n "$benefit_plan_tests" ] || [ -n "$registry_source_lifecycle_tests" ] ||
+     [ -n "$registry_serving_tests" ]; then
     export HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST=1
     export HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN="$archive_url/$database"
+  fi
+  if [[ -n "$registry_serving_tests" ]]; then
+    export NETWORK_SQL_RECOVERY_TEST_DSN="$archive_url/$database"
+    registry_explain_directory=$(mktemp -d "${RUNNER_TEMP:-/tmp}/healthcare-network-explain.XXXXXX")
+    export NETWORK_COMPACT_TARGET_EXPLAIN_OUTPUT="$registry_explain_directory"
   fi
   HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN="$archive_url/$database" \
     run_scoped_archive_postgres "$database" NETWORK_REGISTRY_TEST_DSN "$archive_url" \
       "${registry_arguments[@]}" --verbosity=1 --junitxml "$registry_report"
   validate_registry_native_report "$registry_report" "$registry_nodeids" "${registry_tests[@]}"
+)
+
+run_cms_successor_postgres() (
+  local tests nodeid report selection directory= database archive_url
+  tests=$(registry_serving_native_test_paths) || exit "$?"
+  if [[ -n "$tests" ]]; then
+    nodeid=$(registry_cms_successor_native_nodeid)
+  else
+    require_native_source_files tests/test_network_registry_postgres.py \
+      process/network_registry_identity.py db/models/network_registry.py \
+      db/connection.py db/registry_schema.py \
+      alembic/versions/20261007010000_managed_network_registry.py || exit "$?"
+    nodeid=tests/test_network_registry_postgres.py::test_identity_replay_archive_and_transaction_rollback
+  fi
+  install_address_canon_wheel
+  cleanup_cms_successor_report() {
+    local status=$?
+    trap - EXIT
+    if [[ -n "$directory" ]] && ! rm -rf -- "$directory"; then
+      [ "$status" -ne 0 ] || status=1
+    fi
+    ci_phase_end "$status"
+    exit "$status"
+  }
+  trap cleanup_cms_successor_report EXIT
+  directory=$(mktemp -d "${RUNNER_TEMP:-/tmp}/healthcare-cms-successor.XXXXXX")
+  report=$directory/report.xml
+  selection=$directory/selection
+  printf '%s\n' "$nodeid" > "$selection"
+  database="hc_cms_successor_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+  archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
+  export HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN="$archive_url/$database"
+  ci_phase_begin cms-successor-postgres-tests
+  run_scoped_archive_postgres "$database" NETWORK_REGISTRY_TEST_DSN "$archive_url" \
+    "$nodeid" --junitxml "$report" || exit "$?"
+  validate_registry_native_report "$report" "$selection" "${nodeid%%::*}" || exit "$?"
 )
 
 run_fhir_catalog_integration() (
@@ -4462,7 +4678,7 @@ run_postgres() {
     printf '%s\n' 'Full PostgreSQL execution required: native preparation, owned databases and required reports share this stage'
   fi
   case "$shard" in
-    core|provider-directory|provider-profile|core-services|core-services-2|core-imports|core-imports-2|core-snapshots|core-snapshots-2|core-ptg|registry-[0-9]|registry-[123][0-9]|registry-4[0-7]|fhir-catalog-integration|directory-source|directory-source-2|directory-storage|directory-address|profile-storage|profile-publication) ;;
+    core|provider-directory|provider-profile|core-services|core-services-2|core-imports|core-imports-2|core-snapshots|core-snapshots-2|core-ptg|registry-[0-9]|registry-[123][0-9]|registry-4[0-7]|cms-successor|fhir-catalog-integration|directory-source|directory-source-2|directory-storage|directory-address|profile-storage|profile-publication) ;;
     *) usage ;;
   esac
   if [ "${CI_DEPS_READY:-0}" = 1 ]; then
@@ -4503,7 +4719,9 @@ run_postgres() {
     run_fhir_catalog_integration
     return
   fi
-  if [[ "$shard" = core ]]; then
+  if [[ "$shard" = cms-successor ]]; then
+    run_cms_successor_postgres
+  elif [[ "$shard" = core ]]; then
     run_network_registry_postgres
   elif [[ "$shard" = registry-* ]]; then
     run_network_registry_postgres "${shard#registry-}"

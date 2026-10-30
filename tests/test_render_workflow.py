@@ -160,7 +160,7 @@ class RenderWorkflowChecks(unittest.TestCase):
                     workflow = yaml.safe_load(rendered)
                     if kind == "healthcare":
                         self.assertEqual(sum(len(job.get("strategy", {}).get("matrix", {}).get("include", [None]))
-                                             for job in workflow["jobs"].values()), 81)
+                                             for job in workflow["jobs"].values()), 82)
                     self.assertEqual(workflow["on"], original["on"])
                     expected_jobs = {"smoke", "dev-image-publication", *canonical["jobs"]}
                     if kind == "drug":

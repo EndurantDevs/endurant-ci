@@ -247,7 +247,7 @@ class ProfileWalCollectionTests(unittest.TestCase):
             )
             self.assertNotIn("CI_POSTGRES_SERVICE_ID", job["env"])
             self.assertEqual(job["services"]["postgres"]["image"], REFERENCE)
-            self.assertEqual(job["timeout-minutes"], 20)
+            self.assertEqual(job["timeout-minutes"], "${{ matrix.shard == 'cms-successor' && 30 || 20 }}")
             self.assertEqual(
                 sum(
                     len(
@@ -255,7 +255,7 @@ class ProfileWalCollectionTests(unittest.TestCase):
                     )
                     for job in workflow["jobs"].values()
                 ),
-                81,
+                82,
             )
 
     def test_only_current_wal_case_moves_and_legacy_modules_keep_their_route(self):

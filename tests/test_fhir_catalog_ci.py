@@ -20,6 +20,14 @@ NATIVE_TESTS = tuple(
                  "reference_rollup", "retained", "sources", "store", "sync")
 )
 NODEID = "tests/test_registry_fhir_catalog_end_to_end.py::test_import_sync_query_replay_and_disappearance"
+CMS_NODEID = (
+    "tests/test_registry_membership_refresh_cms_postgres.py::"
+    "test_current_cms_edition_keeps_original_scope_and_pins_real_successor"
+)
+BASELINE_NODEID = (
+    "tests/test_network_registry_postgres.py::"
+    "test_identity_replay_archive_and_transaction_rollback"
+)
 
 
 class CatalogChecks(unittest.TestCase):
@@ -118,8 +126,10 @@ run_python_main 0
         self.assertEqual(result.returncode, 0, result.stderr)
         arguments = (self.root / "main-arguments").read_text().splitlines()
         ignored = {arguments[index + 1] for index, value in enumerate(arguments) if value == "--ignore"}
+        deselected = [arguments[index + 1] for index, value in enumerate(arguments) if value == "--deselect"]
         self.assertTrue(set(NATIVE_TESTS) <= ignored)
-        self.assertIn(NODEID.split("::")[0], ignored)
+        self.assertNotIn(NODEID.split("::")[0], ignored)
+        self.assertEqual(deselected, [NODEID])
         self.assertNotIn("tests/test_registry_fhir_catalog_extraction.py", ignored)
         registry = FUNCTIONS.split("run_network_registry_postgres() (\n", 1)[1].split("\n)\n", 1)[0]
         self.assertIn('fhir_catalog_tests=$(fhir_catalog_native_test_paths)', registry)
@@ -135,6 +145,10 @@ run_scoped_archive_postgres hc_catalog_test NETWORK_REGISTRY_TEST_DSN postgresql
 """
         selections = (
             (f"{NODEID} --junitxml report.xml", "1500s", True),
+            (f"{CMS_NODEID} --junitxml report.xml", "1500s", False),
+            (f"{CMS_NODEID} --junitxml report.xml extra", "420s", False),
+            (CMS_NODEID.split("::")[0], "420s", False),
+            (f"{BASELINE_NODEID} --junitxml report.xml", "420s", False),
             (f"{NODEID} --junitxml report.xml tests/test_other.py", "420s", True),
             ("tests/test_registry_fhir_catalog_store_postgres.py", "420s", True),
             ("tests/test_registry_manual_source_swap_postgres.py", "420s", True),

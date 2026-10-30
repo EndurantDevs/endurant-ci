@@ -18,7 +18,7 @@ POSTGRES_SHARDS = (
     "core-services", "core-services-2", "core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", "core-ptg",
     *(f"registry-{index}" for index in range(48)),
     "directory-source", "directory-source-2", "directory-storage", "directory-address",
-    "profile-storage", "profile-publication",
+    "profile-storage", "profile-publication", "cms-successor",
 )
 POSTGRES_COHORT_FILENAME = ".coverage-postgres-cohort.json"
 POSTGRES_COVERAGE_FILENAME = ".coverage.postgres.combined"
