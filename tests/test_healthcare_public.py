@@ -5095,7 +5095,7 @@ run_wheel_tests() {
         cases = [(ordinary, failure, cache) for ordinary in (False, True)
                  for failure in ("", "schema", "stamp", "upgrade", "vacuum") for cache in ("", "miss")]
         cases += [(ordinary, failure, "hit") for ordinary in (False, True)
-                  for failure in ("", "schema", "restore", "parity", "vacuum")]
+                  for failure in ("", "schema", "restore", "parity", "parity-swap", "vacuum")]
         cases += [(True, "dump", "miss"), (True, "dump-data", "miss"), (True, "", "exempt")]
         for ordinary, failure, cache in cases:
             with self.subTest(ordinary=ordinary, failure=failure, cache=cache), \
@@ -5166,7 +5166,12 @@ pg_dump() {
     '--host 127.0.0.1 --port 5440 --username postgres --dbname baseline_test --data-only --exclude-schema tiger --exclude-schema tiger_data --exclude-schema topology')
       if [[ "$SCHEMA_RESTORE" = 1 ]]; then
         printf 'parity\n' >> "$CALL_LOG"
-        printf '\\restrict xyz\nCOPY mrf.seed FROM stdin;\nrow\n\\.\nCOPY mrf.alembic_version FROM stdin;\n%s\n\\.\n\\unrestrict xyz\n' "$([[ "$FAIL_STAGE" = parity ]] && echo drifted || echo head)"
+        if [[ "$FAIL_STAGE" = parity-swap ]]; then
+          # Same lines, rows swapped between tables: the version row must not pass as a seed row.
+          printf '\\restrict xyz\nCOPY mrf.seed FROM stdin;\nhead\n\\.\nCOPY mrf.alembic_version FROM stdin;\nrow\n\\.\n\\unrestrict xyz\n'
+        else
+          printf '\\restrict xyz\nCOPY mrf.seed FROM stdin;\nrow\n\\.\nCOPY mrf.alembic_version FROM stdin;\n%s\n\\.\n\\unrestrict xyz\n' "$([[ "$FAIL_STAGE" = parity ]] && echo drifted || echo head)"
+        fi
       else
         printf 'dump-data\n' >> "$CALL_LOG"
         [[ "$FAIL_STAGE" != dump-data ]] || return 17
@@ -5183,7 +5188,7 @@ printf 'tests\n' >> "$CALL_LOG"
 '''
                 result = subprocess.run(["bash", "-eu"], input=script, env=environment,
                                         capture_output=True, text=True, timeout=15, check=False)
-                self.assertEqual(result.returncode, 1 if failure == "parity" else 17 if failure else 0, result.stderr)
+                self.assertEqual(result.returncode, 1 if failure.startswith("parity") else 17 if failure else 0, result.stderr)
                 if cache == "hit":
                     expected = ["schema", "restore", "parity", "vacuum", "tests"]
                 elif cache == "exempt":
@@ -5192,9 +5197,9 @@ printf 'tests\n' >> "$CALL_LOG"
                 else:
                     expected = ["schema", "stamp", "upgrade", *(["dump", "dump-data"] if cache else []), "vacuum", "tests"]
                 if failure:
-                    expected = expected[:expected.index(failure) + 1]
+                    expected = expected[:expected.index(failure.split("-")[0]) + 1]
                 self.assertEqual(log.read_text().splitlines(), expected)
-                if failure == "parity":
+                if failure.startswith("parity"):
                     self.assertIn("Restored baseline rows differ", result.stderr)
                 dump = cache_root / "baseline.sql"
                 if cache == "miss" and "dump-data" in expected and failure != "dump-data":
