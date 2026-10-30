@@ -109,6 +109,7 @@ fhir_catalog_native_test_paths
 git() { :; }
 mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
 prepare_debug_rust_binaries() { :; }
+install_address_canon_wheel() { :; }
 public_common_test_run() { printf '%s\\n' "$@" > "$SOURCE_ROOT/main-arguments"; }
 timeout() { :; }
 run_python_main 0

@@ -2104,6 +2104,7 @@ run_registry_ptg_scope_postgres postgresql://synthetic/runtime_test
                 script = CHECK_FUNCTIONS + r'''
 mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
 prepare_debug_rust_binaries() { :; }
+install_address_canon_wheel() { :; }
 python() { printf '%s\n' "$*" >> "$CALL_LOG"; }
 timeout() { printf 'timeout %s %s\n' "$1" "$2" >> "$CALL_LOG"; shift 2; "$@"; }
 for shard in 0 1 2 3 4 5; do run_python_main "$shard"; done
@@ -2241,6 +2242,7 @@ for shard in 0 1 2 3 4 5; do run_python_main "$shard"; done
     }
     mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
     prepare_debug_rust_binaries() { printf 'build\n' >> "$CALL_LOG"; }
+    install_address_canon_wheel() { :; }
     python() { printf '%s\n' "$*" >> "$CALL_LOG"; }
     timeout() { shift 2; "$@"; }
     for shard in 0 1 2 3 4 5; do run_python_main "$shard" || exit 1; done
@@ -3756,6 +3758,7 @@ ci_phase_end
                 script = CHECK_FUNCTIONS + r'''
 mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
 prepare_debug_rust_binaries() { :; }
+install_address_canon_wheel() { :; }
 create_test_database() { printf 'create\t%s\n' "$1" >> "$CALL_LOG"; }
 drop_test_database() { printf 'drop\t%s\n' "$1" >> "$CALL_LOG"; }
 python() {
@@ -5331,6 +5334,7 @@ run_container_package
                 script = CHECK_FUNCTIONS + r'''
 mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
 prepare_debug_rust_binaries() { :; }
+install_address_canon_wheel() { :; }
 create_test_database() { :; }
 drop_test_database() { :; }
 run_scoped_archive_postgres() { :; }
@@ -5466,6 +5470,7 @@ git() {
 git() { return 0; }
 mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
 prepare_debug_rust_binaries() { :; }
+install_address_canon_wheel() { :; }
 run_import_family_postgres() { :; }
 create_test_database() {
   printf 'create\t%s\n' "$1" >> "$CALL_LOG"
@@ -5825,6 +5830,7 @@ exit "$status"
 git() { return 0; }
 mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
 prepare_debug_rust_binaries() { :; }
+install_address_canon_wheel() { :; }
 create_test_database() { :; }
 drop_test_database() { :; }
 run_scoped_archive_postgres() {
@@ -6125,6 +6131,7 @@ run_import_family_postgres postgresql://synthetic
                     script = CHECK_FUNCTIONS + r'''
 mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
 prepare_debug_rust_binaries() { :; }
+install_address_canon_wheel() { :; }
 create_test_database() { printf 'create\t%s\n' "$1" >> "$CALL_LOG"; }
 drop_test_database() { printf 'drop\t%s\n' "$1" >> "$CALL_LOG"; }
 run_scoped_archive_postgres() { :; }
@@ -6261,6 +6268,7 @@ run_core_postgres "$BASE_DSN" "$ROUTE_LANE"
                 script = CHECK_FUNCTIONS + r'''
 mapfile() { capacity_tests=(tests/test_capacity_placeholder.py); }
 prepare_debug_rust_binaries() { :; }
+install_address_canon_wheel() { :; }
 create_test_database() { printf 'create\t%s\n' "$1" >> "$CALL_LOG"; }
 drop_test_database() { printf 'drop\t%s\n' "$1" >> "$CALL_LOG"; }
 run_scoped_archive_postgres() { :; }
