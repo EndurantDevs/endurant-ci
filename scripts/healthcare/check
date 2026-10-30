@@ -1917,11 +1917,17 @@ PY
 }
 
 prepare_postgres() {
-  local ordinary_migrations=0
+  local ordinary_migrations=0 restore=0
+  # The freshly migrated baseline (schema and seeded rows) is dumped once per migration-source
+  # hash (see the setup action) and restored by every later lane instead of replaying the chain.
+  local schema_dump=${CI_SCHEMA_CACHE:+$CI_SCHEMA_CACHE/baseline.sql}
   if [ -f "$repository_root/alembic/versions/20261028110000_provider_directory_global_serving.py" ]; then
     ordinary_migrations=1
   fi
-  python - "$ordinary_migrations" <<'PY'
+  if [ -n "$schema_dump" ] && [ -s "$schema_dump" ] && [ -s "$schema_dump.data" ]; then
+    restore=1
+  fi
+  python - "$ordinary_migrations" "$restore" <<'PY'
 import asyncio
 import os
 import sys
@@ -1966,6 +1972,7 @@ async def main() -> None:
     )
     conn = await asyncpg.connect(**settings)
     ordinary_migrations = sys.argv[1] == "1"
+    restore = sys.argv[2] == "1"
     await conn.execute("CREATE EXTENSION IF NOT EXISTS postgis")
     if ordinary_migrations:
         for extension in ("pg_trgm", "intarray", "btree_gist"):
@@ -1974,9 +1981,10 @@ async def main() -> None:
         await _prepare_ordinary_roles(conn, password)
         database = await conn.fetchval("SELECT quote_ident(current_database())")
         await conn.execute(f"GRANT CREATE ON DATABASE {database} TO ci_schema_owner")
-        await conn.execute('CREATE SCHEMA IF NOT EXISTS "mrf" AUTHORIZATION ci_schema_owner')
-        await conn.execute('GRANT USAGE ON SCHEMA "mrf" TO ci_serving_reader')
-    else:
+        if not restore:
+            await conn.execute('CREATE SCHEMA IF NOT EXISTS "mrf" AUTHORIZATION ci_schema_owner')
+            await conn.execute('GRANT USAGE ON SCHEMA "mrf" TO ci_serving_reader')
+    elif not restore:
         await conn.execute('CREATE SCHEMA IF NOT EXISTS "mrf"')
     await conn.close()
     if ordinary_migrations:
@@ -1985,6 +1993,8 @@ async def main() -> None:
         settings["user"] = "ci_schema_owner"
         conn = await asyncpg.connect(**settings)
         try:
+            if restore:
+                return
             from sqlalchemy.dialects import postgresql
             from sqlalchemy.schema import CreateTable
 
@@ -2002,18 +2012,35 @@ async def main() -> None:
 
 asyncio.run(main())
 PY
-  (
-    if [ "$ordinary_migrations" = 1 ]; then
-      export DB_USER=ci_schema_owner HLTHPRT_DB_USER=ci_schema_owner
-      export DB_PASSWORD="$HLTHPRT_DB_PASSWORD" HLTHPRT_DB_READER_USER=ci_serving_reader
+  local -a target=(--host "$HLTHPRT_DB_HOST" --port "$HLTHPRT_DB_PORT" --username "$HLTHPRT_DB_USER" --dbname "$HLTHPRT_DB_DATABASE")
+  local -a scope=(--exclude-schema tiger --exclude-schema tiger_data --exclude-schema topology)
+  if [ "$restore" = 1 ]; then
+    printf 'Restoring the migrated baseline from %s\n' "$schema_dump"
+    PGPASSWORD="$HLTHPRT_DB_PASSWORD" psql "${target[@]}" --set ON_ERROR_STOP=1 --quiet --file "$schema_dump"
+    # Parity: the restored rows (seeded by the migrations, alembic_version included) must equal the cached ones.
+    if ! PGPASSWORD="$HLTHPRT_DB_PASSWORD" pg_dump "${target[@]}" --data-only "${scope[@]}" |
+        sed '/^\\\(un\)\{0,1\}restrict /d' | cmp -s - <(sed '/^\\\(un\)\{0,1\}restrict /d' "$schema_dump.data"); then
+      printf 'Restored baseline rows differ from the cached migration output\n' >&2
+      return 1
     fi
-    alembic stamp 20260610143000_address_checksums_bigint
-    alembic upgrade head
-  )
-  PGPASSWORD="$HLTHPRT_DB_PASSWORD" psql \
-    --host "$HLTHPRT_DB_HOST" --port "$HLTHPRT_DB_PORT" \
-    --username "$HLTHPRT_DB_USER" --dbname "$HLTHPRT_DB_DATABASE" \
-    --set ON_ERROR_STOP=1 --command 'VACUUM (FREEZE, ANALYZE)'
+  else
+    (
+      if [ "$ordinary_migrations" = 1 ]; then
+        export DB_USER=ci_schema_owner HLTHPRT_DB_USER=ci_schema_owner
+        export DB_PASSWORD="$HLTHPRT_DB_PASSWORD" HLTHPRT_DB_READER_USER=ci_serving_reader
+      fi
+      alembic stamp 20260610143000_address_checksums_bigint
+      alembic upgrade head
+    )
+    if [ -n "$schema_dump" ]; then
+      mkdir -p "$CI_SCHEMA_CACHE"
+      PGPASSWORD="$HLTHPRT_DB_PASSWORD" pg_dump "${target[@]}" "${scope[@]}" > "$schema_dump.tmp"
+      PGPASSWORD="$HLTHPRT_DB_PASSWORD" pg_dump "${target[@]}" --data-only "${scope[@]}" > "$schema_dump.data.tmp"
+      mv "$schema_dump.data.tmp" "$schema_dump.data"
+      mv "$schema_dump.tmp" "$schema_dump"
+    fi
+  fi
+  PGPASSWORD="$HLTHPRT_DB_PASSWORD" psql "${target[@]}" --set ON_ERROR_STOP=1 --command 'VACUUM (FREEZE, ANALYZE)'
 }
 
 drop_test_database() {
@@ -2513,7 +2540,8 @@ run_network_registry_postgres() (
   if [[ -n "$shard" ]]; then
     registry_nodeids=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-registry-nodeids.XXXXXX")
     ci_phase_begin network-registry-collection
-    python scripts/ci/shard_pytest_nodeids.py --shard-count 48 --shard-index "$shard" \
+    # Collection only lists node IDs; coverage tracing from PYTEST_ADDOPTS would just slow it down.
+    PYTEST_ADDOPTS='' python scripts/ci/shard_pytest_nodeids.py --shard-count 48 --shard-index "$shard" \
       --output "$registry_nodeids" -- "${registry_tests[@]}"
     ci_phase_end
     registry_arguments=("@$registry_nodeids")
