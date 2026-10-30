@@ -127,7 +127,8 @@ class PublicWorkflowPermissions(unittest.TestCase):
                                                 ("directory-storage", "directory storage"),
                                                 ("directory-address", "directory address"),
                                                 ("profile-storage", "profile storage"),
-                                                ("profile-publication", "profile publication"))],
+                                                ("profile-publication", "profile publication"),
+                                                ("cms-successor", "CMS successor"))],
         }
         artifact_ids = []
         for job_id, rows in expected.items():
@@ -166,9 +167,9 @@ class PublicWorkflowPermissions(unittest.TestCase):
         download = next(step for step in jobs["measurement"]["steps"]
                         if step.get("name") == "Download immutable measurement artifacts")
         self.assertEqual(set(download["with"]["artifact-ids"].split(",")), set(artifact_ids))
-        self.assertEqual(len(download["with"]["artifact-ids"].split(",")), 69)
+        self.assertEqual(len(download["with"]["artifact-ids"].split(",")), 70)
         self.assertEqual(sum(len(job.get("strategy", {}).get("matrix", {}).get("include", [None]))
-                             for job in jobs.values()), 79)
+                             for job in jobs.values()), 80)
         self.assertEqual(jobs["python-tests"]["timeout-minutes"], 20)
 
     def test_cheap_lint_blocks_heavy_jobs_without_changing_measurement_producers(self):
@@ -204,7 +205,7 @@ class PublicWorkflowPermissions(unittest.TestCase):
     def test_database_lanes_reuse_prebuilt_native_artifacts_and_keep_job_limits(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         job = workflow["jobs"]["address-canonical-db-tests"]
-        self.assertEqual(job["timeout-minutes"], 20)
+        self.assertEqual(job["timeout-minutes"], "${{ matrix.shard == 'cms-successor' && 30 || 20 }}")
         self.assertEqual(job["strategy"]["fail-fast"], False)
         setup = next(step for step in job["steps"] if step.get("name") == "Prepare source and toolchain")
         # Database lanes consume the hygiene job's debug binaries and native wheel; no Rust toolchain.

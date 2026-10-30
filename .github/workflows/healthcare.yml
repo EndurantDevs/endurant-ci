@@ -490,7 +490,7 @@ jobs:
   address-canonical-db-tests:
     name: ${{ matrix.label }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: ${{ matrix.shard == 'cms-successor' && 30 || 20 }}
     needs:
     - public-hygiene
     - readability-preflight
@@ -632,6 +632,7 @@ jobs:
       artifact_directory_address: ${{ steps.coverage-output.outputs.artifact_directory_address }}
       artifact_profile_storage: ${{ steps.coverage-output.outputs.artifact_profile_storage }}
       artifact_profile_publication: ${{ steps.coverage-output.outputs.artifact_profile_publication }}
+      artifact_cms_successor: ${{ steps.coverage-output.outputs.artifact_cms_successor }}
     strategy:
       # The hosted runner ceiling is 60 jobs and the 11 other jobs of this stage
       # leave 48 slots. Rows are listed longest-first (dev run 41029194616) so
@@ -640,6 +641,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+        - shard: cms-successor
+          label: Database tests (CMS successor)
+          output: artifact_cms_successor
         - shard: registry-28
           label: Database tests (registry 29)
           output: artifact_registry_28
@@ -1014,7 +1018,7 @@ jobs:
           }},${{ needs.address-canonical-db-tests.outputs.artifact_directory_source
           }},${{ needs.address-canonical-db-tests.outputs.artifact_directory_source_2
           }},${{ needs.address-canonical-db-tests.outputs.artifact_directory_storage }},${{ needs.address-canonical-db-tests.outputs.artifact_directory_address
-          }},${{ needs.address-canonical-db-tests.outputs.artifact_profile_storage }},${{ needs.address-canonical-db-tests.outputs.artifact_profile_publication }}
+          }},${{ needs.address-canonical-db-tests.outputs.artifact_profile_storage }},${{ needs.address-canonical-db-tests.outputs.artifact_profile_publication }},${{ needs.address-canonical-db-tests.outputs.artifact_cms_successor }}
         digest-mismatch: error
         path: ${{ runner.temp }}/healthcare-coverage-staging
         merge-multiple: false
