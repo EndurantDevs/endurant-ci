@@ -132,8 +132,17 @@ class PublicWorkflowPermissions(unittest.TestCase):
         artifact_ids = []
         for job_id, rows in expected.items():
             job = jobs[job_id]
-            self.assertEqual(job["strategy"], {"fail-fast": job_id == "python-tests", "matrix": {"include": [
-                {"shard": shard, "label": label, "output": output} for shard, label, output in rows]}})
+            if job_id == "address-canonical-db-tests":
+                # Database lanes are capped and listed longest-first; the rows are pinned as a set.
+                self.assertEqual(set(job["strategy"]), {"max-parallel", "fail-fast", "matrix"})
+                self.assertEqual(job["strategy"]["max-parallel"], 48)
+                self.assertEqual(job["strategy"]["fail-fast"], False)
+                self.assertEqual(sorted(job["strategy"]["matrix"]["include"], key=lambda row: row["shard"]),
+                                 sorted(({"shard": shard, "label": label, "output": output} for shard, label, output in rows),
+                                        key=lambda row: row["shard"]))
+            else:
+                self.assertEqual(job["strategy"], {"fail-fast": job_id == "python-tests", "matrix": {"include": [
+                    {"shard": shard, "label": label, "output": output} for shard, label, output in rows]}})
             self.assertEqual(job["name"], "${{ matrix.label }}")
             self.assertEqual(job["needs"], ["public-hygiene", "readability-preflight"])
             self.assertEqual(job["env"]["CI_SHARD"], "${{ matrix.shard }}")
