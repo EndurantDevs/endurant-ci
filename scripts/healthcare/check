@@ -1133,7 +1133,7 @@ fhir_catalog_native_test_paths() {
     process/registry_publication_consumer.py process/registry_publication_queue.py \
     tests/test_network_fhir_retained_capture.py tests/test_network_fhir_retained_capture_postgres.py \
     tests/test_network_serving_schema_postgres.py || return 1
-  printf '%s\n' "${tests[@]}"
+  printf '%s\n' "${tests[@]}" tests/test_network_fhir_retained_capture_postgres.py
 }
 
 fhir_catalog_capability() {

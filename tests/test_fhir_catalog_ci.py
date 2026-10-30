@@ -14,11 +14,12 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 FUNCTIONS = (ROOT / "scripts/healthcare/check").read_text().rsplit("\ncase ", 1)[0]
 CAPABILITY = FUNCTIONS.split("fhir_catalog_native_test_paths() {\n", 1)[1].split("\n}\n", 1)[0]
+RETAINED_CAPTURE_TEST = "tests/test_network_fhir_retained_capture_postgres.py"
 NATIVE_TESTS = tuple(
     f"tests/test_registry_fhir_catalog_{name}_postgres.py"
     for name in ("custody", "grant", "identity", "permissions", "publication", "read",
                  "reference_rollup", "retained", "sources", "store", "sync")
-)
+) + (RETAINED_CAPTURE_TEST,)
 NODEID = "tests/test_registry_fhir_catalog_end_to_end.py::test_import_sync_query_replay_and_disappearance"
 CMS_NODEID = (
     "tests/test_registry_membership_refresh_cms_postgres.py::"
@@ -105,6 +106,40 @@ fhir_catalog_native_test_paths
         partial = probe()
         self.assertNotEqual(partial.returncode, 0)
         self.assertNotIn("present=", partial.stdout)
+
+    def test_preexisting_retained_capture_does_not_enable_optional_catalog(self):
+        historical = self.root / RETAINED_CAPTURE_TEST
+        historical.parent.mkdir(parents=True)
+        historical.touch()
+        result = self.shell("fhir_catalog_native_test_paths\n")
+        self.assertEqual((result.returncode, result.stdout), (0, ""), result.stderr)
+        probe = self.shell("fhir_catalog_capability\n")
+        self.assertEqual((probe.returncode, probe.stdout), (0, "present=false\n"), probe.stderr)
+
+    def test_retained_capture_joins_existing_registry_execution_exactly_once(self):
+        self.populate()
+        registry = FUNCTIONS.split("run_network_registry_postgres() (\n", 1)[1].split("\n)\n", 1)[0]
+        for relative in re.findall(r"tests/[a-zA-Z0-9_./]+", registry.split("\n  )", 1)[0]):
+            (self.root / relative).touch()
+        stubs = "\n".join(
+            f"{name}() {{ :; }}"
+            for name in re.findall(r"^([a-z_]+_native_test_paths?)\(\)", FUNCTIONS, re.MULTILINE)
+            if name != "fhir_catalog_native_test_paths"
+        )
+        result = self.shell(stubs + "\n" + r"""
+git() { :; }
+install_address_canon_wheel() { :; }
+rustc() { printf 'rustc 1.98.1\n'; }
+python() { :; }
+run_scoped_archive_postgres() { printf '%s\n' "$@" > "$SOURCE_ROOT/registry-arguments"; }
+validate_registry_native_report() { :; }
+run_network_registry_postgres
+""", CI_DEPS_READY="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = (self.root / "registry-arguments").read_text().splitlines()
+        self.assertIn("NETWORK_REGISTRY_TEST_DSN", arguments)
+        for path in NATIVE_TESTS:
+            self.assertEqual(arguments.count(path), 1)
 
     def test_database_tests_leave_python_main_and_join_registry_components(self):
         self.populate()
