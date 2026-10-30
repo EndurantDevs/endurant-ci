@@ -5113,7 +5113,7 @@ run_wheel_tests() {
         cases = [(ordinary, failure, cache) for ordinary in (False, True)
                  for failure in ("", "schema", "stamp", "upgrade", "vacuum") for cache in ("", "miss")]
         cases += [(ordinary, failure, "hit") for ordinary in (False, True)
-                  for failure in ("", "schema", "restore", "parity", "parity-swap", "vacuum")]
+                  for failure in ("", "schema", "restore", "parity", "parity-swap", "parity-copyrow", "vacuum")]
         cases += [(True, "dump", "miss"), (True, "dump-data", "miss"), (True, "", "exempt")]
         for ordinary, failure, cache in cases:
             with self.subTest(ordinary=ordinary, failure=failure, cache=cache), \
@@ -5124,7 +5124,8 @@ run_wheel_tests() {
                     cache_root.mkdir()
                     (cache_root / "baseline.sql").write_text("CREATE SCHEMA mrf;\nCOPY mrf.alembic_version FROM stdin;\n")
                     (cache_root / "baseline.sql.data").write_text(
-                        "\\restrict abc\nCOPY mrf.alembic_version FROM stdin;\nhead\n\\.\nCOPY mrf.seed FROM stdin;\nrow\n\\.\n\\unrestrict abc\n")
+                        "\\restrict abc\nCOPY mrf.alembic_version FROM stdin;\nhead\n\\.\nCOPY mrf.seed FROM stdin;\nrow\n\\.\n"
+                        "COPY mrf.left FROM stdin;\nCOPY marker\nleft\n\\.\nCOPY mrf.right FROM stdin;\nCOPY marker\nright\n\\.\n\\unrestrict abc\n")
                 if ordinary:
                     migration = Path(temporary) / "alembic/versions/20261028110000_provider_directory_global_serving.py"
                     migration.parent.mkdir(parents=True)
@@ -5184,11 +5185,15 @@ pg_dump() {
     '--host 127.0.0.1 --port 5440 --username postgres --dbname baseline_test --data-only --exclude-schema tiger --exclude-schema tiger_data --exclude-schema topology')
       if [[ "$SCHEMA_RESTORE" = 1 ]]; then
         printf 'parity\n' >> "$CALL_LOG"
+        tail='COPY mrf.left FROM stdin;\nCOPY marker\nleft\n\\.\nCOPY mrf.right FROM stdin;\nCOPY marker\nright\n\\.\n'
         if [[ "$FAIL_STAGE" = parity-swap ]]; then
           # Same lines, rows swapped between tables: the version row must not pass as a seed row.
-          printf '\\restrict xyz\nCOPY mrf.seed FROM stdin;\nhead\n\\.\nCOPY mrf.alembic_version FROM stdin;\nrow\n\\.\n\\unrestrict xyz\n'
+          printf "\\\\restrict xyz\nCOPY mrf.seed FROM stdin;\nhead\n\\\\.\nCOPY mrf.alembic_version FROM stdin;\nrow\n\\\\.\n${tail}\\\\unrestrict xyz\n"
+        elif [[ "$FAIL_STAGE" = parity-copyrow ]]; then
+          # A data row that looks like a COPY header must not re-bind the following rows.
+          printf "\\\\restrict xyz\nCOPY mrf.seed FROM stdin;\nrow\n\\\\.\nCOPY mrf.alembic_version FROM stdin;\nhead\n\\\\.\nCOPY mrf.left FROM stdin;\nCOPY marker\nright\n\\\\.\nCOPY mrf.right FROM stdin;\nCOPY marker\nleft\n\\\\.\n\\\\unrestrict xyz\n"
         else
-          printf '\\restrict xyz\nCOPY mrf.seed FROM stdin;\nrow\n\\.\nCOPY mrf.alembic_version FROM stdin;\n%s\n\\.\n\\unrestrict xyz\n' "$([[ "$FAIL_STAGE" = parity ]] && echo drifted || echo head)"
+          printf "\\\\restrict xyz\nCOPY mrf.seed FROM stdin;\nrow\n\\\\.\nCOPY mrf.alembic_version FROM stdin;\n%s\n\\\\.\n${tail}\\\\unrestrict xyz\n" "$([[ "$FAIL_STAGE" = parity ]] && echo drifted || echo head)"
         fi
       else
         printf 'dump-data\n' >> "$CALL_LOG"
@@ -5215,7 +5220,7 @@ printf 'tests\n' >> "$CALL_LOG"
                 else:
                     expected = ["schema", "stamp", "upgrade", *(["dump", "dump-data"] if cache else []), "vacuum", "tests"]
                 if failure:
-                    expected = expected[:expected.index(failure.removesuffix("-swap")) + 1]
+                    expected = expected[:expected.index(failure.split("-")[0] if failure.startswith("parity-") else failure) + 1]
                 self.assertEqual(log.read_text().splitlines(), expected)
                 if failure.startswith("parity"):
                     self.assertIn("Restored baseline rows differ", result.stderr)
