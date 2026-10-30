@@ -137,6 +137,7 @@ class PublicWorkflowPermissions(unittest.TestCase):
                 self.assertEqual(set(job["strategy"]), {"max-parallel", "fail-fast", "matrix"})
                 self.assertEqual(job["strategy"]["max-parallel"], 48)
                 self.assertEqual(job["strategy"]["fail-fast"], False)
+                self.assertEqual(set(job["strategy"]["matrix"]), {"include"})
                 self.assertEqual(sorted(job["strategy"]["matrix"]["include"], key=lambda row: row["shard"]),
                                  sorted(({"shard": shard, "label": label, "output": output} for shard, label, output in rows),
                                         key=lambda row: row["shard"]))
