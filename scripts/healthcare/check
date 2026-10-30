@@ -2017,10 +2017,16 @@ PY
   if [ "$restore" = 1 ]; then
     printf 'Restoring the migrated baseline from %s\n' "$schema_dump"
     PGPASSWORD="$HLTHPRT_DB_PASSWORD" psql "${target[@]}" --set ON_ERROR_STOP=1 --quiet --file "$schema_dump"
-    # Parity: the restored rows (seeded by the migrations, alembic_version included) must equal the cached ones.
-    if ! PGPASSWORD="$HLTHPRT_DB_PASSWORD" pg_dump "${target[@]}" --data-only "${scope[@]}" |
-        sed '/^\\\(un\)\{0,1\}restrict /d' | cmp -s - <(sed '/^\\\(un\)\{0,1\}restrict /d' "$schema_dump.data"); then
+    # Parity: the restored rows (seeded by the migrations, alembic_version included) must equal the cached
+    # ones. Lines are compared as a sorted set because pg_dump orders table data by catalog identity, which
+    # differs after a restore when foreign keys form cycles.
+    local restored_rows cached_rows
+    restored_rows=$(PGPASSWORD="$HLTHPRT_DB_PASSWORD" pg_dump "${target[@]}" --data-only "${scope[@]}" 2>/dev/null |
+      sed '/^\\\(un\)\{0,1\}restrict /d' | LC_ALL=C sort)
+    cached_rows=$(sed '/^\\\(un\)\{0,1\}restrict /d' "$schema_dump.data" | LC_ALL=C sort)
+    if [ "$restored_rows" != "$cached_rows" ]; then
       printf 'Restored baseline rows differ from the cached migration output\n' >&2
+      diff <(printf '%s\n' "$cached_rows") <(printf '%s\n' "$restored_rows") | head -40 >&2 || true
       return 1
     fi
   else
