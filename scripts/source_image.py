@@ -227,18 +227,34 @@ def queued_transfer_job(repository, run, *, producer):
     own = [job for job in jobs if job["name"] == name]
     if len(own) != 1:
         raise ValueError("queued image transfer requires one exact own job")
-    job = github.api(repository, f"actions/jobs/{own[0]['id']}")
     expected = {"id": own[0]["id"], "name": name, "run_id": run["id"],
                 "run_attempt": run["run_attempt"], "head_sha": run["head_sha"],
                 "head_branch": run["head_branch"], "runner_name": runner}
-    active = [step for step in job.get("steps", []) if step.get("status") == "in_progress"]
-    if (any(type(job.get(field)) is not int for field in ("id", "run_id", "run_attempt"))
-            or any(job.get(field) != value for field, value in expected.items())
-            or job.get("status") != "in_progress" or job.get("conclusion") is not None
-            or not job.get("started_at") or job.get("completed_at") is not None
-            or len(active) != 1 or active[0].get("name") not in steps
-            or active[0].get("conclusion") is not None):
-        raise ValueError("queued image transfer requires its exact active job and trusted step")
+    for attempt in range(10):
+        if attempt:
+            current = github.api(repository, f"actions/runs/{run['id']}")
+            if (any(type(current.get(field)) is not int for field in ("id", "run_attempt", "workflow_id"))
+                    or any(current.get(field) != run.get(field) for field in
+                           ("id", "run_attempt", "workflow_id", "event", "head_sha", "head_branch", "path"))
+                    or any(current.get(field, {}).get("full_name") != run[field]["full_name"]
+                           for field in ("repository", "head_repository"))
+                    or current.get("status") not in {"queued", "in_progress"}
+                    or current.get("conclusion") is not None):
+                raise ValueError("queued image transfer run or attempt changed during readback")
+        job = github.api(repository, f"actions/jobs/{expected['id']}")
+        if (any(type(job.get(field)) is not int for field in ("id", "run_id", "run_attempt"))
+                or any(job.get(field) != value for field, value in expected.items())
+                or job.get("status") != "in_progress" or job.get("conclusion") is not None
+                or job.get("completed_at") is not None):
+            raise ValueError("queued image transfer requires its exact still-active job")
+        active = [step for step in job.get("steps", []) if step.get("status") == "in_progress"]
+        if any(step.get("name") not in steps or step.get("conclusion") is not None for step in active):
+            raise ValueError("queued image transfer requires its trusted active step")
+        if job.get("started_at") and len(active) == 1:
+            return job
+        if attempt < 9:
+            time.sleep(2)
+    raise ValueError("queued image transfer active-step readback did not settle")
 
 
 def context(*, producer=False):
@@ -327,6 +343,11 @@ def admit():
     repository = identity["repository"]
     jobs = artifacts.effective_jobs(repository, run)
     own = [job for job in jobs if job.get("name") == JOB]
+    if run.get("status") == "queued" and len(own) == 1:
+        fresh = queued_transfer_job(repository, run, producer=False)
+        if fresh["id"] != own[0]["id"]:
+            raise ValueError("publication job changed during readback")
+        own = [fresh]
     if (len(own) != 1
             or own[0].get("status") != "in_progress" or own[0].get("conclusion") is not None):
         raise ValueError("publication requires a unique active trusted job")
@@ -521,6 +542,11 @@ def active_publisher(expected):
         raise ValueError("publication no longer belongs to this active DEV run")
     jobs = artifacts.effective_jobs(identity["repository"], run)
     own = [job for job in jobs if job.get("name") == JOB]
+    if run.get("status") == "queued" and len(own) == 1:
+        fresh = queued_transfer_job(identity["repository"], run, producer=False)
+        if fresh["id"] != own[0]["id"]:
+            raise ValueError("publication job changed during readback")
+        own = [fresh]
     if (len(own) != 1 or own[0].get("id") != expected["publisher_job_id"]
             or own[0].get("status") != "in_progress" or own[0].get("conclusion") is not None):
         raise ValueError("cleanup requires its exact unique still-active publisher job")

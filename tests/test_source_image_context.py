@@ -50,6 +50,9 @@ class QueuedContextChecks(unittest.TestCase):
         mock = patch.object(transfer.github, "pages", side_effect=lambda *args: deepcopy(self.jobs))
         self.pages = mock.start()
         self.addCleanup(mock.stop)
+        mock = patch.object(transfer.time, "sleep")
+        self.sleep = mock.start()
+        self.addCleanup(mock.stop)
 
     def api(self, repository, path):
         self.assertEqual(repository, self.repository)
@@ -146,6 +149,66 @@ class QueuedContextChecks(unittest.TestCase):
         with self.assertRaises(ValueError):
             transfer.context(producer=True)
 
+    def test_incomplete_step_readback_settles_without_reselecting_the_job(self):
+        for stale in ({"steps": []}, {"steps": self.job["steps"] * 2}, {"started_at": None}):
+            with self.subTest(stale=stale):
+                self.sleep.reset_mock()
+                jobs = iter([{**self.job, **stale}, deepcopy(self.job)])
+                with patch.object(transfer.github, "api", side_effect=lambda repository, path:
+                                  next(jobs) if path == "actions/jobs/777" else deepcopy(self.run)):
+                    self.assertEqual(transfer.context(producer=True)[0],
+                                     {**self.identity, "run_id": "123", "run_attempt": 2, "ci_revision": "d" * 40})
+                self.sleep.assert_called_once_with(2)
+        self.assertEqual(self.pages.call_count, 3)
+
+    def test_missing_step_readback_has_a_fixed_bound(self):
+        self.job["steps"] = []
+        with self.assertRaisesRegex(ValueError, "did not settle"):
+            transfer.context(producer=True)
+        self.assertEqual(self.api_calls.count("actions/jobs/777"), 10)
+        self.assertEqual(self.api_calls.count("actions/runs/123"), 10)
+        self.assertEqual(self.sleep.call_count, 9)
+        self.pages.assert_called_once()
+
+    def test_readback_refuses_run_job_or_step_drift_before_authorizing(self):
+        changes = [("run", {"run_attempt": 3}), ("run", {"id": True}),
+                   ("run", {"head_sha": "c" * 40}), ("run", {"head_branch": "main"}),
+                   ("run", {"status": "completed"}), ("run", {"conclusion": "cancelled"}),
+                   ("job", {"id": 778}), ("job", {"run_attempt": True}),
+                   ("job", {"runner_name": "other-runner"}), ("job", {"status": "completed"}),
+                   ("job", {"conclusion": "failure"}),
+                   ("job", {"steps": [{"name": "Other step", "status": "in_progress", "conclusion": None}]})]
+        for target, change in changes:
+            with self.subTest(target=target, change=change):
+                self.sleep.reset_mock()
+                reads = {"run": 0, "job": 0}
+
+                def api(repository, path):
+                    kind = "job" if path == "actions/jobs/777" else "run"
+                    reads[kind] += 1
+                    value = deepcopy(self.job if kind == "job" else self.run)
+                    if kind == "job" and reads[kind] == 1:
+                        value["steps"] = []
+                    elif kind == target and reads[kind] > 1:
+                        value.update(change)
+                    return value
+
+                with patch.object(transfer.github, "api", side_effect=api), self.assertRaises(ValueError):
+                    transfer.context(producer=True)
+                self.assertLessEqual(self.sleep.call_count, 1)
+
+    def test_queued_pr_noop_refreshes_stale_inventory_without_publishing(self):
+        os.environ["GITHUB_JOB"] = "dev-image-publication"
+        self.run["event"] = "pull_request"
+        self.job.update(name=transfer.JOB, steps=[{"name": "Authenticate DEV image input",
+                                                 "status": "in_progress", "conclusion": None}])
+        self.jobs = [{**self.job, "status": "queued", "started_at": None, "steps": []}]
+        with patch.object(transfer, "context", return_value=(self.identity, self.run)):
+            self.assertIsNone(transfer.admit())
+            with patch.object(transfer, "queued_transfer_job", return_value={**self.job, "id": 778}):
+                with self.assertRaisesRegex(ValueError, "job changed"):
+                    transfer.admit()
+
     def test_queued_publisher_and_failure_reconciliation_keep_exact_job_id(self):
         os.environ["GITHUB_JOB"] = "dev-image-publication"
         self.job["name"] = transfer.JOB
@@ -157,7 +220,7 @@ class QueuedContextChecks(unittest.TestCase):
             with self.subTest(step=step):
                 self.job["steps"] = [{"name": "Earlier step", "status": "completed", "conclusion": "failure"},
                                      {"name": step, "status": "in_progress", "conclusion": None}]
-                self.jobs = [deepcopy(self.job)]
+                self.jobs = [{**self.job, "status": "queued", "started_at": None, "steps": []}]
                 self.assertEqual(transfer.active_publisher(expected)[1]["id"], 777)
                 with self.assertRaisesRegex(ValueError, "exact unique"):
                     transfer.active_publisher({**expected, "publisher_job_id": 778})
