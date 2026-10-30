@@ -5194,7 +5194,7 @@ printf 'tests\n' >> "$CALL_LOG"
                 else:
                     expected = ["schema", "stamp", "upgrade", *(["dump", "dump-data"] if cache else []), "vacuum", "tests"]
                 if failure:
-                    expected = expected[:expected.index(failure.split("-")[0]) + 1]
+                    expected = expected[:expected.index(failure.removesuffix("-swap")) + 1]
                 self.assertEqual(log.read_text().splitlines(), expected)
                 if failure.startswith("parity"):
                     self.assertIn("Restored baseline rows differ", result.stderr)
