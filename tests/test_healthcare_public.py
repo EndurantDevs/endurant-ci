@@ -4142,6 +4142,24 @@ run_provider_profile_postgres postgresql://synthetic/original
                         self.assertEqual(env["HLTHPRT_PTG2_RUST_SCANNER_BIN"],
                                          str(root / "support/ptg2_scanner/target/debug/ptg2_scanner"))
 
+    def test_schema_cache_key_covers_every_migration_input(self):
+        # Migrations import helpers from db/** and process/** and read alembic/sql; a change to any of
+        # them must invalidate the cached baseline, as must the lock, the caller workflow and this check.
+        setup = yaml.safe_load((ROOT / "scripts/healthcare/setup/action.yml").read_text())
+        cache = next(step for step in setup["runs"]["steps"] if step.get("name") == "Restore migrated PostgreSQL schema")
+        self.assertEqual(cache["if"], "inputs.postgres-schema-cache == 'true'")
+        self.assertEqual(cache["with"]["path"], "${{ runner.temp }}/healthcare-schema-cache")
+        key = cache["with"]["key"]
+        self.assertTrue(key.startswith("healthcare-schema-${{ runner.os }}-${{ hashFiles("))
+        self.assertEqual(re.findall(r"'([^']+)'", key), [
+            "source/alembic/**", "source/db/**", "source/process/**", "source/requirements-ci.lock",
+            "source/.github/workflows/ci.yml", "ci/scripts/healthcare/check",
+        ])
+        expose = next(step for step in setup["runs"]["steps"] if step.get("name") == "Expose migrated PostgreSQL schema cache")
+        self.assertEqual(expose["if"], cache["if"])
+        self.assertIn("CI_SCHEMA_CACHE=%s", expose["run"])
+        self.assertEqual(setup["inputs"]["postgres-schema-cache"]["default"], "false")
+
     def test_validation_uses_pinned_uv(self):
         setup = (ROOT / "scripts/healthcare/setup/action.yml").read_text()
         check = (ROOT / "scripts/healthcare/check").read_text()
