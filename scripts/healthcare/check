@@ -1965,13 +1965,13 @@ PY
 
 prepare_postgres() {
   local ordinary_migrations=0 restore=0
-  # The migrated schema is dumped once per migration-source hash (see the setup action) and
-  # restored by every later lane instead of replaying the whole migration chain.
-  local schema_dump=${CI_SCHEMA_CACHE:+$CI_SCHEMA_CACHE/schema.sql}
+  # The freshly migrated baseline (schema and seeded rows) is dumped once per migration-source
+  # hash (see the setup action) and restored by every later lane instead of replaying the chain.
+  local schema_dump=${CI_SCHEMA_CACHE:+$CI_SCHEMA_CACHE/baseline.sql}
   if [ -f "$repository_root/alembic/versions/20261028110000_provider_directory_global_serving.py" ]; then
     ordinary_migrations=1
   fi
-  if [ -n "$schema_dump" ] && [ -s "$schema_dump" ]; then
+  if [ -n "$schema_dump" ] && [ -s "$schema_dump" ] && [ -s "$schema_dump.data" ]; then
     restore=1
   fi
   python - "$ordinary_migrations" "$restore" <<'PY'
@@ -2060,27 +2060,32 @@ async def main() -> None:
 asyncio.run(main())
 PY
   local -a target=(--host "$HLTHPRT_DB_HOST" --port "$HLTHPRT_DB_PORT" --username "$HLTHPRT_DB_USER" --dbname "$HLTHPRT_DB_DATABASE")
+  local -a scope=(--exclude-schema tiger --exclude-schema tiger_data --exclude-schema topology)
   if [ "$restore" = 1 ]; then
-    printf 'Restoring the migrated schema from %s\n' "$schema_dump"
+    printf 'Restoring the migrated baseline from %s\n' "$schema_dump"
     PGPASSWORD="$HLTHPRT_DB_PASSWORD" psql "${target[@]}" --set ON_ERROR_STOP=1 --quiet --file "$schema_dump"
-  fi
-  (
-    if [ "$ordinary_migrations" = 1 ]; then
-      export DB_USER=ci_schema_owner HLTHPRT_DB_USER=ci_schema_owner
-      export DB_PASSWORD="$HLTHPRT_DB_PASSWORD" HLTHPRT_DB_READER_USER=ci_serving_reader
+    # Parity: the restored rows (seeded by the migrations, alembic_version included) must equal the cached ones.
+    if ! PGPASSWORD="$HLTHPRT_DB_PASSWORD" pg_dump "${target[@]}" --data-only "${scope[@]}" |
+        sed '/^\\\(un\)\{0,1\}restrict /d' | cmp -s - <(sed '/^\\\(un\)\{0,1\}restrict /d' "$schema_dump.data"); then
+      printf 'Restored baseline rows differ from the cached migration output\n' >&2
+      return 1
     fi
-    if [ "$restore" = 1 ]; then
-      alembic stamp heads
-    else
+  else
+    (
+      if [ "$ordinary_migrations" = 1 ]; then
+        export DB_USER=ci_schema_owner HLTHPRT_DB_USER=ci_schema_owner
+        export DB_PASSWORD="$HLTHPRT_DB_PASSWORD" HLTHPRT_DB_READER_USER=ci_serving_reader
+      fi
       alembic stamp 20260610143000_address_checksums_bigint
       alembic upgrade head
+    )
+    if [ -n "$schema_dump" ]; then
+      mkdir -p "$CI_SCHEMA_CACHE"
+      PGPASSWORD="$HLTHPRT_DB_PASSWORD" pg_dump "${target[@]}" "${scope[@]}" > "$schema_dump.tmp"
+      PGPASSWORD="$HLTHPRT_DB_PASSWORD" pg_dump "${target[@]}" --data-only "${scope[@]}" > "$schema_dump.data.tmp"
+      mv "$schema_dump.data.tmp" "$schema_dump.data"
+      mv "$schema_dump.tmp" "$schema_dump"
     fi
-  )
-  if [ -n "$schema_dump" ] && [ "$restore" = 0 ]; then
-    mkdir -p "$CI_SCHEMA_CACHE"
-    PGPASSWORD="$HLTHPRT_DB_PASSWORD" pg_dump "${target[@]}" --schema-only \
-      --exclude-schema tiger --exclude-schema tiger_data --exclude-schema topology > "$schema_dump.tmp"
-    mv "$schema_dump.tmp" "$schema_dump"
   fi
   PGPASSWORD="$HLTHPRT_DB_PASSWORD" psql "${target[@]}" --set ON_ERROR_STOP=1 --command 'VACUUM (FREEZE, ANALYZE)'
 }

@@ -5095,8 +5095,8 @@ run_wheel_tests() {
         cases = [(ordinary, failure, cache) for ordinary in (False, True)
                  for failure in ("", "schema", "stamp", "upgrade", "vacuum") for cache in ("", "miss")]
         cases += [(ordinary, failure, "hit") for ordinary in (False, True)
-                  for failure in ("", "schema", "restore", "stamp", "vacuum")]
-        cases += [(True, "dump", "miss")]
+                  for failure in ("", "schema", "restore", "parity", "vacuum")]
+        cases += [(True, "dump", "miss"), (True, "dump-data", "miss")]
         for ordinary, failure, cache in cases:
             with self.subTest(ordinary=ordinary, failure=failure, cache=cache), \
                     tempfile.TemporaryDirectory() as temporary:
@@ -5104,7 +5104,8 @@ run_wheel_tests() {
                 cache_root = Path(temporary) / "schema-cache"
                 if cache == "hit":
                     cache_root.mkdir()
-                    (cache_root / "schema.sql").write_text("CREATE SCHEMA mrf;\n")
+                    (cache_root / "baseline.sql").write_text("CREATE SCHEMA mrf;\nCOPY mrf.alembic_version FROM stdin;\n")
+                    (cache_root / "baseline.sql.data").write_text("\\restrict abc\nCOPY mrf.alembic_version FROM stdin;\nhead\n\\unrestrict abc\n")
                 if ordinary:
                     migration = Path(temporary) / "alembic/versions/20261028110000_provider_directory_global_serving.py"
                     migration.parent.mkdir(parents=True)
@@ -5142,7 +5143,7 @@ alembic() {
 }
 psql() {
   [[ "$PGPASSWORD" = synthetic ]] || return 98
-  if [[ "$*" = "--host 127.0.0.1 --port 5440 --username postgres --dbname baseline_test --set ON_ERROR_STOP=1 --quiet --file $CI_SCHEMA_CACHE/schema.sql" ]]; then
+  if [[ "$*" = "--host 127.0.0.1 --port 5440 --username postgres --dbname baseline_test --set ON_ERROR_STOP=1 --quiet --file $CI_SCHEMA_CACHE/baseline.sql" ]]; then
     [[ "$SCHEMA_RESTORE" = 1 ]] || return 99
     printf 'restore\n' >> "$CALL_LOG"
     [[ "$FAIL_STAGE" != restore ]] || return 17
@@ -5153,11 +5154,24 @@ psql() {
   [[ "$FAIL_STAGE" != vacuum ]] || return 17
 }
 pg_dump() {
-  [[ "$PGPASSWORD" = synthetic && "$SCHEMA_RESTORE" = 0 && -n "$CI_SCHEMA_CACHE" ]] || return 98
-  [[ "$*" = '--host 127.0.0.1 --port 5440 --username postgres --dbname baseline_test --schema-only --exclude-schema tiger --exclude-schema tiger_data --exclude-schema topology' ]] || return 99
-  printf 'dump\n' >> "$CALL_LOG"
-  [[ "$FAIL_STAGE" != dump ]] || return 17
-  echo 'CREATE SCHEMA mrf;'
+  [[ "$PGPASSWORD" = synthetic && -n "$CI_SCHEMA_CACHE" ]] || return 98
+  case "$*" in
+    '--host 127.0.0.1 --port 5440 --username postgres --dbname baseline_test --exclude-schema tiger --exclude-schema tiger_data --exclude-schema topology')
+      [[ "$SCHEMA_RESTORE" = 0 ]] || return 98
+      printf 'dump\n' >> "$CALL_LOG"
+      [[ "$FAIL_STAGE" != dump ]] || return 17
+      printf 'CREATE SCHEMA mrf;\nCOPY mrf.alembic_version FROM stdin;\n' ;;
+    '--host 127.0.0.1 --port 5440 --username postgres --dbname baseline_test --data-only --exclude-schema tiger --exclude-schema tiger_data --exclude-schema topology')
+      if [[ "$SCHEMA_RESTORE" = 1 ]]; then
+        printf 'parity\n' >> "$CALL_LOG"
+        printf '\\restrict xyz\nCOPY mrf.alembic_version FROM stdin;\n%s\n\\unrestrict xyz\n' "$([[ "$FAIL_STAGE" = parity ]] && echo drifted || echo head)"
+      else
+        printf 'dump-data\n' >> "$CALL_LOG"
+        [[ "$FAIL_STAGE" != dump-data ]] || return 17
+        printf '\\restrict abc\nCOPY mrf.alembic_version FROM stdin;\nhead\n\\unrestrict abc\n'
+      fi ;;
+    *) return 99 ;;
+  esac
 }
 prepare_postgres
 [[ "$DB_USER" = legacy_login && "$HLTHPRT_DB_USER" = postgres ]] || exit 98
@@ -5167,18 +5181,21 @@ printf 'tests\n' >> "$CALL_LOG"
 '''
                 result = subprocess.run(["bash", "-eu"], input=script, env=environment,
                                         capture_output=True, text=True, timeout=15, check=False)
-                self.assertEqual(result.returncode, 17 if failure else 0, result.stderr)
+                self.assertEqual(result.returncode, 1 if failure == "parity" else 17 if failure else 0, result.stderr)
                 if cache == "hit":
-                    expected = ["schema", "restore", "stamp", "vacuum", "tests"]
+                    expected = ["schema", "restore", "parity", "vacuum", "tests"]
                 else:
-                    expected = ["schema", "stamp", "upgrade", *(["dump"] if cache else []), "vacuum", "tests"]
+                    expected = ["schema", "stamp", "upgrade", *(["dump", "dump-data"] if cache else []), "vacuum", "tests"]
                 if failure:
                     expected = expected[:expected.index(failure) + 1]
                 self.assertEqual(log.read_text().splitlines(), expected)
-                dump = cache_root / "schema.sql"
-                if cache == "miss" and "dump" in expected and failure != "dump":
-                    self.assertEqual(dump.read_text(), "CREATE SCHEMA mrf;\n")
-                    self.assertFalse((cache_root / "schema.sql.tmp").exists())
+                if failure == "parity":
+                    self.assertIn("Restored baseline rows differ", result.stderr)
+                dump = cache_root / "baseline.sql"
+                if cache == "miss" and "dump-data" in expected and failure != "dump-data":
+                    self.assertEqual(dump.read_text(), "CREATE SCHEMA mrf;\nCOPY mrf.alembic_version FROM stdin;\n")
+                    self.assertEqual((cache_root / "baseline.sql.data").read_text().splitlines()[2], "head")
+                    self.assertEqual(sorted(path.name for path in cache_root.iterdir()), ["baseline.sql", "baseline.sql.data"])
                 elif cache == "miss":
                     self.assertFalse(dump.exists())
 
