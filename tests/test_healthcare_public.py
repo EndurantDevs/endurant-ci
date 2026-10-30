@@ -4145,6 +4145,24 @@ run_provider_profile_postgres postgresql://synthetic/original
                         self.assertEqual(env["HLTHPRT_PTG2_RUST_SCANNER_BIN"],
                                          str(root / "support/ptg2_scanner/target/debug/ptg2_scanner"))
 
+    def test_schema_cache_key_covers_every_migration_input(self):
+        # Migrations import helpers from db/** and process/** and read alembic/sql; a change to any of
+        # them must invalidate the cached baseline, as must the lock, the caller workflow and this check.
+        setup = yaml.safe_load((ROOT / "scripts/healthcare/setup/action.yml").read_text())
+        cache = next(step for step in setup["runs"]["steps"] if step.get("name") == "Restore migrated PostgreSQL schema")
+        self.assertEqual(cache["if"], "inputs.postgres-schema-cache == 'true'")
+        self.assertEqual(cache["with"]["path"], "${{ runner.temp }}/healthcare-schema-cache")
+        key = cache["with"]["key"]
+        self.assertTrue(key.startswith("healthcare-schema-${{ runner.os }}-${{ hashFiles("))
+        self.assertEqual(re.findall(r"'([^']+)'", key), [
+            "source/alembic/**", "source/db/**", "source/process/**", "source/requirements-ci.lock",
+            "source/.github/workflows/ci.yml", "ci/scripts/healthcare/check",
+        ])
+        expose = next(step for step in setup["runs"]["steps"] if step.get("name") == "Expose migrated PostgreSQL schema cache")
+        self.assertEqual(expose["if"], cache["if"])
+        self.assertIn("CI_SCHEMA_CACHE=%s", expose["run"])
+        self.assertEqual(setup["inputs"]["postgres-schema-cache"]["default"], "false")
+
     def test_validation_uses_pinned_uv(self):
         setup = (ROOT / "scripts/healthcare/setup/action.yml").read_text()
         check = (ROOT / "scripts/healthcare/check").read_text()
@@ -5095,17 +5113,19 @@ run_wheel_tests() {
         cases = [(ordinary, failure, cache) for ordinary in (False, True)
                  for failure in ("", "schema", "stamp", "upgrade", "vacuum") for cache in ("", "miss")]
         cases += [(ordinary, failure, "hit") for ordinary in (False, True)
-                  for failure in ("", "schema", "restore", "parity", "vacuum")]
-        cases += [(True, "dump", "miss"), (True, "dump-data", "miss")]
+                  for failure in ("", "schema", "restore", "parity", "parity-swap", "parity-copyrow", "vacuum")]
+        cases += [(True, "dump", "miss"), (True, "dump-data", "miss"), (True, "", "exempt")]
         for ordinary, failure, cache in cases:
             with self.subTest(ordinary=ordinary, failure=failure, cache=cache), \
                     tempfile.TemporaryDirectory() as temporary:
                 log = Path(temporary) / "calls"
                 cache_root = Path(temporary) / "schema-cache"
-                if cache == "hit":
+                if cache in ("hit", "exempt"):
                     cache_root.mkdir()
                     (cache_root / "baseline.sql").write_text("CREATE SCHEMA mrf;\nCOPY mrf.alembic_version FROM stdin;\n")
-                    (cache_root / "baseline.sql.data").write_text("\\restrict abc\nCOPY mrf.alembic_version FROM stdin;\nhead\n\\unrestrict abc\n")
+                    (cache_root / "baseline.sql.data").write_text(
+                        "\\restrict abc\nCOPY mrf.alembic_version FROM stdin;\nhead\n\\.\nCOPY mrf.seed FROM stdin;\nrow\n\\.\n"
+                        "COPY mrf.left FROM stdin;\nCOPY marker\nleft\n\\.\nCOPY mrf.right FROM stdin;\nCOPY marker\nright\n\\.\n\\unrestrict abc\n")
                 if ordinary:
                     migration = Path(temporary) / "alembic/versions/20261028110000_provider_directory_global_serving.py"
                     migration.parent.mkdir(parents=True)
@@ -5114,6 +5134,7 @@ run_wheel_tests() {
                                "CALL_LOG": str(log), "FAIL_STAGE": failure,
                                "ORDINARY_MIGRATIONS": str(int(ordinary)),
                                "SCHEMA_RESTORE": str(int(cache == "hit")),
+                               "PREPARE_SHARD": "core-ptg" if cache == "exempt" else "",
                                "CI_SCHEMA_CACHE": str(cache_root) if cache else "",
                                "DB_USER": "legacy_login", "DB_PASSWORD": "legacy_password",
                                "HLTHPRT_DB_READER_USER": "existing_reader",
@@ -5164,16 +5185,25 @@ pg_dump() {
     '--host 127.0.0.1 --port 5440 --username postgres --dbname baseline_test --data-only --exclude-schema tiger --exclude-schema tiger_data --exclude-schema topology')
       if [[ "$SCHEMA_RESTORE" = 1 ]]; then
         printf 'parity\n' >> "$CALL_LOG"
-        printf '\\restrict xyz\nCOPY mrf.alembic_version FROM stdin;\n%s\n\\unrestrict xyz\n' "$([[ "$FAIL_STAGE" = parity ]] && echo drifted || echo head)"
+        tail='COPY mrf.left FROM stdin;\nCOPY marker\nleft\n\\.\nCOPY mrf.right FROM stdin;\nCOPY marker\nright\n\\.\n'
+        if [[ "$FAIL_STAGE" = parity-swap ]]; then
+          # Same lines, rows swapped between tables: the version row must not pass as a seed row.
+          printf "\\\\restrict xyz\nCOPY mrf.seed FROM stdin;\nhead\n\\\\.\nCOPY mrf.alembic_version FROM stdin;\nrow\n\\\\.\n${tail}\\\\unrestrict xyz\n"
+        elif [[ "$FAIL_STAGE" = parity-copyrow ]]; then
+          # A data row that looks like a COPY header must not re-bind the following rows.
+          printf "\\\\restrict xyz\nCOPY mrf.seed FROM stdin;\nrow\n\\\\.\nCOPY mrf.alembic_version FROM stdin;\nhead\n\\\\.\nCOPY mrf.left FROM stdin;\nCOPY marker\nright\n\\\\.\nCOPY mrf.right FROM stdin;\nCOPY marker\nleft\n\\\\.\n\\\\unrestrict xyz\n"
+        else
+          printf "\\\\restrict xyz\nCOPY mrf.seed FROM stdin;\nrow\n\\\\.\nCOPY mrf.alembic_version FROM stdin;\n%s\n\\\\.\n${tail}\\\\unrestrict xyz\n" "$([[ "$FAIL_STAGE" = parity ]] && echo drifted || echo head)"
+        fi
       else
         printf 'dump-data\n' >> "$CALL_LOG"
         [[ "$FAIL_STAGE" != dump-data ]] || return 17
-        printf '\\restrict abc\nCOPY mrf.alembic_version FROM stdin;\nhead\n\\unrestrict abc\n'
+        printf '\\restrict abc\nCOPY mrf.alembic_version FROM stdin;\nhead\n\\.\nCOPY mrf.seed FROM stdin;\nrow\n\\.\n\\unrestrict abc\n'
       fi ;;
     *) return 99 ;;
   esac
 }
-prepare_postgres
+prepare_postgres "$PREPARE_SHARD"
 [[ "$DB_USER" = legacy_login && "$HLTHPRT_DB_USER" = postgres ]] || exit 98
 [[ "$DB_PASSWORD" = legacy_password && "$HLTHPRT_DB_PASSWORD" = synthetic ]] || exit 98
 [[ "$HLTHPRT_DB_READER_USER" = existing_reader ]] || exit 98
@@ -5181,20 +5211,23 @@ printf 'tests\n' >> "$CALL_LOG"
 '''
                 result = subprocess.run(["bash", "-eu"], input=script, env=environment,
                                         capture_output=True, text=True, timeout=15, check=False)
-                self.assertEqual(result.returncode, 1 if failure == "parity" else 17 if failure else 0, result.stderr)
+                self.assertEqual(result.returncode, 1 if failure.startswith("parity") else 17 if failure else 0, result.stderr)
                 if cache == "hit":
                     expected = ["schema", "restore", "parity", "vacuum", "tests"]
+                elif cache == "exempt":
+                    # The exempt lane neither restores the present dump nor writes one.
+                    expected = ["schema", "stamp", "upgrade", "vacuum", "tests"]
                 else:
                     expected = ["schema", "stamp", "upgrade", *(["dump", "dump-data"] if cache else []), "vacuum", "tests"]
                 if failure:
-                    expected = expected[:expected.index(failure) + 1]
+                    expected = expected[:expected.index(failure.split("-")[0] if failure.startswith("parity-") else failure) + 1]
                 self.assertEqual(log.read_text().splitlines(), expected)
-                if failure == "parity":
+                if failure.startswith("parity"):
                     self.assertIn("Restored baseline rows differ", result.stderr)
                 dump = cache_root / "baseline.sql"
                 if cache == "miss" and "dump-data" in expected and failure != "dump-data":
                     self.assertEqual(dump.read_text(), "CREATE SCHEMA mrf;\nCOPY mrf.alembic_version FROM stdin;\n")
-                    self.assertEqual((cache_root / "baseline.sql.data").read_text().splitlines()[2], "head")
+                    self.assertEqual((cache_root / "baseline.sql.data").read_text().splitlines()[2:4], ["head", "\\."])
                     self.assertEqual(sorted(path.name for path in cache_root.iterdir()), ["baseline.sql", "baseline.sql.data"])
                 elif cache == "miss":
                     self.assertFalse(dump.exists())

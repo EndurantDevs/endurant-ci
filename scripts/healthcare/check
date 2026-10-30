@@ -1964,10 +1964,13 @@ PY
 }
 
 prepare_postgres() {
-  local ordinary_migrations=0 restore=0
+  local shard=${1:-} ordinary_migrations=0 restore=0
   # The freshly migrated baseline (schema and seeded rows) is dumped once per migration-source
   # hash (see the setup action) and restored by every later lane instead of replaying the chain.
   local schema_dump=${CI_SCHEMA_CACHE:+$CI_SCHEMA_CACHE/baseline.sql}
+  # PTG snapshot guards compare table OIDs seeded by the migrations with the live catalog, and a
+  # restored baseline has new OIDs, so the PTG lane always migrates.
+  case "$shard" in core-ptg) schema_dump="" ;; esac
   if [ -f "$repository_root/alembic/versions/20261028110000_provider_directory_global_serving.py" ]; then
     ordinary_migrations=1
   fi
@@ -2064,10 +2067,16 @@ PY
   if [ "$restore" = 1 ]; then
     printf 'Restoring the migrated baseline from %s\n' "$schema_dump"
     PGPASSWORD="$HLTHPRT_DB_PASSWORD" psql "${target[@]}" --set ON_ERROR_STOP=1 --quiet --file "$schema_dump"
-    # Parity: the restored rows (seeded by the migrations, alembic_version included) must equal the cached ones.
-    if ! PGPASSWORD="$HLTHPRT_DB_PASSWORD" pg_dump "${target[@]}" --data-only "${scope[@]}" |
-        sed '/^\\\(un\)\{0,1\}restrict /d' | cmp -s - <(sed '/^\\\(un\)\{0,1\}restrict /d' "$schema_dump.data"); then
+    # Parity: the restored rows (seeded by the migrations, alembic_version included) must equal the cached
+    # ones. Each row is prefixed with its table and the lines are compared as a sorted set, because pg_dump
+    # orders table data by catalog identity, which differs after a restore when foreign keys form cycles.
+    local restored_rows cached_rows
+    restored_rows=$(PGPASSWORD="$HLTHPRT_DB_PASSWORD" pg_dump "${target[@]}" --data-only "${scope[@]}" 2>/dev/null |
+      sed '/^\\\(un\)\{0,1\}restrict /d' | awk 'table=="" && /^COPY /{table=$2; print; next} table!="" && /^\\\.$/{table=""; print; next} table!=""{print table "\t" $0; next} {print}' | LC_ALL=C sort)
+    cached_rows=$(sed '/^\\\(un\)\{0,1\}restrict /d' "$schema_dump.data" | awk 'table=="" && /^COPY /{table=$2; print; next} table!="" && /^\\\.$/{table=""; print; next} table!=""{print table "\t" $0; next} {print}' | LC_ALL=C sort)
+    if [ "$restored_rows" != "$cached_rows" ]; then
       printf 'Restored baseline rows differ from the cached migration output\n' >&2
+      diff <(printf '%s\n' "$cached_rows") <(printf '%s\n' "$restored_rows") | head -40 >&2 || true
       return 1
     fi
   else
@@ -4488,7 +4497,7 @@ run_postgres() {
       --username "$HLTHPRT_DB_USER" \
       --dbname "$HLTHPRT_DB_DATABASE" \
       --timeout=1
-  prepare_postgres
+  prepare_postgres "$shard"
   ci_phase_end
   if [[ "$shard" = fhir-catalog-integration ]]; then
     run_fhir_catalog_integration
