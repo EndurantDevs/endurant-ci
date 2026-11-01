@@ -47,6 +47,9 @@ postgres_block_lane() {
     profile-prepared-doctors-cancellation) printf 'registry-13\n' ;;
     semantic-proof-v3) printf 'registry-18\n' ;;
     profile-initial-publication) printf 'registry-20\n' ;;
+    profile-initial-ordinary-commit) printf 'registry-0\n' ;;
+    profile-initial-ordinary-rollback) printf 'registry-1\n' ;;
+    profile-initial-ordinary-reader) printf 'registry-5\n' ;;
     directory-retirement-0) printf 'registry-27\n' ;;
     directory-retirement-1) printf 'registry-35\n' ;;
     *) return 1 ;;
@@ -58,6 +61,32 @@ postgres_block_runs() {
   [[ "$lane" = all ]] && return 0
   target=$(postgres_block_lane "$block") || target=$home
   [[ "$lane" = "$target" ]]
+}
+
+profile_ordinary_initial_nodeids() {
+  local test_path=tests/test_provider_directory_profile_initial_cutover_postgres.py
+  if [[ ! -e "$repository_root/$test_path" && ! -L "$repository_root/$test_path" ]]; then return 0; fi
+  require_native_source_files "$test_path" || return "$?"
+  python - "$repository_root/$test_path" "$test_path" <<'PY'
+import ast
+import pathlib
+import sys
+
+name = "test_ordinary_initial_full_swap_from_undated_legacy"
+tree = ast.parse(pathlib.Path(sys.argv[1]).read_text())
+cases = [node for node in tree.body
+         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name]
+if not cases:
+    raise SystemExit(0)
+assert len(cases) == 1 and isinstance(cases[0], ast.AsyncFunctionDef), "Ordinary initial case differs"
+parameters = [node for node in cases[0].decorator_list if isinstance(node, ast.Call)
+              and ast.unparse(node.func) == "pytest.mark.parametrize"]
+assert len(parameters) == 1 and len(parameters[0].args) == 2 and not parameters[0].keywords, "Ordinary initial parameters differ"
+assert ast.literal_eval(parameters[0].args[0]) == "outcome", "Ordinary initial parameter differs"
+assert ast.literal_eval(parameters[0].args[1]) == ["commit", "rollback", "reader"], "Ordinary initial outcomes differ"
+for outcome in ("commit", "rollback", "reader"):
+    print(f"{sys.argv[2]}::{name}[{outcome}]")
+PY
 }
 
 usage() {
@@ -4568,6 +4597,12 @@ run_provider_profile_postgres() {
     tests/test_entity_address_serving_receipt_postgres.py \
     tests/test_provider_directory_cms_serving_receipt_postgres.py
   fi
+  local ordinary_initial_nodes ordinary_initial_node ordinary_initial_outcome
+  local ordinary_initial_exclusions=()
+  ordinary_initial_nodes=$(profile_ordinary_initial_nodeids) || return "$?"
+  while IFS= read -r ordinary_initial_node; do
+    [[ -z "$ordinary_initial_node" ]] || ordinary_initial_exclusions+=("--deselect=$ordinary_initial_node")
+  done <<< "$ordinary_initial_nodes"
   if postgres_block_runs "$lane" profile-publication profile-initial-publication; then
   run_available_cms_postgres owned \
     tests/test_provider_directory_profile_failed_cleanup_postgres.py \
@@ -4576,8 +4611,17 @@ run_provider_profile_postgres() {
     tests/test_provider_directory_profile_initial_cleanup_postgres.py \
     tests/test_provider_directory_profile_initial_reader_postgres.py \
     tests/test_provider_directory_profile_initial_cutover_postgres.py \
-    tests/test_provider_directory_profile_initial_replay.py
+    tests/test_provider_directory_profile_initial_replay.py \
+    ${ordinary_initial_exclusions[@]+"${ordinary_initial_exclusions[@]}"}
   fi
+  while IFS= read -r ordinary_initial_node; do
+    [[ -n "$ordinary_initial_node" ]] || continue
+    ordinary_initial_outcome=${ordinary_initial_node##*[}
+    ordinary_initial_outcome=${ordinary_initial_outcome%]}
+    if postgres_block_runs "$lane" profile-publication "profile-initial-ordinary-$ordinary_initial_outcome"; then
+      run_available_cms_postgres owned "$ordinary_initial_node"
+    fi
+  done <<< "$ordinary_initial_nodes"
 
   if postgres_block_runs "$lane" profile-publication profile-publication-suites; then
   set --

@@ -2652,7 +2652,7 @@ drop_test_database() {
   printf 'drop:%s\n' "$1" >> "$LIFECYCLE"
   if [[ ( "$1" = hc_cms_admission_test_* || "$1" = hc_directory_entities_* ) && "$CLEANUP_FAILURE" = drop ]]; then return 7; fi
 }
-''' + f'\n{function} postgresql://synthetic/native_directory_test_runner {lane}\n' + r'''
+''' + f'\npython() {{ command python3 "$@"; }}\ngit() {{ :; }}\n{function} postgresql://synthetic/native_directory_test_runner {lane}\n' + r'''
 test "$DB_SCHEMA:$HLTHPRT_DB_DATABASE_OVERRIDE" = stale_alias:wrong_database
 test "$HLTHPRT_DB_DATABASE" = native_directory_test_runner
 test -z "${HLTHPRT_CMS_NPD_ADMISSION_TEST_DSN:-}"
@@ -6545,6 +6545,9 @@ install_address_canon_wheel
                  "profile-prepared-doctors-ranges": "profile-publication", "organization-partition-v4": "directory-address",
                  "profile-prepared-doctors-cancellation": "profile-publication", "semantic-proof-v3": "directory-address",
                  "profile-initial-publication": "profile-publication",
+                 "profile-initial-ordinary-commit": "profile-publication",
+                 "profile-initial-ordinary-rollback": "profile-publication",
+                 "profile-initial-ordinary-reader": "profile-publication",
                  "directory-retirement-0": "directory-source", "directory-retirement-1": "directory-source"}
         self.assertEqual(set(placements), set(homes))
         self.assertEqual(len(set(placements.values())), len(placements), "one block per receiving shard")
