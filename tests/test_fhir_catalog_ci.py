@@ -17,7 +17,7 @@ CAPABILITY = FUNCTIONS.split("fhir_catalog_native_test_paths() {\n", 1)[1].split
 RETAINED_CAPTURE_TEST = "tests/test_network_fhir_retained_capture_postgres.py"
 NATIVE_TESTS = tuple(
     f"tests/test_registry_fhir_catalog_{name}_postgres.py"
-    for name in ("custody", "grant", "identity", "permissions", "publication", "read",
+    for name in ("custody", "grant", "identity", "metadata_reader", "permissions", "publication", "read",
                  "reference_rollup", "retained", "sources", "store", "sync")
 ) + (RETAINED_CAPTURE_TEST,)
 NODEID = "tests/test_registry_fhir_catalog_end_to_end.py::test_import_sync_query_replay_and_disappearance"

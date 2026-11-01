@@ -1079,6 +1079,7 @@ fhir_catalog_native_test_paths() {
     tests/test_registry_fhir_catalog_custody_postgres.py
     tests/test_registry_fhir_catalog_grant_postgres.py
     tests/test_registry_fhir_catalog_identity_postgres.py
+    tests/test_registry_fhir_catalog_metadata_reader_postgres.py
     tests/test_registry_fhir_catalog_permissions_postgres.py
     tests/test_registry_fhir_catalog_publication_postgres.py
     tests/test_registry_fhir_catalog_read_postgres.py
