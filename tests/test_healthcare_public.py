@@ -703,6 +703,7 @@ GRAPH_FRAGMENT_WHEEL_TESTS = (
     "tests/test_custom_import_graph_document_fragments.py",
     "tests/test_custom_import_graph_serial_metadata.py",
 )
+CATALOG_OBSERVATION_WHEEL_TEST = "tests/test_registry_fhir_catalog_observation_native.py"
 SOURCE_BOUNDS_SIGNATURE_FIXTURE = '''
 import inspect
 original_signature = inspect.signature
@@ -3451,7 +3452,7 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-ptg
                 environment = {**os.environ, "PYTHONPATH": str(source), "PYTHONDONTWRITEBYTECODE": "1"}
                 checkout = source if stage == "source-shadow" else source / "checkout"
                 checkout.mkdir(exist_ok=True)
-                for office in ("0", "1", "graph-projection", "source-preparation", "graph-fragments", "naic", "publication-worker", "manual-location-commands"):
+                for office in ("0", "1", "graph-projection", "source-preparation", "graph-fragments", "naic", "publication-worker", "manual-location-commands", "catalog-observation"):
                     prefix = "" if stage == "source-shadow" else "import sys; sys.path.insert(0, sys.argv[3])\n"
                     result = subprocess.run([sys.executable, "-I", "-S", "-", str(checkout), office, str(source)],
                                             input=prefix + probe, cwd=source, env=environment,
@@ -3470,12 +3471,14 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-ptg
         fragments = "custom_import_graph_document_fragments_v1"
         naic = "encode_naic_company_registry_observations"
         worker = "partition_network_membership_commands"
+        observation = "encode_catalog_observation_page"
         modes = {"0": REGISTRY_PTG_GRAPH_EXPORTS, "1": (*REGISTRY_PTG_GRAPH_EXPORTS, capture),
                  "graph-projection": (projection,), "source-preparation": (source_columns,),
                  "graph-fragments": (fragments,), "naic": (naic,), "publication-worker": (worker,),
-                 "manual-location-commands": ("canonicalize_batch", "canon_version")}
+                 "manual-location-commands": ("canonicalize_batch", "canon_version"),
+                 "catalog-observation": (observation,)}
         exports = (*REGISTRY_PTG_GRAPH_EXPORTS, capture, projection, source_columns, fragments, naic, worker,
-                   "canonicalize_batch", "canon_version")
+                   "canonicalize_batch", "canon_version", observation)
         for missing in (None, *exports):
             with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -4799,6 +4802,8 @@ run_rust
     def test_native_wheel_coverage_is_collected_before_report_without_instrumenting_release(self):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary)
+            (source / "tests").mkdir()
+            (source / CATALOG_OBSERVATION_WHEEL_TEST).touch()
             binary = source / "support/ptg2_scanner/target/release/ptg2_scanner"
             binary.parent.mkdir(parents=True)
             binary.write_text('#!/bin/sh\nif [ "$1" = --canon-version ]; then\n'
@@ -4818,19 +4823,19 @@ cargo() {
       printf 'export RUSTFLAGS=instrumented\nexport LLVM_PROFILE_FILE=%q\n' "$CARGO_TARGET_DIR/profiles-%p-%m.profraw"
       return ;;
   esac
-  printf 'cargo\t%s\t%s\t%s\n' "$*" "${RUSTFLAGS:-}" "$CARGO_LLVM_COV_TARGET_DIR" >> "$CALL_LOG"
+  printf 'cargo\t%s\t%s\t%s\t%s\n' "$*" "${RUSTFLAGS:-}" "$CARGO_LLVM_COV_TARGET_DIR" "${LLVM_COV_FLAGS:-}" >> "$CALL_LOG"
 }
 rustc() { echo 'rustc 1.98.1'; }
 python() {
   if [ "$1" = -c ]; then command python3 "$@"; return; fi
-  printf 'python\t%s\n' "$*" >> "$CALL_LOG"
+  printf 'python\t%s\t%s\n' "$*" "${LLVM_PROFILE_FILE:-}" >> "$CALL_LOG"
 }
 timeout() { shift 2; "$@"; }
 install_address_canon_wheel() {
   printf 'wheel\t%s\t%s\t%s\t%s\n' "$*" "${RUSTFLAGS:-}" "${CARGO_TARGET_DIR:-}" "${LLVM_PROFILE_FILE:-}" >> "$CALL_LOG"
 }
-run_rust_wheel_tests() {
-  printf 'wheel-tests\t%s\n' "${LLVM_PROFILE_FILE:-}" >> "$CALL_LOG"
+verify_registry_native_wheel() {
+  printf 'native-probe\t%s\t%s\n' "$2" "${LLVM_PROFILE_FILE:-}" >> "$CALL_LOG"
 }
 run_rust
 '''
@@ -4843,12 +4848,20 @@ run_rust
             self.assertEqual(len(coverage), 2)
             self.assertIn("--all-targets --features python --remap-path-prefix --no-report", coverage[0][1][1])
             self.assertIn("llvm-cov report ", coverage[1][1][1])
+            self.assertIn("-compilation-dir=support/ptg2_scanner", coverage[1][1][4])
             self.assertTrue(all(call[3] == coverage_target for _, call in coverage))
             wheels = [(index, call) for index, call in enumerate(calls) if call[0] == "wheel"]
             self.assertEqual(wheels[0][1], ["wheel", "", "instrumented", coverage_target,
                                           coverage_target + "/profiles-%p-%m.profraw"])
             self.assertEqual(wheels[1][1], ["wheel", "--release", "", "", ""])
-            tested = [index for index, call in enumerate(calls) if call[0] == "wheel-tests"]
+            tested = [index for index, call in enumerate(calls)
+                      if call[0] == "python" and CATALOG_OBSERVATION_WHEEL_TEST in call[1]]
+            probes = [(index, call) for index, call in enumerate(calls) if call[0] == "native-probe"]
+            self.assertEqual(len(tested), 2)
+            self.assertEqual([call[1] for _, call in probes], ["catalog-observation"] * 2)
+            self.assertEqual(calls[tested[0]][2], coverage_target + "/profiles-%p-%m.profraw")
+            self.assertEqual(calls[tested[1]][2], "")
+            self.assertTrue(all(probe[0] < test for probe, test in zip(probes, tested, strict=True)))
             provenance = next(index for index, call in enumerate(calls)
                               if call[0] == "python" and "write-report-provenance" in call[1])
             native_tests = next(index for index, call in enumerate(calls)
@@ -4972,8 +4985,10 @@ run_wheel_tests() {
         probe_function = CHECK_FUNCTIONS[probe_start:CHECK_FUNCTIONS.index("\n}\n", probe_start) + 3]
         source_export = "custom_import_source_columns_v1"
         fragment_export = "custom_import_graph_document_fragments_v1"
+        observation_export = "encode_catalog_observation_page"
         compiled_source = f"compiled_fixture.{source_export} = {source_export} = compiled_function\n"
         compiled_fragments = f"compiled_fixture.{fragment_export} = {fragment_export} = compiled_function\n"
+        compiled_observation = f"compiled_fixture.{observation_export} = {observation_export} = compiled_function\n"
         valid_source = compiled_source + SOURCE_BOUNDS_SIGNATURE_FIXTURE
         no_import = "raise AssertionError('unexpected extension import')\n"
         cases = [
@@ -4981,8 +4996,14 @@ run_wheel_tests() {
             (SOURCE_COLUMN_WHEEL_TESTS, valid_source, True, ""),
             (GRAPH_FRAGMENT_WHEEL_TESTS[:1], compiled_fragments, True, ""),
             (GRAPH_FRAGMENT_WHEEL_TESTS[1:], no_import, True, ""),
-            ((*SOURCE_COLUMN_WHEEL_TESTS, *GRAPH_FRAGMENT_WHEEL_TESTS),
-             valid_source + compiled_fragments, True, ""),
+            ((CATALOG_OBSERVATION_WHEEL_TEST,), compiled_observation, True, ""),
+            ((*SOURCE_COLUMN_WHEEL_TESTS, *GRAPH_FRAGMENT_WHEEL_TESTS, CATALOG_OBSERVATION_WHEEL_TEST),
+             valid_source + compiled_fragments + compiled_observation, True, ""),
+            ((CATALOG_OBSERVATION_WHEEL_TEST,), "", False, "Native registry extension is incomplete"),
+            ((CATALOG_OBSERVATION_WHEEL_TEST,), f"{observation_export} = len\n", False,
+             "Native registry extension is incomplete"),
+            ((CATALOG_OBSERVATION_WHEEL_TEST,), compiled_observation +
+             f"{observation_export} = lambda *args: []\n", False, "Native registry extension is incomplete"),
             (SOURCE_COLUMN_WHEEL_TESTS, "", False, "Native registry extension is incomplete"),
             (SOURCE_COLUMN_WHEEL_TESTS, f"{source_export} = len\n", False,
              "Native registry extension is incomplete"),
