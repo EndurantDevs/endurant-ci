@@ -440,6 +440,92 @@ class CommonTestBrokerIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(self.archive, original_archive)
 
+    def test_controller_broker_retains_native_commit_for_verified_offline_reuse(self):
+        original_controller, current_controller = "a" * 40, "b" * 40
+        self.arguments.source_repository = "example/source"
+        self.broker_arguments.source_repository = "example/source"
+        for item in (self.original_run, self.original_job, self.original_check):
+            item["head_sha"] = original_controller
+        for item in (self.current_run, self.current_job):
+            item["head_sha"] = current_controller
+        self.artifact["workflow_run"]["head_sha"] = original_controller
+        output = io.BytesIO()
+        with (
+            zipfile.ZipFile(io.BytesIO(self.archive)) as source,
+            zipfile.ZipFile(output, "w") as target,
+        ):
+            for name in source.namelist():
+                data = source.read(name)
+                if name.endswith("/measurement.json"):
+                    document = json.loads(data)
+                    document["measurement"]["source"]["repository_id"] = 11
+                    document["measurement"]["producer"]["commit"] = original_controller
+                    data = common.equivalent.encoded(document)
+                target.writestr(name, data)
+        self.archive = output.getvalue()
+        self.artifact["digest"] = "sha256:" + hashlib.sha256(self.archive).hexdigest()
+        authority = self.temporary / "authority.json"
+        authority.write_bytes(common.equivalent.encoded({
+            "schema": "common-test-source-authority-v1",
+            "source_repository_id": 11,
+            "consumer": {
+                "source_sha": self.current_sha,
+                "source_tree": self.tree,
+                "run_id": 21,
+                "run_attempt": 2,
+                "controller_sha": current_controller,
+            },
+            "origins": [{
+                "source_sha": self.original_sha,
+                "source_tree": self.tree,
+                "run_id": 20,
+                "run_attempt": 1,
+                "controller_sha": original_controller,
+            }],
+        }))
+        for arguments in (self.arguments, self.broker_arguments):
+            arguments.source_authority = authority
+            arguments.source_authority_sha256 = hashlib.sha256(
+                authority.read_bytes()
+            ).hexdigest()
+        original_read = self.read
+        native_path = "git/commits/" + original_controller
+
+        def read(repository, path):
+            if path == native_path:
+                self.assertEqual(repository, "example/project")
+                self.api_calls.append((repository, path))
+                return {"sha": original_controller, "tree": {"sha": self.tree}}
+            return original_read(repository, path)
+
+        self.read = read
+        prepared, _ = self.prepare()
+        self.consume()
+        self.assertEqual((self.source / "count").read_text(), "1")
+        self.assertEqual(len(self.executions.read_text().splitlines()), 1)
+        result = json.loads(
+            (self.measurements / self.key / "measurement.json").read_bytes()
+        )
+        self.assertFalse(result["measurement"]["executed"])
+        self.assertEqual(result["measurement"]["producer"]["commit"], current_controller)
+        original = result["origin"]["origin"]
+        self.assertEqual(original["producer"]["commit"], original_controller)
+        self.assertEqual(original["source"]["commit"], self.original_sha)
+        self.assertEqual(original["source"]["repository_id"], 11)
+        self.assertEqual(self.api_calls.count(("example/project", native_path)), 1)
+        for mismatch in ("missing", "tree"):
+            with self.subTest(mismatch=mismatch):
+                document = copy.deepcopy(prepared)
+                key = "example/project/" + native_path
+                if mismatch == "missing":
+                    del document["responses"][key]
+                else:
+                    document["responses"][key]["tree"]["sha"] = "c" * 40
+                self.bind_evidence(document)
+                (self.source / "count").write_text("1")
+                self.consume()
+                self.assert_stock()
+
     def test_evidence_schema_time_current_source_and_attempt_changes_run_stock(self):
         original, _ = self.prepare()
         changes = (
