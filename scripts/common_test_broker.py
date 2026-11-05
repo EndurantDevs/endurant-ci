@@ -199,6 +199,7 @@ def prepare(arguments):
                     "Original job has no same-repository native check",
                 )
                 read(repository, "check-runs/" + check[1])
+                read(repository, "git/commits/" + original_run["head_sha"])
                 for measurement in measurements:
                     if allowed is None:
                         read(
