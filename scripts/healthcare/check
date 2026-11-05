@@ -1823,7 +1823,7 @@ run_rust() {
     run_rust_wheel_tests
   )
   ci_phase_begin rust-coverage-report
-  LLVM_COV_FLAGS="${LLVM_COV_FLAGS:+$LLVM_COV_FLAGS }-compilation-dir=support/ptg2_scanner" \
+  LLVM_COV_FLAGS="${LLVM_COV_FLAGS:+$LLVM_COV_FLAGS }-compilation-dir=support/ptg2_scanner -skip-functions" \
     timeout --foreground 420s cargo llvm-cov report --manifest-path support/ptg2_scanner/Cargo.toml \
     --remap-path-prefix --json \
     --output-path "$rust_artifacts/test-coverage-rust.json"

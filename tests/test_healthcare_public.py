@@ -4811,7 +4811,8 @@ run_rust
             binary.chmod(0o755)
             capture = source / "calls"
             environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
-                           "CALL_LOG": str(capture), "COVERAGE_BASE_SHA": "a" * 40}
+                           "CALL_LOG": str(capture), "COVERAGE_BASE_SHA": "a" * 40,
+                           "LLVM_COV_FLAGS": "-num-threads=2"}
             script = CHECK_FUNCTIONS + r'''
 install_python_dependencies() { :; }
 cargo() {
@@ -4848,7 +4849,11 @@ run_rust
             self.assertEqual(len(coverage), 2)
             self.assertIn("--all-targets --features python --remap-path-prefix --no-report", coverage[0][1][1])
             self.assertIn("llvm-cov report ", coverage[1][1][1])
-            self.assertIn("-compilation-dir=support/ptg2_scanner", coverage[1][1][4])
+            self.assertEqual(shlex.split(coverage[1][1][4]), [
+                "-num-threads=2", "-compilation-dir=support/ptg2_scanner", "-skip-functions",
+            ])
+            self.assertEqual(coverage[0][1][4], "-num-threads=2")
+            self.assertNotIn("--summary-only", coverage[1][1][1])
             self.assertTrue(all(call[3] == coverage_target for _, call in coverage))
             wheels = [(index, call) for index, call in enumerate(calls) if call[0] == "wheel"]
             self.assertEqual(wheels[0][1], ["wheel", "", "instrumented", coverage_target,
