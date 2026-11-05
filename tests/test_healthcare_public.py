@@ -4812,6 +4812,7 @@ run_rust
             capture = source / "calls"
             environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
                            "CALL_LOG": str(capture), "COVERAGE_BASE_SHA": "a" * 40,
+                           "CARGO_LLVM_COV_TARGET_DIR": str(source / "unrelated-target"),
                            "LLVM_COV_FLAGS": "-num-threads=2"}
             script = CHECK_FUNCTIONS + r'''
 install_python_dependencies() { :; }
@@ -4846,15 +4847,27 @@ run_rust
             coverage_target = str(source / "support/ptg2_scanner/target/llvm-cov-target")
             coverage = [(index, call) for index, call in enumerate(calls)
                         if call[0] == "cargo" and call[1].startswith("llvm-cov ")]
-            self.assertEqual(len(coverage), 2)
-            self.assertIn("--all-targets --features python --remap-path-prefix --no-report", coverage[0][1][1])
-            self.assertIn("llvm-cov report ", coverage[1][1][1])
-            self.assertEqual(shlex.split(coverage[1][1][4]), [
+            self.assertEqual(len(coverage), 3)
+            self.assertEqual(coverage[0][1][1],
+                             "llvm-cov clean --workspace --manifest-path support/ptg2_scanner/Cargo.toml")
+            self.assertIn("--all-targets --features python --remap-path-prefix --no-report", coverage[1][1][1])
+            self.assertIn("llvm-cov report ", coverage[2][1][1])
+            self.assertEqual(shlex.split(coverage[2][1][4]), [
                 "-num-threads=2", "-compilation-dir=support/ptg2_scanner", "-skip-functions",
             ])
             self.assertEqual(coverage[0][1][4], "-num-threads=2")
-            self.assertNotIn("--summary-only", coverage[1][1][1])
+            self.assertNotIn("--summary-only", coverage[2][1][1])
             self.assertTrue(all(call[3] == coverage_target for _, call in coverage))
+            package_cleanups = [(index, call) for index, call in enumerate(calls)
+                                if call[0] == "cargo" and call[1].startswith("clean ")]
+            cleanup_args = ["clean", "--manifest-path", "support/ptg2_scanner/Cargo.toml",
+                            "--package", "ptg2_scanner", "--target-dir", coverage_target]
+            self.assertEqual([shlex.split(call[1]) for _, call in package_cleanups],
+                             [cleanup_args, [*cleanup_args, "--release"]])
+            self.assertTrue(all(call[3] == coverage_target for _, call in package_cleanups))
+            self.assertLess(coverage[0][0], package_cleanups[0][0])
+            self.assertLess(package_cleanups[0][0], package_cleanups[1][0])
+            self.assertLess(package_cleanups[1][0], coverage[1][0])
             wheels = [(index, call) for index, call in enumerate(calls) if call[0] == "wheel"]
             self.assertEqual(wheels[0][1], ["wheel", "", "instrumented", coverage_target,
                                           coverage_target + "/profiles-%p-%m.profraw"])
@@ -4871,14 +4884,70 @@ run_rust
                               if call[0] == "python" and "write-report-provenance" in call[1])
             native_tests = next(index for index, call in enumerate(calls)
                                 if call[0] == "python" and "test_provider_directory_projection_native_copy.py" in call[1])
-            self.assertLess(coverage[0][0], wheels[0][0])
+            self.assertLess(coverage[0][0], coverage[1][0])
+            self.assertLess(coverage[1][0], wheels[0][0])
             self.assertLess(wheels[0][0], tested[0])
-            self.assertLess(tested[0], coverage[1][0])
-            self.assertLess(coverage[1][0], provenance)
+            self.assertLess(tested[0], coverage[2][0])
+            self.assertLess(coverage[2][0], provenance)
             self.assertLess(provenance, wheels[1][0])
             self.assertLess(wheels[1][0], native_tests)
             self.assertLess(native_tests, tested[1])
             self.assertLess(wheels[1][0], tested[1])
+
+    def test_rust_coverage_cleanup_failure_prevents_measurement_and_export(self):
+        for failed_cleanup in ("workspace", "dev", "release"):
+            with self.subTest(failed_cleanup=failed_cleanup), tempfile.TemporaryDirectory() as temporary:
+                self.check_rust_cleanup_failure(Path(temporary), failed_cleanup)
+
+    def check_rust_cleanup_failure(self, source, failed_cleanup):
+        capture = source / "calls"
+        environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
+                       "CALL_LOG": str(capture),
+                       "FAILED_CLEANUP": failed_cleanup,
+                       "CARGO_LLVM_COV_TARGET_DIR": str(source / "unrelated-target")}
+        script = CHECK_FUNCTIONS + r'''
+install_python_dependencies() { :; }
+cargo() {
+  case "$*" in
+    'llvm-cov --version') echo 'cargo-llvm-cov 0.8.7'; return ;;
+  esac
+  printf '%s\t%s\n' "$*" "$CARGO_LLVM_COV_TARGET_DIR" >> "$CALL_LOG"
+  case "$*" in
+    'llvm-cov clean --workspace --manifest-path support/ptg2_scanner/Cargo.toml')
+      [ "$FAILED_CLEANUP" != workspace ] || return 17
+      printf 'warning: delegated cleanup failed\n' >&2
+      return 0 ;;
+    'clean --manifest-path support/ptg2_scanner/Cargo.toml --package ptg2_scanner --target-dir '*)
+      profile=dev
+      [ "${!#}" != --release ] || profile=release
+      [ "$FAILED_CLEANUP" != "$profile" ] || return 17 ;;
+    'llvm-cov --manifest-path '*|'llvm-cov report '*) return 93 ;;
+  esac
+}
+timeout() { shift 2; "$@"; }
+install_address_canon_wheel() { printf 'unexpected-wheel\n' >> "$CALL_LOG"; }
+run_rust
+'''
+        result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 17, result.stderr)
+        calls = [line.split("\t") for line in capture.read_text().splitlines()]
+        expected = [
+            "fmt --manifest-path support/ptg2_scanner/Cargo.toml -- --check",
+            "clippy --manifest-path support/ptg2_scanner/Cargo.toml --all-targets -- -D warnings",
+            "llvm-cov clean --workspace --manifest-path support/ptg2_scanner/Cargo.toml",
+        ]
+        coverage_target = str(source / "support/ptg2_scanner/target/llvm-cov-target")
+        cleanup = ("clean --manifest-path support/ptg2_scanner/Cargo.toml "
+                   "--package ptg2_scanner --target-dir " + coverage_target)
+        if failed_cleanup != "workspace":
+            expected.append(cleanup)
+            self.assertIn("warning: delegated cleanup failed", result.stderr)
+        if failed_cleanup == "release":
+            expected.append(cleanup + " --release")
+        self.assertEqual([call[0] for call in calls], expected)
+        self.assertTrue(all(call[1] == coverage_target for call in calls))
+        self.assertRegex(result.stdout,
+                         r"CI_PHASE end name=rust-coverage elapsed_seconds=\d+ exit_code=17")
 
     def test_rust_wheel_tests_require_compiled_scalar_capability_when_enrolled(self):
         start = CHECK_FUNCTIONS.index("  ci_phase_begin rust-wheel-tests\n")

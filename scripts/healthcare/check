@@ -1807,6 +1807,14 @@ run_rust() {
   ci_phase_begin rust-coverage
   mkdir -p "$rust_artifacts"
   test "$(cargo llvm-cov --version)" = "cargo-llvm-cov 0.8.7"
+  # --no-report skips automatic cleanup of restored coverage objects and profiles.
+  timeout --foreground 420s cargo llvm-cov clean --workspace \
+    --manifest-path support/ptg2_scanner/Cargo.toml
+  # The coverage tool can mask Cargo cleanup errors; check both profiles directly.
+  timeout --foreground 420s cargo clean --manifest-path support/ptg2_scanner/Cargo.toml \
+    --package ptg2_scanner --target-dir "$CARGO_LLVM_COV_TARGET_DIR"
+  timeout --foreground 420s cargo clean --manifest-path support/ptg2_scanner/Cargo.toml \
+    --package ptg2_scanner --target-dir "$CARGO_LLVM_COV_TARGET_DIR" --release
   timeout --foreground 420s cargo llvm-cov --manifest-path support/ptg2_scanner/Cargo.toml \
     --all-targets --features python --remap-path-prefix --no-report
   ci_phase_end
