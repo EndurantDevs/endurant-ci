@@ -1397,6 +1397,15 @@ run_python_main() {
     fi
   done
   for test_path in \
+    tests/test_provider_directory_published_replacement_postgres.py \
+    tests/test_provider_directory_published_replacement_recovery_postgres.py \
+    tests/test_provider_directory_published_replacement_inputs_postgres.py \
+    tests/test_provider_directory_published_replacement_recipe_postgres.py; do
+    if [ -f "$repository_root/$test_path" ]; then
+      collection_args+=(--ignore "$test_path")
+    fi
+  done
+  for test_path in \
     tests/test_registry_required_target_store_postgres.py \
     tests/test_registry_required_target_review_store_postgres.py \
     tests/test_registry_required_target_coverage_postgres.py \
@@ -4223,7 +4232,11 @@ run_provider_directory_postgres() {
     tests/test_provider_directory_profile_historical_capacity_postgres.py \
     tests/test_provider_directory_serving_capacity_migration_postgres.py \
     tests/test_provider_directory_serving_read_catalog_postgres.py \
-    tests/test_provider_directory_serving_recovery_postgres.py; do
+    tests/test_provider_directory_serving_recovery_postgres.py \
+    tests/test_provider_directory_published_replacement_postgres.py \
+    tests/test_provider_directory_published_replacement_recovery_postgres.py \
+    tests/test_provider_directory_published_replacement_inputs_postgres.py \
+    tests/test_provider_directory_published_replacement_recipe_postgres.py; do
     if [ -f "$repository_root/$serving_test" ]; then
       serving_tests+=("$serving_test")
     fi
