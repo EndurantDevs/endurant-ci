@@ -76,6 +76,20 @@ class JobPaginationChecks(unittest.TestCase):
                 for page in range(1, len(responses) + 1)
             ])
 
+    def test_changing_job_count_restarts_without_retaining_partial_rows(self):
+        partial = [{**row, "id": row["id"] + 1000} for row in self.jobs[:50]]
+        responses = [{"total_count": 80, "jobs": partial},
+                     {"total_count": 81, "jobs": self.jobs[50:80]},
+                     {"total_count": 80, "jobs": self.jobs[:50]},
+                     {"total_count": 80, "jobs": self.jobs[50:80]}]
+        with patch.object(cleanup.github, "api", side_effect=responses) as api, \
+                patch.object(cleanup.github.time, "sleep") as sleep:
+            self.assertEqual(cleanup.attempt_jobs(self.repository, self.run, 2), self.jobs[:80])
+        self.assertEqual([call.args[1] for call in api.call_args_list], [
+            f"{self.path}?per_page=50&page={page}" for page in (1, 2, 1, 2)
+        ])
+        sleep.assert_called_once_with(1)
+
     def test_later_job_pages_require_a_stable_integer_count_and_complete_schema(self):
         first = {"total_count": 80, "jobs": self.jobs[:50]}
         invalid = [None, [], {}, {"total_count": 80}, {"jobs": self.jobs[50:80]},
@@ -85,10 +99,12 @@ class JobPaginationChecks(unittest.TestCase):
                      for value in (None, {}, "jobs", [None] * 30, self.jobs[:51], self.jobs[50:70], []))]
         for response in invalid:
             with self.subTest(response=response), patch.object(
-                    cleanup.github, "api", side_effect=[first, response]) as api, \
+                    cleanup.github, "api", side_effect=[first, response] * 3) as api, \
+                    patch.object(cleanup.github.time, "sleep") as sleep, \
                     self.assertRaisesRegex(ValueError, "job inventory"):
                 cleanup.attempt_jobs(self.repository, self.run, 2)
-            self.assertEqual(api.call_count, 2)
+            self.assertEqual(api.call_count, 6)
+            self.assertEqual([call.args for call in sleep.call_args_list], [(1,), (2,)])
 
     def test_job_count_must_match_the_complete_last_page(self):
         for total, last in ((80, self.jobs[50:79]), (79, self.jobs[50:80]),
@@ -96,9 +112,34 @@ class JobPaginationChecks(unittest.TestCase):
             responses = [{"total_count": total, "jobs": values}
                          for values in (self.jobs[:50], last)]
             with self.subTest(total=total, last=len(last)), patch.object(
-                    cleanup.github, "api", side_effect=responses), \
+                    cleanup.github, "api", side_effect=responses * 3), \
+                    patch.object(cleanup.github.time, "sleep"), \
                     self.assertRaisesRegex(ValueError, "job inventory"):
                 cleanup.attempt_jobs(self.repository, self.run, 2)
+
+    def test_persistent_job_metadata_error_never_yields_partial_inventory(self):
+        responses = [{"total_count": 80, "jobs": self.jobs[:50]},
+                     {"total_count": 81, "jobs": self.jobs[50:80]}] * 3
+        with patch.object(cleanup.github, "api", side_effect=responses) as api, \
+                patch.object(cleanup.github.time, "sleep") as sleep, \
+                self.assertRaisesRegex(ValueError, "job inventory"):
+            next(cleanup.github.pages(self.repository, self.path, "jobs"))
+        self.assertEqual(api.call_count, 6)
+        self.assertEqual([call.args for call in sleep.call_args_list], [(1,), (2,)])
+
+    def test_recovered_job_pages_still_refuse_foreign_provenance(self):
+        rows = deepcopy(self.jobs[:80])
+        rows[-1]["head_sha"] = "b" * 40
+        responses = [{"total_count": 80, "jobs": self.jobs[:50]},
+                     {"total_count": 81, "jobs": self.jobs[50:80]},
+                     {"total_count": 80, "jobs": rows[:50]},
+                     {"total_count": 80, "jobs": rows[50:]}]
+        with patch.object(cleanup.github, "api", side_effect=responses) as api, \
+                patch.object(cleanup.github.time, "sleep") as sleep, \
+                self.assertRaisesRegex(ValueError, "ambiguous run-attempt provenance"):
+            cleanup.attempt_jobs(self.repository, self.run, 2)
+        self.assertEqual(api.call_count, 4)
+        sleep.assert_called_once_with(1)
 
     def test_later_job_page_failure_prevents_artifact_access_and_deletion(self):
         failure = OSError("synthetic later page failure")

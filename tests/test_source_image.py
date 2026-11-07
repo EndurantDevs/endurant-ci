@@ -178,6 +178,28 @@ class AdmissionChecks(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.admit(run, jobs, items, producer_jobs=changed)
 
+    def test_publication_restarts_incomplete_job_read_before_source_and_artifacts(self):
+        run, jobs, items = self.fixtures()
+        jobs = jobs[:-1] + [{**jobs[2], "id": index + 5, "name": f"check-{index}"}
+                           for index in range(76)] + jobs[-1:]
+        responses = [{"total_count": 80, "jobs": jobs[:50]},
+                     {"total_count": 81, "jobs": jobs[50:]},
+                     {"total_count": 80, "jobs": jobs[:50]},
+                     {"total_count": 80, "jobs": jobs[50:]},
+                     {"sha": "a" * 40}, {"artifacts": items}, {"sha": "f" * 40}]
+        with patch.dict(os.environ, {"GITHUB_JOB": "dev-image-publication", "IMAGE_ARTIFACT_ID": "44",
+                                     "MEASUREMENT_ARTIFACT_ID": "55"}), \
+                patch.object(transfer, "context", return_value=(IDENTITY, run)), \
+                patch.object(transfer.github, "api", side_effect=responses) as api, \
+                patch.object(transfer.github.time, "sleep") as sleep:
+            self.assertEqual(transfer.admit(), expected())
+        self.assertEqual([call.args[1] for call in api.call_args_list], [
+            *(f"actions/runs/123/attempts/2/jobs?per_page=50&page={page}" for page in (1, 2, 1, 2)),
+            "commits/dev", "actions/runs/123/artifacts?per_page=100&page=1",
+            "contents/.github/workflows/ci.yml?ref=" + "a" * 40,
+        ])
+        sleep.assert_called_once_with(1)
+
     def test_non_dev_publication_is_authenticated_noop(self):
         run, jobs, items = self.fixtures()
         self.assertIsNone(self.admit({**run, "event": "pull_request"}, jobs, items))
