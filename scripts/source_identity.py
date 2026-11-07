@@ -13,6 +13,10 @@ REPOSITORIES = {"EndurantDevs/drug-api", "EndurantDevs/healthcare-mrf-api"}
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 
 
+class JobInventoryPending(ValueError):
+    """A complete job inventory cannot yet be read consistently."""
+
+
 def api(repository, path, method="GET"):
     if repository not in REPOSITORIES:
         raise ValueError("repository is outside the public validation allowlist")
@@ -46,6 +50,22 @@ def api(repository, path, method="GET"):
 
 
 def pages(repository, path, key=None):
+    if key != "jobs":
+        yield from _pages(repository, path, key)
+        return
+    for attempt in range(3):
+        try:
+            values = list(_pages(repository, path, key))
+        except JobInventoryPending:
+            if attempt == 2:
+                raise
+            time.sleep(attempt + 1)
+        else:
+            yield from values
+            return
+
+
+def _pages(repository, path, key):
     separator = "&" if "?" in path else "?"
     page_size = 50 if key == "jobs" else 100
     total, collected = None, 0
@@ -57,11 +77,11 @@ def pages(repository, path, key=None):
             if (type(count) is not int or count < 0 or (total is not None and count != total)
                     or not isinstance(values, list) or len(values) > page_size
                     or any(not isinstance(value, dict) for value in values)):
-                raise ValueError("GitHub job inventory has invalid or changing pagination metadata")
+                raise JobInventoryPending("GitHub job inventory has invalid or changing pagination metadata")
             total = count
             collected += len(values)
             if collected > total or (len(values) < page_size and collected != total):
-                raise ValueError("GitHub job inventory is incomplete or exceeds its declared count")
+                raise JobInventoryPending("GitHub job inventory is incomplete or exceeds its declared count")
         else:
             values = result[key] if key else result
         yield from values
