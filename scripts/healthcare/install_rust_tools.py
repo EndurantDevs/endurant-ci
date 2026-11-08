@@ -3,12 +3,12 @@
 
 import hashlib
 import io
-from pathlib import Path
 import platform
+import subprocess
 import sys
 import tarfile
-import urllib.request
-
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 TOOLS = (
     (
@@ -40,13 +40,24 @@ def install_archive(data, checksum, member_name, destination):
         binary.chmod(0o755)
 
 
+def _download_archive(url):
+    with TemporaryDirectory(prefix="rust-tool-download-") as directory:
+        archive = Path(directory) / "archive.tar.gz"
+        subprocess.run(
+            ["curl", "--disable", "--fail", "--location", "--proto-redir", "=https",
+             "--retry", "2", "--retry-delay", "1", "--retry-max-time", "60",
+             "--connect-timeout", "10", "--max-time", "30", "--output", str(archive), url],
+            check=True, timeout=95,
+        )
+        return archive.read_bytes()
+
+
 def main(destination):
     if (platform.system(), platform.machine()) != ("Linux", "x86_64"):
         raise ValueError("Rust validation tools require native Linux x86_64")
     destination.mkdir(parents=True, exist_ok=True)
     for url, checksum, member in TOOLS:
-        with urllib.request.urlopen(url, timeout=60) as response:
-            install_archive(response.read(), checksum, member, destination)
+        install_archive(_download_archive(url), checksum, member, destination)
         print(f"Installed {Path(member).name} from verified archive sha256:{checksum}")
 
 
