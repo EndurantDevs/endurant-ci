@@ -367,6 +367,101 @@ docker() {
                 with self.assertRaises(ValueError):
                     IDENTITY.resolve_identity(REPOSITORY, "push", payload, SOURCE, "refs/heads/main")
 
+    def _development_push_case(self, repository="EndurantDevs/healthcare-mrf-api", branch="dev"):
+        parent, reviewed, tree = "4" * 40, "5" * 40, "6" * 40
+        commit = {"sha": SOURCE, "parents": [{"sha": parent}], "commit": {"tree": {"sha": tree}}}
+        pr = {"number": 7, "merged": True, "state": "closed", "merge_commit_sha": SOURCE,
+              "base": {"ref": branch, "sha": BASE, "repo": {"full_name": repository}},
+              "head": {"sha": reviewed}, "commits": 1}
+        comparison = {"status": "ahead", "behind_by": 0, "merge_base_commit": {"sha": BASE},
+                      "total_commits": 2, "ahead_by": 2,
+                      "commits": [{"sha": parent, "parents": [{"sha": BASE}]}, commit]}
+        responses = {f"commits/{SOURCE}": commit, "pulls/7": pr, f"compare/{BASE}...{SOURCE}": comparison,
+                     f"git/commits/{reviewed}": {"sha": reviewed, "tree": {"sha": "7" * 40}}}
+        payload = {"repository": {"full_name": repository, "private": False}, "ref": "refs/heads/" + branch,
+                   "after": SOURCE, "before": parent}
+        return payload, responses, [{**pr, "merged_at": "2026-01-01T00:00:00Z"}]
+
+    def test_development_push_uses_event_parent_after_reviewed_base_drift(self):
+        payload, responses, associated = self._development_push_case()
+        with patch.object(IDENTITY, "api", side_effect=lambda repo, path: responses[path]) as api, \
+                patch.object(IDENTITY, "pages", return_value=associated) as pages:
+            result = IDENTITY.resolve_identity(payload["repository"]["full_name"], "push", payload,
+                                               SOURCE, payload["ref"])
+        self.assertEqual(result["source_sha"], SOURCE)
+        self.assertEqual(result["base_sha"], payload["before"])
+        self.assertEqual(result["pr_number"], "0")
+        api.assert_called_once_with(payload["repository"]["full_name"], f"commits/{SOURCE}")
+        pages.assert_not_called()
+
+    def test_push_before_preserves_release_and_other_repository_ranges(self):
+        for repository, branch in ((REPOSITORY, "main"), (REPOSITORY, "dev"),
+                                   ("EndurantDevs/healthcare-mrf-api", "main")):
+            with self.subTest(repository=repository, branch=branch):
+                payload, responses, associated = self._development_push_case(repository, branch)
+                responses["pulls/7"]["commits"] = 2
+                responses["git/commits/" + "5" * 40]["tree"]["sha"] = "6" * 40
+                with patch.object(IDENTITY, "api", side_effect=lambda repo, path: responses[path]), \
+                        patch.object(IDENTITY, "pages", return_value=associated):
+                    result = IDENTITY.resolve_identity(repository, "push", payload, SOURCE, payload["ref"])
+                self.assertEqual(result["base_sha"], BASE)
+
+    def test_development_push_without_before_keeps_existing_fallback(self):
+        payload, responses, associated = self._development_push_case()
+        payload.pop("before")
+        repository = payload["repository"]["full_name"]
+        with patch.object(IDENTITY, "api", side_effect=lambda repo, path: responses[path]), \
+                patch.object(IDENTITY, "pages", return_value=associated) as pages:
+            with self.assertRaises(ValueError):
+                IDENTITY.resolve_identity(repository, "push", payload, SOURCE, payload["ref"])
+            responses["pulls/7"]["base"]["sha"] = "4" * 40
+            result = IDENTITY.resolve_identity(repository, "push", payload, SOURCE, payload["ref"])
+        self.assertEqual(result["base_sha"], "4" * 40)
+        self.assertEqual(pages.call_count, 2)
+
+    def test_invalid_development_before_cannot_bypass_existing_drift_refusal(self):
+        for before in ("invalid", "0" * 40, True, "8" * 40):
+            with self.subTest(before=before):
+                payload, responses, associated = self._development_push_case()
+                payload["before"] = before
+                with patch.object(IDENTITY, "api", side_effect=lambda repo, path: responses[path]), \
+                        patch.object(IDENTITY, "pages", return_value=associated), self.assertRaises(ValueError):
+                    IDENTITY.resolve_identity(payload["repository"]["full_name"], "push", payload,
+                                              SOURCE, payload["ref"])
+
+    def test_development_linear_range_keeps_ancestry_and_completeness_guards(self):
+        for damage in (None, "nonancestor", "parent", "incomplete"):
+            with self.subTest(damage=damage):
+                payload, responses, associated = self._development_push_case()
+                payload["before"] = BASE
+                responses["pulls/7"]["commits"] = 2
+                responses["git/commits/" + "5" * 40]["tree"]["sha"] = "6" * 40
+                comparison = responses[f"compare/{BASE}...{SOURCE}"]
+                if damage == "nonancestor": comparison["merge_base_commit"]["sha"] = "8" * 40
+                elif damage == "parent": comparison["commits"][0]["parents"] = [{"sha": "8" * 40}]
+                elif damage == "incomplete": comparison["commits"] = comparison["commits"][1:]
+                with patch.object(IDENTITY, "api", side_effect=lambda repo, path: responses[path]), \
+                        patch.object(IDENTITY, "pages", return_value=associated):
+                    if damage is None:
+                        self.assertEqual(IDENTITY.resolve_identity(payload["repository"]["full_name"], "push",
+                            payload, SOURCE, payload["ref"])["base_sha"], BASE)
+                    else:
+                        with self.assertRaises(ValueError):
+                            IDENTITY.resolve_identity(payload["repository"]["full_name"], "push", payload,
+                                                      SOURCE, payload["ref"])
+
+    def test_development_push_preserves_legacy_parent_shape_handling(self):
+        payload, responses, associated = self._development_push_case()
+        repository = payload["repository"]["full_name"]
+        with patch.object(IDENTITY, "api", side_effect=lambda repo, path: responses[path]), \
+                patch.object(IDENTITY, "pages", return_value=associated):
+            responses[f"commits/{SOURCE}"]["parents"].append({"sha": "8" * 40})
+            result = IDENTITY.resolve_identity(repository, "push", payload, SOURCE, payload["ref"])
+            self.assertEqual(result["base_sha"], "4" * 40)
+            responses[f"commits/{SOURCE}"]["parents"] = []
+            with self.assertRaises(ValueError):
+                IDENTITY.resolve_identity(repository, "push", payload, SOURCE, payload["ref"])
+
     def test_rejects_other_repository_and_manual_event(self):
         for repository, event in (("example/private", "push"), (REPOSITORY, "workflow_dispatch")):
             with self.subTest(repository=repository, event=event), self.assertRaises(ValueError):
