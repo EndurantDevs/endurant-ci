@@ -3,16 +3,16 @@
 import hashlib
 import json
 import os
-from pathlib import Path
 import platform
 import subprocess
 import tarfile
 import tempfile
 import time
 import unittest
-import urllib.request
 import uuid
+from pathlib import Path
 
+from scripts.healthcare.install_rust_tools import _download_archive
 
 K3S_URL = "https://github.com/k3s-io/k3s/releases/download/v1.35.5%2Bk3s1/k3s"
 K3S_SHA256 = "267d18da7b3c837d82283f0588fb9031a8a6ff3c0dac772c260c40852ce515f6"
@@ -96,9 +96,8 @@ class NativeImageTransport(unittest.TestCase):
         self.assertIsNone(inspect("container", name))
         image_owned = inspect("image", DIND) is None
         binary = task / "k3s-bin"
-        with urllib.request.urlopen(K3S_URL, timeout=60) as response, binary.open("xb") as output:
-            while block := response.read(1024 * 1024):
-                output.write(block)
+        with binary.open("xb") as output:
+            output.write(_download_archive(K3S_URL))
         self.assertEqual(hashlib.sha256(binary.read_bytes()).hexdigest(), K3S_SHA256)
         binary.chmod(0o700)
         command(str(binary), "ctr", "--help", env=os.environ | {"K3S_DATA_DIR": str(task / "k3s")})

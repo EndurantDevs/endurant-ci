@@ -1,8 +1,12 @@
 """Reject a corrupt uv download before extraction or PATH publication."""
 
+import hashlib
+import io
+import json
 import os
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +15,98 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class UvBootstrapTests(unittest.TestCase):
+    def _archive_case(self, case):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binaries, runner = root / "bin", root / "runner"
+            binaries.mkdir()
+            runner.mkdir()
+            path_file, calls, archive = root / "path", root / "calls", root / "archive.tar.gz"
+            path_file.touch()
+            version_script = (
+                b'#!/bin/bash\n'
+                b'test ! -s "$GITHUB_PATH" || exit 61\n'
+                b'printf \'["version"]\\n\' >> "$BOOTSTRAP_CALLS"\n'
+                b'if [ "$BOOTSTRAP_CASE" = version ]; then echo "uv 0.12.16"; else echo "uv 0.12.17"; fi\n'
+            )
+            with tarfile.open(archive, "w:gz") as bundle:
+                for name in ("uv", "uvx"):
+                    member = tarfile.TarInfo(f"uv-x86_64-unknown-linux-gnu/{name}")
+                    member.mode, member.size = 0o755, len(version_script)
+                    bundle.addfile(member, io.BytesIO(version_script))
+            tools = f'#!{sys.executable}\n' + '''import hashlib, json, os, subprocess, sys
+from pathlib import Path
+name, args, case = Path(sys.argv[0]).name, sys.argv[1:], os.environ["BOOTSTRAP_CASE"]
+with Path(os.environ["BOOTSTRAP_CALLS"]).open("a") as log:
+    log.write(json.dumps([name, *args]) + "\\n")
+if name == "curl":
+    target = Path(args[args.index("--output") + 1])
+    assert not target.exists(), "partial archive was retained before fallback"
+    if case == "both" or case == "fallback" and "releases.astral.sh" in args[-1]:
+        target.write_bytes(b"partial")
+        raise SystemExit(22)
+    target.write_bytes(b"corrupt" if case == "checksum" else Path(os.environ["BOOTSTRAP_ARCHIVE"]).read_bytes())
+elif name == "sha256sum":
+    expected, filename = sys.stdin.read().strip().split("  ", 1)
+    assert expected == "fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63"
+    raise SystemExit(hashlib.sha256(Path(filename).read_bytes()).hexdigest() != os.environ["BOOTSTRAP_FIXTURE_SHA"])
+elif name == "tar":
+    raise SystemExit(31 if case == "extract" else subprocess.run(["/usr/bin/tar", *args]).returncode)
+'''
+            for name in ("curl", "sha256sum", "tar"):
+                executable = binaries / name
+                executable.write_text(tools)
+                executable.chmod(0o755)
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts/install_uv")],
+                env={**os.environ, "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
+                     "RUNNER_TEMP": str(runner), "GITHUB_PATH": str(path_file),
+                     "BOOTSTRAP_CALLS": str(calls), "BOOTSTRAP_CASE": case,
+                     "BOOTSTRAP_ARCHIVE": str(archive),
+                     "BOOTSTRAP_FIXTURE_SHA": hashlib.sha256(archive.read_bytes()).hexdigest()},
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+            for retained in runner.iterdir():
+                self.assertEqual({path.name for path in retained.iterdir()}, {"uv", "uvx"})
+            return result, [json.loads(line) for line in calls.read_text().splitlines()], path_file.read_text(), list(runner.iterdir())
+
+    def test_fixed_origins_use_bounded_transport_fallback_before_validation(self):
+        for case in ("mirror", "fallback", "both"):
+            with self.subTest(case=case):
+                result, calls, published_path, remaining = self._archive_case(case)
+                downloads = [call for call in calls if call[0] == "curl"]
+                self.assertEqual(len(downloads), 1 if case == "mirror" else 2)
+                self.assertEqual(downloads[0][-1],
+                                 "https://releases.astral.sh/github/uv/releases/download/0.12.17/uv-x86_64-unknown-linux-gnu.tar.gz")
+                if len(downloads) == 2:
+                    self.assertEqual(downloads[1][-1],
+                                     "https://github.com/astral-sh/uv/releases/download/0.12.17/uv-x86_64-unknown-linux-gnu.tar.gz")
+                for download in downloads:
+                    for option, value in (("--retry", "1"), ("--retry-delay", "1"), ("--retry-max-time", "61"),
+                                          ("--connect-timeout", "10"), ("--max-time", "30")):
+                        self.assertEqual(download[download.index(option) + 1], value)
+                self.assertLessEqual(sum(1 + int(call[call.index("--retry") + 1]) for call in downloads), 4)
+                self.assertEqual(result.returncode, 22 if case == "both" else 0, result.stderr)
+                if case == "both":
+                    self.assertEqual([call[0] for call in calls], ["curl", "curl"])
+                    self.assertEqual(published_path, "")
+                    self.assertEqual(remaining, [])
+                else:
+                    self.assertEqual([call[0] for call in calls][-3:], ["sha256sum", "tar", "version"])
+                    self.assertEqual(len(remaining), 1)
+                    self.assertEqual(published_path, f"{remaining[0]}\n")
+
+    def test_integrity_extraction_and_version_failure_never_fall_back_or_publish_path(self):
+        for case, status, expected_calls in (("checksum", 1, ["curl", "sha256sum"]),
+                                             ("extract", 31, ["curl", "sha256sum", "tar"]),
+                                             ("version", 1, ["curl", "sha256sum", "tar", "version"])):
+            with self.subTest(case=case):
+                result, calls, published_path, remaining = self._archive_case(case)
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertEqual([call[0] for call in calls], expected_calls)
+                self.assertEqual(published_path, "")
+                self.assertEqual(remaining, [])
+
     def test_managed_interpreter_environment_is_published_only_after_success(self):
         for status, has_library in ((0, True), (41, True), (0, False)):
             with self.subTest(status=status, has_library=has_library), tempfile.TemporaryDirectory() as directory:
@@ -43,7 +139,7 @@ class UvBootstrapTests(unittest.TestCase):
                          "RUNNER_TEMP": str(runner), "GITHUB_PATH": str(path_file),
                          "GITHUB_ENV": str(env_file), "UV_CALLS": str(calls), "UV_STATUS": str(status),
                          "UV_LIBRARY": str(library_directory), "LD_LIBRARY_PATH": "/synthetic/existing/lib"},
-                    capture_output=True, text=True,
+                    capture_output=True, text=True, check=False,
                 )
                 expected_status = status or (0 if has_library else 1)
                 self.assertEqual(result.returncode, expected_status, result.stderr)
@@ -87,7 +183,7 @@ class UvBootstrapTests(unittest.TestCase):
                 env={**os.environ, "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
                      "RUNNER_TEMP": str(runner), "GITHUB_PATH": str(path_file),
                      "BOOTSTRAP_MARKER": str(marker)},
-                capture_output=True, text=True,
+                capture_output=True, text=True, check=False,
             )
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertFalse(marker.exists())
