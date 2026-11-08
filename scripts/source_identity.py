@@ -189,7 +189,11 @@ def resolve_identity(repository, event_name, payload, github_sha, github_ref):
         if commit.get("sha") != github_sha:
             raise ValueError("push source commit changed")
         source = github_sha
-        base, _ = main_source_range(repository, commit, branch=branch)
+        base, _ = main_source_range(
+            repository, commit,
+            payload.get("before") if (repository, branch) == ("EndurantDevs/healthcare-mrf-api", "dev") else None,
+            branch=branch,
+        )
         number = 0
     else:
         raise ValueError("public validation accepts only pull_request, push, and DEV merge_group events")
