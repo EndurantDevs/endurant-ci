@@ -137,6 +137,25 @@ def main_source_range(repository, commit, requested_base=None, *, branch="main")
 
 
 
+def merge_group_range(repository, payload, github_sha, github_ref):
+    group = payload.get("merge_group", {})
+    source, base = group.get("head_sha"), group.get("base_sha")
+    if not (repository == "EndurantDevs/healthcare-mrf-api" and payload.get("action") == "checks_requested"
+            and group.get("base_ref") == "refs/heads/dev" and group.get("head_ref") == github_ref
+            and re.fullmatch(r"refs/heads/gh-readonly-queue/dev/pr-[1-9][0-9]*-[0-9a-f]+", github_ref)
+            and source == github_sha and all(isinstance(sha, str) and SHA.fullmatch(sha)
+                                            and set(sha) != {"0"} for sha in (source, base))):
+        raise ValueError("merge group must identify one exact DEV queue candidate")
+    queue = api(repository, "git/ref/" + github_ref.removeprefix("refs/"))
+    if queue.get("ref") != github_ref or queue.get("object", {}).get("sha") != source:
+        raise ValueError("merge group queue ref changed after its event")
+    comparison = api(repository, f"compare/{base}...{source}")
+    if not (comparison.get("status") == "ahead" and comparison.get("behind_by") == 0
+            and comparison.get("merge_base_commit", {}).get("sha") == base):
+        raise ValueError("merge group candidate does not descend from its comparison base")
+    return source, base
+
+
 def resolve_identity(repository, event_name, payload, github_sha, github_ref):
     event_repository = payload.get("repository", {})
     if (repository not in REPOSITORIES or event_repository.get("full_name") != repository
@@ -159,6 +178,9 @@ def resolve_identity(repository, event_name, payload, github_sha, github_ref):
             raise ValueError("pull request source, base, or title changed after its event")
         if not isinstance(title, str) or not title.strip() or any(c in title for c in "\r\n\0"):
             raise ValueError("pull request title must be present and single-line")
+    elif event_name == "merge_group":
+        source, base = merge_group_range(repository, payload, github_sha, github_ref)
+        branch, number = "dev", 0
     elif event_name == "push":
         if payload.get("deleted") or github_ref != payload.get("ref") or github_sha != payload.get("after"):
             raise ValueError("push event does not match the workflow source")
@@ -170,7 +192,7 @@ def resolve_identity(repository, event_name, payload, github_sha, github_ref):
         base, _ = main_source_range(repository, commit, branch=branch)
         number = 0
     else:
-        raise ValueError("public validation accepts only pull_request and push events")
+        raise ValueError("public validation accepts only pull_request, push, and DEV merge_group events")
     if branch not in {"main", "dev"}:
         raise ValueError("public validation target must be main or dev")
     if any(not isinstance(sha, str) or not SHA.fullmatch(sha) or set(sha) == {"0"} for sha in (source, base)):

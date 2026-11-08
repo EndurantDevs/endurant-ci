@@ -106,6 +106,7 @@ if "--output-file" in sys.argv:
     ):
         for setting in (
             {"COMMON_TEST_EQUIVALENCE": "false"},
+            {"GITHUB_EVENT_NAME": "merge_group"},
             {"GH_TOKEN": ""},
             {"COMMON_TEST_STEP": ""},
         ):
