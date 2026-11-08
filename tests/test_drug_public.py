@@ -314,6 +314,37 @@ docker() {
                     with self.assertRaises(ValueError):
                         IDENTITY.resolve_identity(REPOSITORY, "pull_request", payload, SOURCE, "refs/pull/7/merge")
 
+    def test_merge_group_binds_exact_queue_ref_and_comparison_base(self):
+        repository = "EndurantDevs/healthcare-mrf-api"
+        ref = "refs/heads/gh-readonly-queue/dev/pr-7-" + SOURCE
+        payload = {"repository": {"full_name": repository, "private": False}, "action": "checks_requested",
+                   "merge_group": {"head_sha": SOURCE, "base_sha": BASE, "head_ref": ref,
+                                   "base_ref": "refs/heads/dev"}}
+        responses = {"git/ref/" + ref.removeprefix("refs/"): {"ref": ref, "object": {"sha": SOURCE}},
+                     f"compare/{BASE}...{SOURCE}": {"status": "ahead", "behind_by": 0,
+                                                   "merge_base_commit": {"sha": BASE}}}
+        with patch.object(IDENTITY, "api", side_effect=lambda repo, path: responses[path]):
+            result = IDENTITY.resolve_identity(repository, "merge_group", payload, SOURCE, ref)
+        self.assertEqual(result, {"repository": repository, "source_sha": SOURCE, "base_sha": BASE,
+                                  "source_branch": "dev", "pr_number": "0", "pr_title": ""})
+        mutations = (("head_sha", "0" * 40), ("base_sha", "invalid"), ("head_ref", "refs/heads/dev"),
+                     ("base_ref", "refs/heads/main"))
+        for field, value in mutations:
+            changed = copy.deepcopy(payload)
+            changed["merge_group"][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                IDENTITY.resolve_identity(repository, "merge_group", changed, SOURCE, ref)
+        for field, value in (("action", "destroyed"), ("repository", {"full_name": repository, "private": True})):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                IDENTITY.resolve_identity(repository, "merge_group", {**payload, field: value}, SOURCE, ref)
+        for path, changed in (("git/ref/" + ref.removeprefix("refs/"), {"ref": ref, "object": {"sha": BASE}}),
+                              (f"compare/{BASE}...{SOURCE}", {"status": "diverged", "behind_by": 1})):
+            with self.subTest(path=path), patch.object(IDENTITY, "api", side_effect=lambda repo, key: changed if key == path else responses[key]):
+                with self.assertRaises(ValueError):
+                    IDENTITY.resolve_identity(repository, "merge_group", payload, SOURCE, ref)
+        with self.assertRaises(ValueError):
+            IDENTITY.resolve_identity(REPOSITORY, "merge_group", {**payload, "repository": {"full_name": REPOSITORY, "private": False}}, SOURCE, ref)
+
     def test_push_range_uses_complete_rebased_pull_request(self):
         intermediate, original, tree = "4" * 40, "5" * 40, "6" * 40
         commit = {"sha": SOURCE, "parents": [{"sha": intermediate}], "commit": {"tree": {"sha": tree}}}

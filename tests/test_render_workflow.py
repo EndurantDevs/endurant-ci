@@ -19,6 +19,23 @@ SPEC.loader.exec_module(RENDERER)
 
 
 class RenderWorkflowChecks(unittest.TestCase):
+    def test_merge_queue_validates_without_publishing_candidate_images(self):
+        with tempfile.TemporaryDirectory() as directory:
+            caller = Path(directory) / "ci.yml"
+            caller.write_text(yaml.safe_dump({"on": {"pull_request": {}, "push": {"branches": ["main", "dev"]}},
+                "jobs": {"smoke": {"name": "portable import checks", "runs-on": "ubuntu-latest",
+                                    "steps": [{"run": "true"}]}}}))
+            workflow = yaml.safe_load(RENDERER.render_workflow("healthcare", "1" * 40, caller))
+            self.assertEqual(workflow["on"]["merge_group"], {"types": ["checks_requested"], "branches": ["dev"]})
+            self.assertEqual(workflow["concurrency"]["cancel-in-progress"], "${{ github.event_name == 'pull_request' }}")
+            jobs = workflow["jobs"]
+            self.assertIn("github.event_name != 'merge_group'", jobs["dev-image-publication"]["if"])
+            self.assertEqual(jobs["source-validation"]["if"], "${{ !cancelled() }}")
+            for name in ("smoke", "measurement", "container-package", "python-tests", "address-canonical-db-tests"):
+                self.assertNotIn("merge_group", jobs[name]["if"])
+            drug = yaml.safe_load(RENDERER.render_workflow("drug", "1" * 40, caller))
+            self.assertNotIn("merge_group", drug["on"])
+
     def test_uv_bootstrap_is_the_checksum_pinned_script_without_an_external_action(self):
         with tempfile.TemporaryDirectory() as directory:
             caller = Path(directory) / "ci.yml"
@@ -161,7 +178,10 @@ class RenderWorkflowChecks(unittest.TestCase):
                     if kind == "healthcare":
                         self.assertEqual(sum(len(job.get("strategy", {}).get("matrix", {}).get("include", [None]))
                                              for job in workflow["jobs"].values()), 82)
-                    self.assertEqual(workflow["on"], original["on"])
+                    expected_events = dict(original["on"])
+                    if kind == "healthcare":
+                        expected_events["merge_group"] = {"types": ["checks_requested"], "branches": ["dev"]}
+                    self.assertEqual(workflow["on"], expected_events)
                     expected_jobs = {"smoke", "dev-image-publication", *canonical["jobs"]}
                     if kind == "drug":
                         expected_jobs.add("artifact-cleanup")
@@ -328,7 +348,8 @@ class RenderWorkflowChecks(unittest.TestCase):
                     self.assertNotIn("watch", dispatch["run"])
                 else:
                     self.assertFalse(any(step.get("name") == "Queue independent artifact cleanup" for step in publisher["steps"]))
-                self.assertEqual(publisher["if"], "${{ " + RENDERER.GUARD + "success()) }}")
+                publication_condition = "github.event_name != 'merge_group' && " if kind == "healthcare" else ""
+                self.assertEqual(publisher["if"], "${{ " + RENDERER.GUARD + publication_condition + "success()) }}")
                 self.assertEqual(steps["Upload DEV image publication intent"]["with"], {
                     "name": kind + "-public-image-intent-${{ github.run_id }}-${{ github.run_attempt }}",
                     "path": "${{ runner.temp }}/public-image-intent/intent.json",

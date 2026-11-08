@@ -42,6 +42,8 @@ def render_workflow(kind, revision, caller):
         raise ValueError("an approved workflow kind and exact nonzero package revision are required")
     workflow = yaml.safe_load(caller.read_text())
     workflow["on"] = workflow.pop(True) if True in workflow else workflow["on"]
+    if kind == "healthcare":
+        workflow["on"]["merge_group"] = {"types": ["checks_requested"], "branches": ["dev"]}
     canonical = yaml.safe_load((ROOT / ".github/workflows" / f"{kind}.yml").read_text())
     canonical = json.loads(json.dumps(canonical).replace("${{ inputs.ci_revision }}", revision))
     workflow["permissions"] = canonical["permissions"]
@@ -181,6 +183,8 @@ def render_workflow(kind, revision, caller):
             condition = condition[3:-2].strip()
         if condition.startswith(GUARD) and condition.endswith(")"):
             condition = condition[len(GUARD):-1]
+        if kind == "healthcare" and job_id == "dev-image-publication":
+            condition = "github.event_name != 'merge_group' && " + condition
         # Required checks must exist in the latest PR suite, including metadata edits.
         metadata_required = job_id == "smoke" or (kind, job_id) in {
             ("healthcare", "source-validation"), ("drug", "publish"),
