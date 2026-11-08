@@ -2447,11 +2447,9 @@ run_custom_import_verification_postgres() (
   local archive_url=$1 verification_tests test_path
   verification_tests=$(custom_import_verification_native_test_paths) || exit 1
   [ -n "$verification_tests" ] || exit 0
-  local verification_test_paths=()
   while IFS= read -r test_path; do
-    verification_test_paths+=("$test_path")
+    run_reported_custom_import_postgres "$archive_url" "$test_path" || exit "$?"
   done <<< "$verification_tests"
-  run_reported_custom_import_postgres "$archive_url" "${verification_test_paths[@]}" || exit "$?"
 )
 
 run_reported_custom_import_postgres() (

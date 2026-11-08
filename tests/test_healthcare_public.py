@@ -5622,8 +5622,9 @@ git() {
                   *(lane for lane, _ in group_lanes), "all", "legacy")]
         cases += [(native_lane, count, "", native_paths[-1]) for count in range(len(capabilities))]
         cases += [(lane, len(capabilities), stage, failure_path) for lane, failure_path in group_lanes for stage in ("create", "setup")]
+        report_failures = [(native_lane, path) for path in native_paths] + ([(reader_lane, reader_paths[0])] if reader_paths else [])
         cases += [(lane, len(capabilities), stage, failure_path)
-                  for lane, failure_path in group_lanes
+                  for lane, failure_path in report_failures
                   for stage in ("pytest", "missing-report", "empty", "skipped", "error", "failure", "duplicate", "wrong-family", "missing-family")]
         for lane, count, stage, failure_path in cases:
             with self.subTest(lane=lane, count=count, stage=stage, failure=failure_path), tempfile.TemporaryDirectory() as temporary:
@@ -5641,6 +5642,8 @@ git() {
                     "CI_DEPS_READY": "1", "COVERAGE_BASE_SHA": "a" * 40,
                     "RUNNER_TEMP": str(runner), "CALL_LOG": str(log), "PYTHON_BIN": sys.executable,
                     "COVERAGE_FILE": str(root / "coverage"), "HLTHPRT_DB_USER": "synthetic",
+                    "EXPECTED_COVERAGE_FILE": str(root / "coverage"),
+                    "PYTEST_ADDOPTS": "--cov=process --cov-append --cov-report=",
                     "HLTHPRT_DB_PASSWORD": "synthetic", "HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN": "",
                     "ROUTE_LANE": lane, "FAIL_STAGE": stage, "FAILURE_PATH": failure_path,
                 }
@@ -5667,6 +5670,8 @@ timeout() {
 python() {
   if [ "$1" = - ]; then "$PYTHON_BIN" "$@"; return "$?"; fi
   if [[ "$1:${2:-}:${3:-}" = '-m:pytest:-q' && " $* " = *' --junitxml '* ]]; then
+    [[ "$COVERAGE_FILE" = "$EXPECTED_COVERAGE_FILE" ]] || return 97
+    [[ "$PYTEST_ADDOPTS" = '--cov=process --cov-append --cov-report=' ]] || return 97
     shift 3
     local test_paths=()
     while [ "$#" -gt 0 ] && [ "$1" != --junitxml ]; do
@@ -5733,7 +5738,7 @@ printf 'complete\n' >> "$CALL_LOG"
                 if count and reader_paths and lane in {reader_lane, "all", "legacy"}:
                     expected_groups.append(list(reader_paths))
                 if count and lane in {native_lane, "all", "legacy"}:
-                    expected_groups.append(list(native_paths[:count]))
+                    expected_groups.extend([path] for path in native_paths[:count])
                 expected_calls = expected_groups
                 if stage in {"create", "setup"}:
                     expected_calls = []
