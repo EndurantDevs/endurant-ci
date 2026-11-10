@@ -106,7 +106,6 @@ if "--output-file" in sys.argv:
     ):
         for setting in (
             {"COMMON_TEST_EQUIVALENCE": "false"},
-            {"GITHUB_EVENT_NAME": "merge_group"},
             {"GH_TOKEN": ""},
             {"COMMON_TEST_STEP": ""},
         ):
@@ -163,6 +162,15 @@ if "--output-file" in sys.argv:
                     arguments[arguments.index("--source-authority-sha256") + 1],
                     "d" * 64,
                 )
+
+    def test_merge_queue_run_reaches_the_engine_which_decides_what_it_may_record(self):
+        result = self.shell(
+            "public_common_test_run healthcare-python-main-0 - python -m pytest -q",
+            GITHUB_EVENT_NAME="merge_group",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = json.loads((self.root / "arguments.json").read_text())
+        self.assertEqual(arguments[arguments.index("--scope") + 1], "healthcare-python-main-0")
 
     def test_different_controller_requires_bound_evidence_and_source_defaults_to_current_repository(
         self,

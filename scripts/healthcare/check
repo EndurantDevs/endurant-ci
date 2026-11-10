@@ -117,7 +117,11 @@ prepare_python_environment() {
   if [ "${CI_PYTHON_ENV_READY:-0}" = 1 ]; then
     return
   fi
-  python_environment_root=$(mktemp -d "${RUNNER_TEMP:-/tmp}/healthcare-ci-python.XXXXXX")
+  # Installed launchers embed this path. A fixed location keeps their bytes, and so the
+  # measured dependency inventory, equal across jobs; a second environment gets its own.
+  python_environment_root="${RUNNER_TEMP:-/tmp}/healthcare-ci-python"
+  mkdir "$python_environment_root" 2>/dev/null ||
+    python_environment_root=$(mktemp -d "${RUNNER_TEMP:-/tmp}/healthcare-ci-python.XXXXXX")
   cleanup_python_environment() {
     local status=$?
     trap - EXIT

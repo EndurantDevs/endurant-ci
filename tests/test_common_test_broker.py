@@ -621,6 +621,30 @@ class CommonTestBrokerIntegrationTests(unittest.TestCase):
         self.assert_stock()
         self.assertFalse((self.measurements / self.key).exists())
 
+    def test_merge_queue_run_prepares_identity_without_history_for_a_same_commit_record(self):
+        self.current_run["event"] = "merge_group"
+        document, download = self.prepare()
+        self.assertEqual(document["archives"], {})
+        download.assert_not_called()
+        self.assertEqual(
+            [path for _, path in self.api_calls],
+            ["actions/runs/21", "actions/runs/21/attempts/2/jobs?per_page=50", "actions/jobs/32", ""],
+        )
+        # A stock scope still records nothing; an enrolled scope records its original offline.
+        self.arguments.scope = "healthcare-python-main-0"
+        with (
+            patch.object(common, "api", side_effect=AssertionError("Unexpected API")),
+            patch.object(common, "download", side_effect=AssertionError("Unexpected download")),
+            redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(common.execute(self.arguments), 0)
+        key = hashlib.sha256(self.arguments.scope.encode()).hexdigest()
+        record = json.loads((self.measurements / key / "measurement.json").read_bytes())
+        self.assertTrue(record["measurement"]["executed"])
+        self.assertIsNone(record["origin"])
+        self.assertEqual(record["measurement"]["inputs"]["execution_profile"], "same-commit-v1")
+        self.assertEqual(record["measurement"]["producer"]["run_id"], 21)
+
     def test_declared_content_scopes_keep_authenticated_discovery(self):
         for index, scopes in enumerate(
             (

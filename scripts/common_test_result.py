@@ -37,6 +37,33 @@ REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 CONTENT_SCOPE = "python-unittest-content-v1"
 PYTEST_CONTENT_SCOPE = "python-pytest-content-v1"
 CONTENT_SCOPES = (CONTENT_SCOPE, PYTEST_CONTENT_SCOPE)
+NATIVE_EVENTS = frozenset({"push", "pull_request", "workflow_dispatch"})
+# An enrolled scope may reuse an execution of the same commit that GitHub started under
+# another event or ref, such as the merge-queue run of a commit that was then pushed.
+SAME_COMMIT_PROFILE = "same-commit-v1"
+SAME_COMMIT_SCOPES = re.compile(r"healthcare-(?:python-main-[0-5]|capacity)\Z")
+# Its command never sees the labels a workflow starts under, so they cannot change a result.
+# The event commit is one of them: for a pull request it names GitHub's merge commit, which
+# moves with the base branch, not the commit that is checked out and tested.
+START_LABELS = (
+    "GITHUB_SHA",
+    "GITHUB_WORKFLOW_SHA",
+    "GITHUB_REF",
+    "GITHUB_REF_NAME",
+    "GITHUB_REF_TYPE",
+    "GITHUB_REF_PROTECTED",
+    "GITHUB_HEAD_REF",
+    "GITHUB_BASE_REF",
+    "GITHUB_EVENT_NAME",
+    "GITHUB_EVENT_PATH",
+    "GITHUB_WORKFLOW_REF",
+    "PR_NUMBER",
+    "SOURCE_PR_TITLE",
+    "SOURCE_BRANCH",
+)
+# A native wheel's bill of materials gets a new serial number and timestamp on every build,
+# and the installer stamps a locally built wheel with the time it was cached.
+GENERATED_DOCUMENTS = re.compile(r"\.dist-info/(?:sboms/[^/]+|uv_cache\.json)\Z")
 CONTENT_ENVIRONMENT = (
     "PATH",
     "LANG",
@@ -485,13 +512,32 @@ def attempt_jobs(repository, run):
     raise ValueError("Native job inventory exceeds its bounded window")
 
 
-def current_producer(repository, step):
+def same_commit(scope):
+    return SAME_COMMIT_SCOPES.fullmatch(scope) is not None
+
+
+def producer_events(measurement):
+    """Only a same-commit measurement may come from, or originate in, a merge-queue run."""
+    if measurement["inputs"].get("execution_profile") == SAME_COMMIT_PROFILE:
+        return NATIVE_EVENTS | {"merge_group"}
+    return NATIVE_EVENTS
+
+
+def command_environment(scope):
+    """The stock environment without evidence tokens, and without start labels when enrolled."""
+    hidden = {"GH_TOKEN", "GITHUB_TOKEN", "SOURCE_TOKEN"}
+    if same_commit(scope):
+        hidden.update(START_LABELS)
+    return {name: value for name, value in os.environ.items() if name not in hidden}
+
+
+def current_producer(repository, step, events=NATIVE_EVENTS):
     run = api(repository, "actions/runs/" + os.environ["GITHUB_RUN_ID"])
     equivalent.require(
         run.get("repository", {}).get("full_name") == repository
         and run.get("head_repository", {}).get("id") == run["repository"]["id"]
         and run.get("run_attempt") == int(os.environ["GITHUB_RUN_ATTEMPT"])
-        and run.get("event") in {"push", "pull_request", "workflow_dispatch"},
+        and run.get("event") in events,
         "Current execution is not a same-repository authorized workflow attempt",
     )
     jobs = attempt_jobs(repository, run)
@@ -686,6 +732,9 @@ def collect(arguments, producer, source_repository_id, execution=None):
         runtime_files=arguments.runtime_file,
         allowed_outputs=arguments.allowed_source_output
         + (arguments.output_file if arguments.data_root.resolve() == root else []),
+        generated_documents=GENERATED_DOCUMENTS
+        if execution is None and same_commit(arguments.scope)
+        else None,
     )
     # The names are declared by the reviewed caller. Their actual values, not
     # caller-supplied hashes, enter the execution fingerprint. Never accept secrets.
@@ -750,6 +799,14 @@ def collect(arguments, producer, source_repository_id, execution=None):
         inputs["execution_profile"] = arguments.scope
         inputs["environment"] = execution["inputs"]
         inputs["toolchains"].update(execution["tools"])
+    elif same_commit(arguments.scope):
+        # The commit fixes all reachable history; which other refs a clone lists does not
+        # belong to it, and the start labels are withheld from the command.
+        for name in ("source_git", "recipe_git", "verifier_git"):
+            inputs[name].pop("references_sha256")
+        for name in START_LABELS:
+            inputs["identity_environment"].pop(name, None)
+        inputs["execution_profile"] = SAME_COMMIT_PROFILE
     inputs["verifier_files"] = equivalent.file_inventory(
         helper_root, ["scripts/result_equivalence.py", "scripts/common_test_result.py"]
     )
@@ -951,7 +1008,7 @@ def verify_original(current, original, run, artifact, data, repository):
         artifact,
         archive_sha256=hashlib.sha256(data).hexdigest(),
         producer_recipe_verified=recipe_verified,
-        allowed_events={"push", "pull_request", "workflow_dispatch"},
+        allowed_events=producer_events(original),
         artifact_name=artifact_name(original["producer"]),
         upload_step=UPLOAD_STEP,
     )
@@ -996,7 +1053,7 @@ def refresh_document(
         check,
         artifact,
         archive_sha256=archive_sha256,
-        allowed_events={"push", "pull_request", "workflow_dispatch"},
+        allowed_events=producer_events(current),
         artifact_name=artifact_name(producer),
         upload_step=UPLOAD_STEP,
     )
@@ -1094,7 +1151,7 @@ def select(current, repository, key, arguments):
             continue
         try:
             run = api(repository, f"actions/runs/{summary['id']}")
-            if run.get("event") not in {"push", "pull_request", "workflow_dispatch"}:
+            if run.get("event") not in producer_events(current):
                 continue
             inventory = artifacts(repository, run["id"])
             for artifact in inventory:
@@ -1102,8 +1159,13 @@ def select(current, repository, key, arguments):
                     f"common-tests-{run['id']}-{run['run_attempt']}-"
                 ):
                     continue
-                data = download(repository, artifact["id"])
-                original, raw = archive_document(data, key, arguments.output_file)
+                try:
+                    data = download(repository, artifact["id"])
+                    original, raw = archive_document(data, key, arguments.output_file)
+                except (KeyError, ValueError, zipfile.BadZipFile):
+                    # A run uploads one archive per job. Another job's holds other scopes,
+                    # and the broker retains this job's only: look at the next one.
+                    continue
                 if (
                     original["fingerprint"] != current["fingerprint"]
                     or original["executed"] is not True
@@ -1155,7 +1217,13 @@ def execute(arguments, *, read=api, choose=select, run=subprocess.run):
     with tempfile.TemporaryDirectory(prefix="common-test-bytecode-") as cache:
         os.environ.update(PYTHONPYCACHEPREFIX=cache, PYTHONDONTWRITEBYTECODE="1")
         try:
-            if arguments.scope in CONTENT_SCOPES:
+            if same_commit(arguments.scope):
+                return execute_isolated(arguments, read=read, choose=choose, run=run)
+            # Merge-queue runs produce and consume nothing outside the same-commit profile.
+            if (
+                arguments.scope in CONTENT_SCOPES
+                and os.environ.get("GITHUB_EVENT_NAME") != "merge_group"
+            ):
                 with tempfile.TemporaryDirectory(
                     prefix="common-test-content-"
                 ) as directory:
@@ -1196,11 +1264,7 @@ def execute(arguments, *, read=api, choose=select, run=subprocess.run):
             return run(
                 arguments.command,
                 cwd=arguments.source_root.resolve(),
-                env={
-                    name: value
-                    for name, value in os.environ.items()
-                    if name not in {"GH_TOKEN", "GITHUB_TOKEN", "SOURCE_TOKEN"}
-                },
+                env=command_environment(arguments.scope),
                 check=False,
             ).returncode
         finally:
@@ -1246,13 +1310,17 @@ def execute_isolated(
             and os.environ.get("GITHUB_REPOSITORY"),
             "No read-only workflow evidence token",
         )
-        evidence = None
+        evidence, workflow = None, {}
         if arguments.evidence_directory:
             evidence = install_evidence(arguments)
             producer = evidence["producer"]
         else:
-            producer, _workflow = current_producer(
-                os.environ["GITHUB_REPOSITORY"], arguments.step
+            producer, workflow = current_producer(
+                os.environ["GITHUB_REPOSITORY"],
+                arguments.step,
+                NATIVE_EVENTS | {"merge_group"}
+                if execution is None and same_commit(arguments.scope)
+                else NATIVE_EVENTS,
             )
         if arguments.source_authority is not None:
             path = arguments.source_authority
@@ -1274,12 +1342,17 @@ def execute_isolated(
             len(equivalent.encoded(current)) <= 2 * 1024 * 1024,
             "Resolved execution measurement exceeds its bounded envelope",
         )
-        proof, raw = choose(
-            current,
-            os.environ["GITHUB_REPOSITORY"],
-            hashlib.sha256(arguments.scope.encode()).hexdigest(),
-            arguments,
-        )
+        # A merge-queue run only records: with or without a broker it consumes no history.
+        if "merge_group" not in (
+            os.environ.get("GITHUB_EVENT_NAME"),
+            workflow.get("event"),
+        ):
+            proof, raw = choose(
+                current,
+                os.environ["GITHUB_REPOSITORY"],
+                hashlib.sha256(arguments.scope.encode()).hexdigest(),
+                arguments,
+            )
     except (
         HTTPException,
         KeyError,
@@ -1312,11 +1385,7 @@ def execute_isolated(
         environment = (
             execution["environment"]
             if execution is not None
-            else {
-                name: value
-                for name, value in os.environ.items()
-                if name not in {"GH_TOKEN", "GITHUB_TOKEN", "SOURCE_TOKEN"}
-            }
+            else command_environment(arguments.scope)
         )
         status = run(
             arguments.command,

@@ -41,8 +41,11 @@ def prepare(arguments):
     repository = os.environ["GITHUB_REPOSITORY"]
     try:
         common.api = read
-        producer, _run = common.current_producer(
-            repository, "Prepare read-only common-test evidence"
+        # A merge-queue run may only record a same-commit original; it consumes no history.
+        producer, run = common.current_producer(
+            repository,
+            "Prepare read-only common-test evidence",
+            common.NATIVE_EVENTS | {"merge_group"},
         )
         job = read(repository, f"actions/jobs/{producer['job_id']}")
         future = [
@@ -99,7 +102,8 @@ def prepare(arguments):
         # Stock scopes cannot consume reuse evidence; keep their full execution.
         candidates = (
             []
-            if scopes and not any(scope in common.CONTENT_SCOPES for scope in scopes)
+            if run.get("event") == "merge_group"
+            or (scopes and not any(scope in common.CONTENT_SCOPES for scope in scopes))
             else read(repository, query)["workflow_runs"]
         )
         usable = []
