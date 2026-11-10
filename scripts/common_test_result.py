@@ -1159,8 +1159,13 @@ def select(current, repository, key, arguments):
                     f"common-tests-{run['id']}-{run['run_attempt']}-"
                 ):
                     continue
-                data = download(repository, artifact["id"])
-                original, raw = archive_document(data, key, arguments.output_file)
+                try:
+                    data = download(repository, artifact["id"])
+                    original, raw = archive_document(data, key, arguments.output_file)
+                except (KeyError, ValueError, zipfile.BadZipFile):
+                    # A run uploads one archive per job. Another job's holds other scopes,
+                    # and the broker retains this job's only: look at the next one.
+                    continue
                 if (
                     original["fingerprint"] != current["fingerprint"]
                     or original["executed"] is not True

@@ -511,6 +511,45 @@ class CommonResultIntegrationTests(unittest.TestCase):
         self.assertEqual(current["inputs"]["source_git"]["commit"], self.source_sha)
         self.assertEqual(receipt["origin"]["origin"]["producer"]["run_id"], 20)
 
+    def test_original_is_found_after_other_jobs_measurements_of_the_same_run(self):
+        self.same_commit_original()
+        (self.root / "count").unlink()
+        other_job = io.BytesIO()
+        with zipfile.ZipFile(other_job, "w") as archive:
+            archive.writestr("f" * 64 + "/measurement.json", "{}")
+        original_read = self.read
+
+        def read(repository, path):
+            response = original_read(repository, path)
+            if path == "actions/runs/20/artifacts?per_page=100":
+                # GitHub lists the newest upload first; this job's own is not it.
+                listed = response["artifacts"][0]
+                response["artifacts"] = [
+                    {**listed, "id": 48, "name": "common-tests-20-1-28"},
+                    {**listed, "id": 49, "name": "common-tests-20-1-29"},
+                    listed,
+                ]
+            return response
+
+        def download(_repository, identifier):
+            if identifier == 48:
+                # An offline broker retains this job's archive only.
+                raise KeyError(str(identifier))
+            return other_job.getvalue() if identifier == 49 else self.archive
+
+        with (
+            patch.object(common, "api", side_effect=read),
+            patch.object(common, "download", side_effect=download),
+            patch.dict(os.environ, {"GITHUB_EVENT_NAME": "push"}),
+        ):
+            self.assertEqual(common.execute(self.arguments, read=read), 0)
+        self.assertEqual((self.root / "count").read_text(), "1")
+        receipt = json.loads(
+            next(self.directory.glob("*/measurement.json")).read_text()
+        )
+        self.assertFalse(receipt["measurement"]["executed"])
+        self.assertEqual(receipt["origin"]["artifact_id"], 50)
+
     def test_same_commit_scope_runs_in_full_for_another_commit_parent_or_checkout_state(
         self,
     ):
