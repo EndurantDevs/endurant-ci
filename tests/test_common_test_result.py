@@ -463,6 +463,222 @@ class CommonResultIntegrationTests(unittest.TestCase):
                     current["fingerprint"], original["measurement"]["fingerprint"]
                 )
 
+    def same_commit_original(self):
+        """Record an enrolled scope's execution as a merge-queue run would."""
+        self.arguments.scope = "healthcare-python-main-0"
+        self.run["event"] = "merge_group"
+        queue = "gh-readonly-queue/dev/pr-1-" + "b" * 40
+        with patch.dict(
+            os.environ,
+            {
+                "GITHUB_EVENT_NAME": "merge_group",
+                "GITHUB_REF": "refs/heads/" + queue,
+                "GITHUB_REF_NAME": queue,
+                "GITHUB_SHA": self.source_sha,
+                "PR_NUMBER": "1",
+            },
+        ):
+            self.original_execution()
+
+    def test_same_commit_scope_reuses_a_merge_queue_original_after_the_push(self):
+        self.same_commit_original()
+        # Another branch appears and the commit is now validated as a push.
+        self.git("update-ref", "refs/remotes/origin/unrelated", "HEAD")
+        (self.root / "count").unlink()
+        with patch.dict(
+            os.environ,
+            {
+                "GITHUB_EVENT_NAME": "push",
+                "GITHUB_REF": "refs/heads/dev",
+                "GITHUB_REF_NAME": "dev",
+                "GITHUB_SHA": self.source_sha,
+                "PR_NUMBER": "0",
+            },
+        ):
+            self.assertEqual(common.execute(self.arguments, read=self.read), 0)
+        self.assertEqual((self.root / "count").read_text(), "1")
+        receipt = json.loads(
+            next(self.directory.glob("*/measurement.json")).read_text()
+        )
+        current = receipt["measurement"]
+        self.assertFalse(current["executed"])
+        self.assertEqual(current["inputs"]["execution_profile"], "same-commit-v1")
+        self.assertEqual(
+            sorted(current["inputs"]["identity_environment"]),
+            [
+                "BASE_SHA",
+                "GITHUB_REPOSITORY",
+                "GITHUB_SHA",
+                "GITHUB_WORKFLOW_SHA",
+                "SOURCE_REPOSITORY",
+                "SOURCE_SHA",
+            ],
+        )
+        self.assertNotIn("references_sha256", current["inputs"]["source_git"])
+        self.assertEqual(current["inputs"]["source_git"]["commit"], self.source_sha)
+        self.assertEqual(receipt["origin"]["origin"]["producer"]["run_id"], 20)
+
+    def test_same_commit_scope_runs_in_full_for_another_commit_parent_or_checkout_state(
+        self,
+    ):
+        for change in ("commit", "parent", "branch"):
+            with self.subTest(change=change):
+                for name in ("count", "report.json"):
+                    (self.root / name).unlink(missing_ok=True)
+                self.git("checkout", "-q", "--detach", self.source_sha)
+                # Each case starts from its own executed original.
+                self.archive = None
+                self.current_producer.return_value = (self.producer, self.run)
+                self.same_commit_original()
+                original = json.loads(
+                    next(self.directory.glob("*/measurement.json")).read_text()
+                )
+                self.assertTrue(original["measurement"]["executed"])
+                environment = {
+                    "GITHUB_EVENT_NAME": "push",
+                    "GITHUB_SHA": self.source_sha,
+                }
+                if change == "commit":
+                    self.git(
+                        "-c",
+                        "user.name=Example",
+                        "-c",
+                        "user.email=example@example.invalid",
+                        "commit",
+                        "--allow-empty",
+                        "-qm",
+                        "Same tree, another commit",
+                    )
+                    self.assertEqual(
+                        self.git("rev-parse", "HEAD^{tree}").strip(), self.tree
+                    )
+                elif change == "parent":
+                    environment["BASE_SHA"] = "c" * 40
+                else:
+                    self.git("checkout", "-q", "-B", "dev", self.source_sha)
+                with patch.dict(os.environ, environment):
+                    self.assertEqual(common.execute(self.arguments, read=self.read), 0)
+                self.assertEqual((self.root / "count").read_text(), "2")
+                receipt = json.loads(
+                    next(self.directory.glob("*/measurement.json")).read_text()
+                )
+                self.assertTrue(receipt["measurement"]["executed"])
+                self.assertIsNone(receipt["origin"])
+
+    def test_same_commit_command_never_sees_the_labels_its_workflow_started_under(self):
+        self.arguments.scope = "healthcare-capacity"
+        self.arguments.output_file = ["labels.json"]
+        self.arguments.command = [
+            sys.executable,
+            "-c",
+            "import json, os; json.dump(sorted(os.environ), open('labels.json', 'w'))",
+        ]
+        labels = {name: "started-under" for name in common.START_LABELS}
+        with patch.dict(
+            os.environ, {**labels, "GITHUB_SHA": self.source_sha, "CI_SHARD": "0"}
+        ):
+            self.assertEqual(common.execute(self.arguments, read=self.read), 0)
+            # The fallback without any evidence removes them as well.
+            seen = set(json.loads((self.root / "labels.json").read_text()))
+            with patch.object(
+                common, "collect", side_effect=ValueError("no measurement")
+            ):
+                self.assertEqual(common.execute(self.arguments, read=self.read), 0)
+            fallback = set(json.loads((self.root / "labels.json").read_text()))
+        for names in (seen, fallback):
+            self.assertFalse(names & set(common.START_LABELS))
+            self.assertLessEqual({"GITHUB_SHA", "CI_SHARD"}, names)
+            self.assertFalse(names & {"GH_TOKEN", "GITHUB_TOKEN", "SOURCE_TOKEN"})
+
+    def test_merge_queue_runs_stay_outside_every_other_profile(self):
+        # A stock scope records nothing, on any event.
+        with patch.dict(os.environ, {"GITHUB_EVENT_NAME": "merge_group"}):
+            self.assertEqual(common.execute(self.arguments, read=self.read), 0)
+        self.assertFalse(self.directory.exists())
+        # A native measurement from a merge-queue run is never selected or refreshed.
+        (self.root / "count").unlink()
+        self.run["event"] = "merge_group"
+        self.original_execution()
+        self.assertEqual(common.execute_isolated(self.arguments, read=self.read), 0)
+        self.assertEqual((self.root / "count").read_text(), "2")
+        document = json.loads(
+            next(self.directory.glob("*/measurement.json")).read_text()
+        )
+        self.assertEqual(
+            common.producer_events(document["measurement"]), common.NATIVE_EVENTS
+        )
+        with self.assertRaisesRegex(ValueError, "producer event policy"):
+            equivalent.verify(
+                document["measurement"],
+                document["measurement"],
+                self.run,
+                self.job,
+                self.check,
+                {},
+                archive_sha256="a" * 64,
+                producer_recipe_verified=True,
+                allowed_events={"merge_group", "schedule"},
+                artifact_name="x",
+                upload_step="y",
+            )
+        # A content scope runs its stock command on a merge-queue run.
+        self.arguments.scope = common.PYTEST_CONTENT_SCOPE
+        with (
+            patch.dict(os.environ, {"GITHUB_EVENT_NAME": "merge_group"}),
+            patch.object(common, "content_execution") as isolated,
+        ):
+            self.assertEqual(common.execute(self.arguments, read=self.read), 0)
+        isolated.assert_not_called()
+
+    def test_same_commit_scope_ignores_only_generated_build_documents_of_a_dependency(
+        self,
+    ):
+        self.arguments.scope = "healthcare-python-main-0"
+        installed = self.root.parent / "site-packages"
+        (installed / "native-1.0.dist-info/sboms").mkdir(parents=True)
+        (installed / "native").mkdir()
+
+        class Native(Distribution):
+            def __init__(self):
+                super().__init__()
+                self.files = [
+                    "native/extension.so",
+                    "native-1.0.dist-info/sboms/crate.cyclonedx.json",
+                    "native-1.0.dist-info/RECORD",
+                ]
+
+            @staticmethod
+            def locate_file(entry):
+                return installed / entry
+
+            @staticmethod
+            def read_text(name):
+                return (
+                    (installed / "native-1.0.dist-info/RECORD").read_text()
+                    if name == "RECORD"
+                    else None
+                )
+
+        def build(serial, extension=b"machine code"):
+            (installed / "native/extension.so").write_bytes(extension)
+            document = installed / "native-1.0.dist-info/sboms/crate.cyclonedx.json"
+            document.write_text(json.dumps({"serialNumber": serial}))
+            (installed / "native-1.0.dist-info/RECORD").write_text(
+                f"native/extension.so,sha256={hashlib.sha256(extension).hexdigest()},{len(extension)}\n"
+                f"native-1.0.dist-info/sboms/crate.cyclonedx.json,sha256={serial},20\n"
+                "native-1.0.dist-info/RECORD,,\n"
+            )
+            with patch.object(
+                equivalent.importlib.metadata, "distributions", return_value=[Native()]
+            ):
+                return common.collect(self.arguments, self.producer, 10)["fingerprint"]
+
+        first = build("urn:uuid:1")
+        self.assertEqual(build("urn:uuid:2"), first)
+        self.assertNotEqual(build("urn:uuid:2", b"other machine code"), first)
+        self.arguments.scope = "unit/full"
+        self.assertNotEqual(build("urn:uuid:1"), build("urn:uuid:2"))
+
     def test_final_job_refresh_rejects_superseded_original_after_offline_reuse(self):
         self.original_execution()
         self.assertEqual(common.execute_isolated(self.arguments, read=self.read), 0)

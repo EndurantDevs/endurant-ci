@@ -108,8 +108,13 @@ def derive_inputs(
     toolchains=None,
     runtime_files=(),
     allowed_outputs=(),
+    generated_documents=None,
 ):
-    """Collect the current checkout and resolved interpreter/dependency inputs."""
+    """Collect the current checkout and resolved interpreter/dependency inputs.
+
+    generated_documents matches installed build documents that carry a fresh serial and
+    timestamp per build; they and the RECORD lines naming them stay outside the inventory.
+    """
     source_root = Path(source_root).resolve()
     tracked_bytecode = subprocess.check_output(
         ["git", "-C", str(source_root), "ls-files", "-z", "--", "*.pyc", "*.pyo"],
@@ -236,7 +241,19 @@ def derive_inputs(
             distribution.files is not None,
             "Resolved dependency has no installed file list",
         )
+        if generated_documents is not None:
+            record = "".join(
+                line
+                for line in record.splitlines(keepends=True)
+                if not generated_documents.search(line.split(",", 1)[0])
+            )
         for entry in distribution.files:
+            if generated_documents is not None and (
+                generated_documents.search(str(entry))
+                # The filtered index above already stands for this file.
+                or str(entry).endswith(".dist-info/RECORD")
+            ):
+                continue
             if str(entry).endswith((".pyc", ".pyo")):
                 path = Path(distribution.locate_file(entry))
                 if path.exists():
@@ -580,7 +597,8 @@ def verify(
     require(
         isinstance(allowed_events, (set, frozenset))
         and allowed_events
-        and allowed_events <= {"push", "pull_request", "workflow_dispatch"},
+        and allowed_events
+        <= {"push", "pull_request", "workflow_dispatch", "merge_group"},
         "The trusted producer event policy is absent",
     )
     for item in (current, original):

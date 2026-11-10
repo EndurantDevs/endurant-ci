@@ -8,8 +8,8 @@ public_common_test_run() {
   if [[ -n "${COMMON_TEST_EVIDENCE_DIRECTORY:-}" && "${COMMON_TEST_EVIDENCE_SHA256:-}" =~ ^[0-9a-f]{64}$ ]]; then
     evidence=true
   fi
-  if [[ "${GITHUB_EVENT_NAME:-}" == merge_group ||
-        "${COMMON_TEST_EQUIVALENCE:-false}" != true || -z "${COMMON_TEST_STEP:-}" ||
+  # The engine decides what a merge-queue run may record: only same-commit scopes.
+  if [[ "${COMMON_TEST_EQUIVALENCE:-false}" != true || -z "${COMMON_TEST_STEP:-}" ||
         ( -z "${GH_TOKEN:-}" && "$evidence" != true ) ||
         ( "$source_repository" != "${GITHUB_REPOSITORY:-$source_repository}" && "$evidence" != true ) ]]; then
     (unset GH_TOKEN GITHUB_TOKEN SOURCE_TOKEN; "$@")
