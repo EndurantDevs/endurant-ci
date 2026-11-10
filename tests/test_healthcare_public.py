@@ -4738,6 +4738,32 @@ RUNTIME_BASE_IMAGE=synthetic
                 else:
                     self.assertNotIn("Unable to remove CI Python environment:", result.stderr)
 
+    def test_python_environment_uses_one_fixed_path_unless_it_is_taken(self):
+        source = (ROOT / "scripts/healthcare/check").read_text()
+        start = source.index("prepare_python_environment()")
+        function = source[start:source.index("\n}\n", start) + 3]
+        for taken in (False, True):
+            with self.subTest(taken=taken), tempfile.TemporaryDirectory() as directory:
+                fixed = Path(directory) / "healthcare-ci-python"
+                if taken:
+                    fixed.mkdir()
+                result = subprocess.run(
+                    ["bash", "-euc", 'uv() { [ "$1 $2" = "--no-config --version" ] && { echo "uv 0.12.17"; return; }; '
+                     'printf "%s\\n" "${@: -1}"; };\n' + (ROOT / "scripts/phase_timing.sh").read_text() + "\n" + function +
+                     "\nci_phase_begin python-environment\nprepare_python_environment\n"],
+                    env={**os.environ, "RUNNER_TEMP": directory, "CI_DEPS_READY": "0", "CI_PYTHON_ENV_READY": "0"},
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                environment = next(line for line in result.stdout.splitlines() if line.endswith("/venv"))
+                if taken:
+                    # Installed launchers then differ, which only costs a full execution.
+                    self.assertRegex(environment, rf"^{re.escape(str(fixed))}\.[A-Za-z0-9]{{6}}/venv$")
+                    self.assertTrue(fixed.is_dir())
+                else:
+                    self.assertEqual(environment, f"{fixed}/venv")
+                    self.assertFalse(fixed.exists())
+
     def test_rust_phase_failures_stop_later_work_and_keep_environment_cleanup(self):
         phases = ("rust-lint", "rust-coverage", "rust-wheel-coverage-prepare",
                   "rust-wheel-build", "rust-wheel-install", "rust-wheel-tests", "rust-coverage-report",

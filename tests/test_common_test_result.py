@@ -491,7 +491,7 @@ class CommonResultIntegrationTests(unittest.TestCase):
                 "GITHUB_EVENT_NAME": "push",
                 "GITHUB_REF": "refs/heads/dev",
                 "GITHUB_REF_NAME": "dev",
-                "GITHUB_SHA": self.source_sha,
+                "GITHUB_SHA": "d" * 40,
                 "PR_NUMBER": "0",
             },
         ):
@@ -505,14 +505,7 @@ class CommonResultIntegrationTests(unittest.TestCase):
         self.assertEqual(current["inputs"]["execution_profile"], "same-commit-v1")
         self.assertEqual(
             sorted(current["inputs"]["identity_environment"]),
-            [
-                "BASE_SHA",
-                "GITHUB_REPOSITORY",
-                "GITHUB_SHA",
-                "GITHUB_WORKFLOW_SHA",
-                "SOURCE_REPOSITORY",
-                "SOURCE_SHA",
-            ],
+            ["BASE_SHA", "GITHUB_REPOSITORY", "SOURCE_REPOSITORY", "SOURCE_SHA"],
         )
         self.assertNotIn("references_sha256", current["inputs"]["source_git"])
         self.assertEqual(current["inputs"]["source_git"]["commit"], self.source_sha)
@@ -575,7 +568,7 @@ class CommonResultIntegrationTests(unittest.TestCase):
         ]
         labels = {name: "started-under" for name in common.START_LABELS}
         with patch.dict(
-            os.environ, {**labels, "GITHUB_SHA": self.source_sha, "CI_SHARD": "0"}
+            os.environ, {**labels, "SOURCE_SHA": self.source_sha, "CI_SHARD": "0"}
         ):
             self.assertEqual(common.execute(self.arguments, read=self.read), 0)
             # The fallback without any evidence removes them as well.
@@ -587,7 +580,7 @@ class CommonResultIntegrationTests(unittest.TestCase):
             fallback = set(json.loads((self.root / "labels.json").read_text()))
         for names in (seen, fallback):
             self.assertFalse(names & set(common.START_LABELS))
-            self.assertLessEqual({"GITHUB_SHA", "CI_SHARD"}, names)
+            self.assertLessEqual({"SOURCE_SHA", "CI_SHARD"}, names)
             self.assertFalse(names & {"GH_TOKEN", "GITHUB_TOKEN", "SOURCE_TOKEN"})
 
     def test_merge_queue_runs_stay_outside_every_other_profile(self):
@@ -644,6 +637,7 @@ class CommonResultIntegrationTests(unittest.TestCase):
                 self.files = [
                     "native/extension.so",
                     "native-1.0.dist-info/sboms/crate.cyclonedx.json",
+                    "native-1.0.dist-info/uv_cache.json",
                     "native-1.0.dist-info/RECORD",
                 ]
 
@@ -663,9 +657,11 @@ class CommonResultIntegrationTests(unittest.TestCase):
             (installed / "native/extension.so").write_bytes(extension)
             document = installed / "native-1.0.dist-info/sboms/crate.cyclonedx.json"
             document.write_text(json.dumps({"serialNumber": serial}))
+            (installed / "native-1.0.dist-info/uv_cache.json").write_text(serial)
             (installed / "native-1.0.dist-info/RECORD").write_text(
                 f"native/extension.so,sha256={hashlib.sha256(extension).hexdigest()},{len(extension)}\n"
                 f"native-1.0.dist-info/sboms/crate.cyclonedx.json,sha256={serial},20\n"
+                f"native-1.0.dist-info/uv_cache.json,sha256={serial},9\n"
                 "native-1.0.dist-info/RECORD,,\n"
             )
             with patch.object(

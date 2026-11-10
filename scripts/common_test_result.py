@@ -43,7 +43,11 @@ NATIVE_EVENTS = frozenset({"push", "pull_request", "workflow_dispatch"})
 SAME_COMMIT_PROFILE = "same-commit-v1"
 SAME_COMMIT_SCOPES = re.compile(r"healthcare-(?:python-main-[0-5]|capacity)\Z")
 # Its command never sees the labels a workflow starts under, so they cannot change a result.
+# The event commit is one of them: for a pull request it names GitHub's merge commit, which
+# moves with the base branch, not the commit that is checked out and tested.
 START_LABELS = (
+    "GITHUB_SHA",
+    "GITHUB_WORKFLOW_SHA",
     "GITHUB_REF",
     "GITHUB_REF_NAME",
     "GITHUB_REF_TYPE",
@@ -57,8 +61,9 @@ START_LABELS = (
     "SOURCE_PR_TITLE",
     "SOURCE_BRANCH",
 )
-# A native wheel's bill of materials gets a new serial number and timestamp on every build.
-GENERATED_DOCUMENTS = re.compile(r"\.dist-info/sboms/[^/]+\Z")
+# A native wheel's bill of materials gets a new serial number and timestamp on every build,
+# and the installer stamps a locally built wheel with the time it was cached.
+GENERATED_DOCUMENTS = re.compile(r"\.dist-info/(?:sboms/[^/]+|uv_cache\.json)\Z")
 CONTENT_ENVIRONMENT = (
     "PATH",
     "LANG",
