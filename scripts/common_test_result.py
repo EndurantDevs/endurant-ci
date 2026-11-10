@@ -1310,12 +1310,12 @@ def execute_isolated(
             and os.environ.get("GITHUB_REPOSITORY"),
             "No read-only workflow evidence token",
         )
-        evidence = None
+        evidence, workflow = None, {}
         if arguments.evidence_directory:
             evidence = install_evidence(arguments)
             producer = evidence["producer"]
         else:
-            producer, _workflow = current_producer(
+            producer, workflow = current_producer(
                 os.environ["GITHUB_REPOSITORY"],
                 arguments.step,
                 NATIVE_EVENTS | {"merge_group"}
@@ -1343,7 +1343,10 @@ def execute_isolated(
             "Resolved execution measurement exceeds its bounded envelope",
         )
         # A merge-queue run only records: with or without a broker it consumes no history.
-        if os.environ.get("GITHUB_EVENT_NAME") != "merge_group":
+        if "merge_group" not in (
+            os.environ.get("GITHUB_EVENT_NAME"),
+            workflow.get("event"),
+        ):
             proof, raw = choose(
                 current,
                 os.environ["GITHUB_REPOSITORY"],

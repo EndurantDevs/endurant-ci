@@ -479,6 +479,9 @@ class CommonResultIntegrationTests(unittest.TestCase):
             },
         ):
             self.original_execution()
+        # The consuming run is another run of the same commit, started by a push.
+        producer, _run = self.current_producer.return_value
+        self.current_producer.return_value = (producer, {**self.run, "event": "push"})
 
     def test_same_commit_scope_reuses_a_merge_queue_original_after_the_push(self):
         self.same_commit_original()
@@ -513,10 +516,20 @@ class CommonResultIntegrationTests(unittest.TestCase):
 
     def test_merge_queue_run_records_without_consuming_an_existing_original(self):
         self.same_commit_original()
-        # No broker here: the executor reads history itself, and must not on this event.
-        with patch.dict(os.environ, {"GITHUB_EVENT_NAME": "merge_group"}):
-            self.assertEqual(common.execute(self.arguments, read=self.read), 0)
-        self.assertEqual((self.root / "count").read_text(), "2")
+        # No broker here: the executor reads history itself, and must not on this event,
+        # whether the runner's label or the authenticated run names it.
+        producer, _run = self.current_producer.return_value
+        for count, label, event in (
+            ("2", "merge_group", "push"),
+            ("3", "push", "merge_group"),
+        ):
+            self.current_producer.return_value = (
+                producer,
+                {**self.run, "event": event},
+            )
+            with patch.dict(os.environ, {"GITHUB_EVENT_NAME": label}):
+                self.assertEqual(common.execute(self.arguments, read=self.read), 0)
+            self.assertEqual((self.root / "count").read_text(), count)
         receipt = json.loads(
             next(self.directory.glob("*/measurement.json")).read_text()
         )
