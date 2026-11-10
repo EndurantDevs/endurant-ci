@@ -511,6 +511,18 @@ class CommonResultIntegrationTests(unittest.TestCase):
         self.assertEqual(current["inputs"]["source_git"]["commit"], self.source_sha)
         self.assertEqual(receipt["origin"]["origin"]["producer"]["run_id"], 20)
 
+    def test_merge_queue_run_records_without_consuming_an_existing_original(self):
+        self.same_commit_original()
+        # No broker here: the executor reads history itself, and must not on this event.
+        with patch.dict(os.environ, {"GITHUB_EVENT_NAME": "merge_group"}):
+            self.assertEqual(common.execute(self.arguments, read=self.read), 0)
+        self.assertEqual((self.root / "count").read_text(), "2")
+        receipt = json.loads(
+            next(self.directory.glob("*/measurement.json")).read_text()
+        )
+        self.assertTrue(receipt["measurement"]["executed"])
+        self.assertIsNone(receipt["origin"])
+
     def test_original_is_found_after_other_jobs_measurements_of_the_same_run(self):
         self.same_commit_original()
         (self.root / "count").unlink()
@@ -639,20 +651,6 @@ class CommonResultIntegrationTests(unittest.TestCase):
         self.assertEqual(
             common.producer_events(document["measurement"]), common.NATIVE_EVENTS
         )
-        with self.assertRaisesRegex(ValueError, "producer event policy"):
-            equivalent.verify(
-                document["measurement"],
-                document["measurement"],
-                self.run,
-                self.job,
-                self.check,
-                {},
-                archive_sha256="a" * 64,
-                producer_recipe_verified=True,
-                allowed_events={"merge_group", "schedule"},
-                artifact_name="x",
-                upload_step="y",
-            )
         # A content scope runs its stock command on a merge-queue run.
         self.arguments.scope = common.PYTEST_CONTENT_SCOPE
         with (

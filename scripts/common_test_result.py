@@ -1342,12 +1342,14 @@ def execute_isolated(
             len(equivalent.encoded(current)) <= 2 * 1024 * 1024,
             "Resolved execution measurement exceeds its bounded envelope",
         )
-        proof, raw = choose(
-            current,
-            os.environ["GITHUB_REPOSITORY"],
-            hashlib.sha256(arguments.scope.encode()).hexdigest(),
-            arguments,
-        )
+        # A merge-queue run only records: with or without a broker it consumes no history.
+        if os.environ.get("GITHUB_EVENT_NAME") != "merge_group":
+            proof, raw = choose(
+                current,
+                os.environ["GITHUB_REPOSITORY"],
+                hashlib.sha256(arguments.scope.encode()).hexdigest(),
+                arguments,
+            )
     except (
         HTTPException,
         KeyError,

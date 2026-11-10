@@ -103,8 +103,7 @@ def prepare(arguments):
         candidates = (
             []
             if run.get("event") == "merge_group"
-            or scopes
-            and not any(scope in common.CONTENT_SCOPES for scope in scopes)
+            or (scopes and not any(scope in common.CONTENT_SCOPES for scope in scopes))
             else read(repository, query)["workflow_runs"]
         )
         usable = []
