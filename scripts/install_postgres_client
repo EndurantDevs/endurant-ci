@@ -32,7 +32,7 @@ test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
 chmod 0755 "$setup_directory"
 mkdir -p "$setup_directory/sources" "$setup_directory/lists/partial" "$setup_directory/archives/partial"
 touch "$setup_directory/empty.list"
-cat > "$setup_directory/sources/ubuntu.sources" <<SOURCES
+cat > "$setup_directory/ubuntu.sources" <<SOURCES
 Types: deb
 URIs: $archive
 Suites: $VERSION_CODENAME ${VERSION_CODENAME}-updates
@@ -57,8 +57,10 @@ apt_options=(
   -o DPkg::Lock::Timeout=30 -o APT::Update::Error-Mode=any
 )
 if ! curl --version >/dev/null 2>&1 || [ ! -s /etc/ssl/certs/ca-certificates.crt ]; then
+  cp "$setup_directory/ubuntu.sources" "$setup_directory/sources/ubuntu.sources"
   apt-get "${apt_options[@]}" update -qq </dev/null
   apt-get "${apt_options[@]}" install --yes --no-install-recommends ca-certificates curl </dev/null
+  rm "$setup_directory/sources/ubuntu.sources"
 fi
 curl --fail --location --silent --show-error --retry 3 --retry-delay 2 --retry-all-errors \
   --connect-timeout 15 --max-time 60 \
@@ -72,6 +74,11 @@ Architectures: $architecture
 Signed-By: $setup_directory/pgdg.asc B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
 SOURCES
 apt-get "${apt_options[@]}" update -qq </dev/null
+# Fetch Ubuntu indexes only when the PostgreSQL dependency plan needs them.
+if ! apt-get "${apt_options[@]}" --simulate install --yes --no-install-recommends postgresql-client-18 </dev/null; then
+  cp "$setup_directory/ubuntu.sources" "$setup_directory/sources/ubuntu.sources"
+  apt-get "${apt_options[@]}" update -qq </dev/null
+fi
 apt-get "${apt_options[@]}" install --yes --no-install-recommends postgresql-client-18 </dev/null
 for tool in psql pg_dump pg_restore; do
   "/usr/lib/postgresql/18/bin/$tool" --version | grep -Eq "^$tool \\(PostgreSQL\\) 18\\."
