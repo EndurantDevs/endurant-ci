@@ -127,6 +127,37 @@ if "--output-file" in sys.argv:
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_stock_execution_of_an_enrolled_scope_never_receives_start_labels(self):
+        spec = importlib.util.spec_from_file_location(
+            "common_test_result_labels", ROOT / "scripts/common_test_result.py"
+        )
+        engine = importlib.util.module_from_spec(spec)
+        with patch.object(sys, "path", [str(ROOT / "scripts"), *sys.path]):
+            spec.loader.exec_module(engine)
+        labels = {name: "synthetic-label" for name in engine.START_LABELS}
+        seen = "env | grep -c synthetic-label || true"
+        for scope, expected in (
+            ("healthcare-python-main-0", "0"),
+            ("healthcare-python-main-5", "0"),
+            ("healthcare-capacity", "0"),
+            ("healthcare-python-main-6", str(len(labels))),
+            ("healthcare-unit", str(len(labels))),
+        ):
+            with self.subTest(scope=scope):
+                self.assertEqual(
+                    engine.same_commit(scope),
+                    expected == "0",
+                    "shell and engine enrolment differ",
+                )
+                result = self.shell(
+                    f"public_common_test_run {scope} - bash -c '{seen}'",
+                    GH_TOKEN="",
+                    **labels,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), expected)
+                self.assertFalse((self.root / "arguments.json").exists())
+
     def test_bound_broker_evidence_supports_token_free_execution_and_source_authority(
         self,
     ):

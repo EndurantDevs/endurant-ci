@@ -12,7 +12,15 @@ public_common_test_run() {
   if [[ "${COMMON_TEST_EQUIVALENCE:-false}" != true || -z "${COMMON_TEST_STEP:-}" ||
         ( -z "${GH_TOKEN:-}" && "$evidence" != true ) ||
         ( "$source_repository" != "${GITHUB_REPOSITORY:-$source_repository}" && "$evidence" != true ) ]]; then
-    (unset GH_TOKEN GITHUB_TOKEN SOURCE_TOKEN; "$@")
+    local -a hidden=(GH_TOKEN GITHUB_TOKEN SOURCE_TOKEN)
+    # An enrolled same-commit command never sees the start labels, with or without the engine.
+    # Scope and labels mirror SAME_COMMIT_SCOPES and START_LABELS in common_test_result.py.
+    if [[ "$scope" =~ ^healthcare-(python-main-[0-5]|capacity)$ ]]; then
+      hidden+=(GITHUB_SHA GITHUB_WORKFLOW_SHA GITHUB_REF GITHUB_REF_NAME GITHUB_REF_TYPE
+               GITHUB_REF_PROTECTED GITHUB_HEAD_REF GITHUB_BASE_REF GITHUB_EVENT_NAME
+               GITHUB_EVENT_PATH GITHUB_WORKFLOW_REF PR_NUMBER SOURCE_PR_TITLE SOURCE_BRANCH)
+    fi
+    (unset "${hidden[@]}"; "$@")
     return
   fi
   local engine_python="${COMMON_TEST_PYTHON_BIN:-${python_bin:-python}}"
