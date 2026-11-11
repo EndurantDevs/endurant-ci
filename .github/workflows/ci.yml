@@ -96,3 +96,18 @@ jobs:
           python3 scripts/common_test_verify.py
           --source-repository "$GITHUB_REPOSITORY" --source-sha "$SOURCE_SHA"
           --output "$RUNNER_TEMP/common-test-current-verification.json"
+
+
+  postgres-client:
+    name: Native PostgreSQL client bootstrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Install PostgreSQL client
+        run: bash scripts/install_postgres_client

@@ -65,9 +65,10 @@ elif name == "apt-get":
     assert options["DPkg::Lock::Timeout"] == "30"
     assert options["APT::Update::Error-Mode"] == "any"
     texts = {p.name: p.read_text() for p in sources.iterdir()}
-    assert set(texts) <= {"ubuntu.sources", "pgdg.sources"}
-    assert "Signed-By:" in texts["ubuntu.sources"]
-    assert "Architectures: " + os.environ.get("ARCHITECTURE", "amd64") in texts["ubuntu.sources"]
+    assert texts and set(texts) <= {"ubuntu.sources", "pgdg.sources"}
+    for source in texts.values():
+        assert "Signed-By:" in source
+        assert "Architectures: " + os.environ.get("ARCHITECTURE", "amd64") in source
     assert "third-party.invalid" not in "".join(texts.values())
     for key, folder in (("Dir::State::lists", "lists"), ("Dir::Cache::archives", "archives")):
         assert Path(options[key]) == sources.parent / folder
@@ -78,6 +79,12 @@ elif name == "apt-get":
                                      "B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8"]
     record(sources=texts)
     if os.environ.get("APT_FAILURE"):
+        sys.exit(100)
+    if os.environ.get("UBUNTU_DNS_FAILURE") and "update" in args and "ubuntu.sources" in texts:
+        sys.exit(100)
+    if os.environ.get("UBUNTU_DEPENDENCIES") and "postgresql-client-18" in args and "ubuntu.sources" not in texts:
+        sys.exit(100)
+    if os.environ.get("INSTALL_FAILURE") and "postgresql-client-18" in args and "--simulate" not in args:
         sys.exit(100)
     if os.environ.get("STALL"):
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -138,8 +145,9 @@ class InstallPostgresClientChecks(unittest.TestCase):
         result, calls, path_written = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stderr)
         apt = [call for call in calls if call["command"] == "apt-get"]
-        self.assertEqual(len(apt), 2)
-        self.assertTrue(all(set(call["sources"]) == {"ubuntu.sources", "pgdg.sources"} for call in apt))
+        self.assertEqual(len(apt), 3)
+        self.assertTrue(all(set(call["sources"]) == {"pgdg.sources"} for call in apt))
+        self.assertEqual([arg for arg in apt[1]["args"] if arg != "--simulate"], apt[2]["args"])
         self.assertFalse(any("ca-certificates" in call["args"] for call in apt))
         self.assertEqual([call["command"] for call in calls if call["command"] in {"psql", "pg_dump", "pg_restore"}],
                          ["psql", "pg_dump", "pg_restore"])
@@ -149,15 +157,40 @@ class InstallPostgresClientChecks(unittest.TestCase):
         result, calls, _ = self.run_installer(BOOTSTRAP="1")
         self.assertEqual(result.returncode, 0, result.stderr)
         apt = [call for call in calls if call["command"] == "apt-get"]
-        self.assertEqual(len(apt), 4)
+        self.assertEqual(len(apt), 5)
         self.assertTrue(all(set(call["sources"]) == {"ubuntu.sources"} for call in apt[:2]))
+        self.assertTrue(all(set(call["sources"]) == {"pgdg.sources"} for call in apt[2:]))
 
     def test_arm64_uses_native_signed_ubuntu_ports(self):
-        result, calls, _ = self.run_installer(ARCHITECTURE="arm64")
+        result, calls, _ = self.run_installer(ARCHITECTURE="arm64", UBUNTU_DEPENDENCIES="1")
         self.assertEqual(result.returncode, 0, result.stderr)
-        apt = next(call for call in calls if call["command"] == "apt-get")
+        apt = next(call for call in calls if call["command"] == "apt-get" and "ubuntu.sources" in call["sources"])
         self.assertIn("http://ports.ubuntu.com/ubuntu-ports", apt["sources"]["ubuntu.sources"])
         self.assertNotIn("archive.ubuntu.com", apt["sources"]["ubuntu.sources"])
+
+    def test_ubuntu_dns_is_unused_when_pgdg_resolves_dependencies(self):
+        result, calls, path_written = self.run_installer(UBUNTU_DNS_FAILURE="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(path_written)
+        self.assertTrue(all(set(call["sources"]) == {"pgdg.sources"}
+                            for call in calls if call["command"] == "apt-get"))
+
+    def test_missing_dependency_enables_signed_ubuntu_sources_before_install(self):
+        result, calls, path_written = self.run_installer(UBUNTU_DEPENDENCIES="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        apt = [call for call in calls if call["command"] == "apt-get"]
+        self.assertEqual(len(apt), 4)
+        self.assertTrue(all(set(call["sources"]) == {"pgdg.sources"} for call in apt[:2]))
+        self.assertTrue(all(set(call["sources"]) == {"pgdg.sources", "ubuntu.sources"} for call in apt[2:]))
+        self.assertTrue(path_written)
+
+    def test_failed_fallback_or_real_install_cannot_publish_client_path(self):
+        for failure in ({"UBUNTU_DEPENDENCIES": "1", "UBUNTU_DNS_FAILURE": "1"},
+                        {"INSTALL_FAILURE": "1"}):
+            with self.subTest(failure=failure):
+                result, _, path_written = self.run_installer(**failure)
+                self.assertEqual(result.returncode, 100, result.stderr)
+                self.assertFalse(path_written)
 
     def test_unknown_architecture_refuses_before_any_package_operation(self):
         result, calls, path_written = self.run_installer(ARCHITECTURE="unknown")
