@@ -149,8 +149,9 @@ def temporary_names(kind, run):
              if run["event"] == "push" and run["head_branch"] == "dev" else set())
     if kind == "drug":
         return image | {f"drug-public-staging-{suffix}" for suffix in suffixes}
+    # Native builds remain available to downstream validation until their one-day expiry.
     return {f"{name}-{suffix}" for name in (
-        "healthcare-rust-debug", "mrf-rust-coverage", "mrf-python-coverage-capacity",
+        "mrf-rust-coverage", "mrf-python-coverage-capacity",
         *(f"mrf-python-coverage-main-{shard}" for shard in range(6)),
         *(f"mrf-python-coverage-postgres-{shard}" for shard in
           ("core-services", "core-services-2", "core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", "core-ptg",
