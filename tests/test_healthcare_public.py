@@ -5234,7 +5234,8 @@ run_wheel_tests() {
         cases = [(ordinary, failure, cache) for ordinary in (False, True)
                  for failure in ("", "schema", "stamp", "upgrade", "vacuum") for cache in ("", "miss")]
         cases += [(ordinary, failure, "hit") for ordinary in (False, True)
-                  for failure in ("", "schema", "restore", "parity", "parity-swap", "parity-copyrow", "vacuum")]
+                  for failure in ("", "schema", "restore", "parity", "parity-swap", "parity-copyrow",
+                                  "parity-versionrow", "parity-sequence", "parity-sql", "parity-duplicate", "vacuum")]
         cases += [(True, "dump", "miss"), (True, "dump-data", "miss"), (True, "", "exempt")]
         for ordinary, failure, cache in cases:
             with self.subTest(ordinary=ordinary, failure=failure, cache=cache), \
@@ -5245,8 +5246,11 @@ run_wheel_tests() {
                     cache_root.mkdir()
                     (cache_root / "baseline.sql").write_text("CREATE SCHEMA mrf;\nCOPY mrf.alembic_version FROM stdin;\n")
                     (cache_root / "baseline.sql.data").write_text(
+                        "-- Dumped by pg_dump version 18.6\nSET row_security = off;\n"
                         "\\restrict abc\nCOPY mrf.alembic_version FROM stdin;\nhead\n\\.\nCOPY mrf.seed FROM stdin;\nrow\n\\.\n"
-                        "COPY mrf.left FROM stdin;\nCOPY marker\nleft\n\\.\nCOPY mrf.right FROM stdin;\nCOPY marker\nright\n\\.\n\\unrestrict abc\n")
+                        "COPY mrf.left FROM stdin;\nCOPY marker\nleft\n\\.\nCOPY mrf.right FROM stdin;\nCOPY marker\nright\n\\.\n"
+                        "COPY mrf.metadata FROM stdin;\n-- Dumped by pg_dump version 18.6\nduplicate\nduplicate\n\\.\n"
+                        "SELECT pg_catalog.setval('mrf.seed_seq', 1, true);\n\\unrestrict abc\n")
                 if ordinary:
                     migration = Path(temporary) / "alembic/versions/20261028110000_provider_directory_global_serving.py"
                     migration.parent.mkdir(parents=True)
@@ -5306,6 +5310,8 @@ pg_dump() {
     '--host 127.0.0.1 --port 5440 --username postgres --dbname baseline_test --data-only --exclude-schema tiger --exclude-schema tiger_data --exclude-schema topology')
       if [[ "$SCHEMA_RESTORE" = 1 ]]; then
         printf 'parity\n' >> "$CALL_LOG"
+        printf '%s\n' '-- Dumped by pg_dump version 18.7'
+        printf 'SET row_security = %s;\n' "$([[ "$FAIL_STAGE" = parity-sql ]] && echo on || echo off)"
         tail='COPY mrf.left FROM stdin;\nCOPY marker\nleft\n\\.\nCOPY mrf.right FROM stdin;\nCOPY marker\nright\n\\.\n'
         if [[ "$FAIL_STAGE" = parity-swap ]]; then
           # Same lines, rows swapped between tables: the version row must not pass as a seed row.
@@ -5316,6 +5322,12 @@ pg_dump() {
         else
           printf "\\\\restrict xyz\nCOPY mrf.seed FROM stdin;\nrow\n\\\\.\nCOPY mrf.alembic_version FROM stdin;\n%s\n\\\\.\n${tail}\\\\unrestrict xyz\n" "$([[ "$FAIL_STAGE" = parity ]] && echo drifted || echo head)"
         fi
+        printf 'COPY mrf.metadata FROM stdin;\n-- Dumped by pg_dump version %s\nduplicate\n' \
+          "$([[ "$FAIL_STAGE" = parity-versionrow ]] && echo 18.7 || echo 18.6)"
+        [[ "$FAIL_STAGE" = parity-duplicate ]] || printf 'duplicate\n'
+        printf '\\.\n'
+        printf "SELECT pg_catalog.setval('mrf.seed_seq', %s, true);\n" \
+          "$([[ "$FAIL_STAGE" = parity-sequence ]] && echo 2 || echo 1)"
       else
         printf 'dump-data\n' >> "$CALL_LOG"
         [[ "$FAIL_STAGE" != dump-data ]] || return 17
