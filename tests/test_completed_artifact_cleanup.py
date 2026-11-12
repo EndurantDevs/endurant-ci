@@ -331,7 +331,9 @@ class CompletedCleanupArtifactChecks(unittest.TestCase):
             deleted, source_reads = [], 0
             temporary = {**self.measurement, "id": 44, "name": "mrf-rust-coverage-123-1"}
             unknown = {**self.measurement, "id": 99, "name": "unrelated-evidence"}
-            items = [temporary, self.measurement, unknown]
+            native = [{**self.measurement, "id": 70 + attempt,
+                       "name": f"healthcare-rust-debug-123-{attempt}"} for attempt in (1, 2)]
+            items = [temporary, self.measurement, unknown, *native]
 
             def api(repository, path, method="GET"):
                 nonlocal source_reads

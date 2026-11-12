@@ -356,7 +356,7 @@ class ArtifactCleanupChecks(unittest.TestCase):
                     active -= 1
 
         items = [artifact(1, "mrf-rust-coverage-123-2"),
-                 artifact(2, "healthcare-rust-debug-123-2"),
+                 artifact(2, "mrf-python-coverage-capacity-123-2"),
                  artifact(3, "mrf-python-coverage-main-0-123-2"),
                  artifact(4, "mrf-python-coverage-main-1-123-2"),
                  artifact(5, "healthcare-public-measurement-123-2")]
@@ -386,7 +386,7 @@ class ArtifactCleanupChecks(unittest.TestCase):
                     item, *proofs]
 
         items = [artifact(1, "mrf-rust-coverage-123-2"),
-                 artifact(2, "healthcare-rust-debug-123-2"),
+                 artifact(2, "mrf-python-coverage-capacity-123-2"),
                  artifact(3, "mrf-python-coverage-main-0-123-2"),
                  artifact(4, "mrf-python-coverage-main-1-123-2"),
                  artifact(5, "healthcare-public-measurement-123-2")]
@@ -422,7 +422,7 @@ class ArtifactCleanupChecks(unittest.TestCase):
                 consumers = sorted((job["id"], job["name"], job["run_attempt"], job["conclusion"])
                                    for job in jobs())
                 items = [artifact(1, "mrf-rust-coverage-123-2"),
-                         artifact(2, "healthcare-rust-debug-123-2"),
+                         artifact(2, "mrf-python-coverage-capacity-123-2"),
                          artifact(3, "mrf-python-coverage-main-0-123-2"),
                          artifact(5, "healthcare-public-measurement-123-2")]
 
@@ -658,8 +658,15 @@ class ArtifactCleanupChecks(unittest.TestCase):
                 cleanup.subprocess.CompletedProcess([], 0, raw)) as command:
             deleted, _ = self.exercise(remaining, {**run(), "event": "push", "head_branch": "dev"},
                                       publication_reader=reader)
-        self.assertCountEqual(deleted, [1, 4, 5])
+        self.assertCountEqual(deleted, [1, 4])
         self.assertEqual(command.call_count, 1)
+
+    def test_native_builds_survive_intermediate_cleanup_for_every_attempt(self):
+        items = [artifact(1, "mrf-rust-coverage-123-2"),
+                 artifact(2, "healthcare-rust-debug-123-1"),
+                 artifact(3, "healthcare-rust-debug-123-2"),
+                 artifact(4, "healthcare-public-measurement-123-2")]
+        self.assertEqual(self.exercise(items)[0], [1])
 
     def test_only_known_exact_attempt_intermediates_are_deleted_after_complete_pagination(self):
         for repository, kind in cleanup.KINDS.items():
@@ -1037,6 +1044,7 @@ class ArtifactCleanupChecks(unittest.TestCase):
                         continue  # Keep independent integration proof until its one-day expiry.
                     if upload["name"].startswith("healthcare-rust-debug-"):
                         self.assertEqual(upload["compression-level"], "6")
+                        continue  # Keep native builds until their one-day expiry.
                     if "public-measurement" in upload["name"]:
                         continue
                     for row in definition.get("strategy", {}).get("matrix", {}).get("include", [{}]):
