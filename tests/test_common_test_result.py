@@ -649,6 +649,129 @@ class CommonResultIntegrationTests(unittest.TestCase):
             self.assertLessEqual({"SOURCE_SHA", "CI_SHARD"}, names)
             self.assertFalse(names & {"GH_TOKEN", "GITHUB_TOKEN", "SOURCE_TOKEN"})
 
+    def same_tree_original(self):
+        """Record an enrolled scope's execution as the pull-request run of its tree would."""
+        self.arguments.scope = "same-tree-unit-0"
+        self.base = {"BASE_SHA": "b" * 40}
+        with patch.dict(
+            os.environ,
+            {
+                **self.base,
+                "GITHUB_SHA": "a" * 40,
+                "GITHUB_REF": "refs/heads/feature",
+                "SOURCE_SHA": self.source_sha,
+                "PR_NUMBER": "7",
+            },
+        ):
+            self.original_execution()
+
+    def merge_commit(self, message="Merged without content changes"):
+        """Commit the current tree again, from the separately pinned recipe's new commit too."""
+        self.git(
+            "-c",
+            "user.name=Example",
+            "-c",
+            "user.email=example@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            message,
+        )
+        self.git("update-ref", "refs/remotes/origin/dev", "HEAD")
+        head = self.git("rev-parse", "HEAD").strip()
+        producer, run = self.current_producer.return_value
+        self.current_producer.return_value = ({**producer, "commit": head}, run)
+        return head
+
+    def test_same_tree_scope_reuses_the_original_of_another_commit_with_its_tree_and_base(
+        self,
+    ):
+        self.same_tree_original()
+        head = self.merge_commit()
+        self.assertEqual(self.git("rev-parse", "HEAD^{tree}").strip(), self.tree)
+        (self.root / "count").unlink()
+        with patch.dict(
+            os.environ,
+            {
+                **self.base,
+                "GITHUB_SHA": "d" * 40,
+                "GITHUB_REF": "refs/heads/dev",
+                "SOURCE_SHA": head,
+                "PR_NUMBER": "0",
+            },
+        ):
+            self.assertEqual(common.execute(self.arguments, read=self.read), 0)
+        self.assertEqual((self.root / "count").read_text(), "1")
+        receipt = json.loads(
+            next(self.directory.glob("*/measurement.json")).read_text()
+        )
+        current = receipt["measurement"]
+        self.assertFalse(current["executed"])
+        self.assertEqual(current["source"]["commit"], head)
+        self.assertEqual(
+            receipt["origin"]["origin"]["source"]["commit"], self.source_sha
+        )
+        self.assertEqual(current["inputs"]["execution_profile"], "same-tree-v1")
+        self.assertEqual(
+            sorted(current["inputs"]["identity_environment"]),
+            ["BASE_SHA", "GITHUB_REPOSITORY", "SOURCE_REPOSITORY"],
+        )
+        self.assertEqual(sorted(current["inputs"]["source_git"]), ["head", "shallow"])
+        self.assertNotIn("recipe_git", current["inputs"])
+        self.assertNotIn("verifier_git", current["inputs"])
+
+    def test_same_tree_scope_runs_in_full_for_another_tree_or_base(self):
+        for change in ("tree", "base"):
+            with self.subTest(change=change):
+                for name in ("count", "report.json"):
+                    (self.root / name).unlink(missing_ok=True)
+                self.git("checkout", "-q", "--detach", self.source_sha)
+                self.archive = None
+                self.current_producer.return_value = (self.producer, self.run)
+                self.same_tree_original()
+                environment = {**self.base, "SOURCE_SHA": "e" * 40}
+                if change == "base":
+                    environment["BASE_SHA"] = "c" * 40
+                else:
+                    with (self.root / "tests/test_example.py").open("a") as file:
+                        file.write("# changed\n")
+                    self.git("add", "tests/test_example.py")
+                    self.merge_commit("Changed tree")
+                    self.assertNotEqual(
+                        self.git("rev-parse", "HEAD^{tree}").strip(), self.tree
+                    )
+                with patch.dict(os.environ, environment):
+                    self.assertEqual(common.execute(self.arguments, read=self.read), 0)
+                self.assertEqual((self.root / "count").read_text(), "2")
+                receipt = json.loads(
+                    next(self.directory.glob("*/measurement.json")).read_text()
+                )
+                self.assertTrue(receipt["measurement"]["executed"])
+                self.assertIsNone(receipt["origin"])
+
+    def test_same_tree_command_sees_neither_start_labels_nor_source_commit(self):
+        self.arguments.scope = "same-tree-postgres-3"
+        self.arguments.output_file = ["labels.json"]
+        self.arguments.command = [
+            sys.executable,
+            "-c",
+            "import json, os; json.dump(sorted(os.environ), open('labels.json', 'w'))",
+        ]
+        labels = {name: "started-under" for name in common.START_LABELS}
+        with patch.dict(
+            os.environ,
+            {
+                **labels,
+                "SOURCE_SHA": self.source_sha,
+                "BASE_SHA": "b" * 40,
+                "CI_SHARD": "0",
+            },
+        ):
+            self.assertEqual(common.execute(self.arguments, read=self.read), 0)
+            names = set(json.loads((self.root / "labels.json").read_text()))
+        self.assertFalse(names & set(common.SAME_TREE_HIDDEN))
+        self.assertLessEqual({"BASE_SHA", "CI_SHARD"}, names)
+
     def test_merge_queue_runs_stay_outside_every_other_profile(self):
         # A stock scope records nothing, on any event.
         with patch.dict(os.environ, {"GITHUB_EVENT_NAME": "merge_group"}):
