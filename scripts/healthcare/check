@@ -2397,7 +2397,7 @@ run_scoped_archive_postgres_body() {
     python "$CI_ROOT/scripts/healthcare/supervise_installed.py" "$scoped_archive_drain_file" "$@" &
     wait "$!" || exit "$?"
   else
-    local deadline=420s
+    local deadline=${scoped_archive_deadline:-420s}
     if [[ "$#" = 3 && "$2" = --junitxml &&
           ( "$1" = tests/test_registry_fhir_catalog_end_to_end.py::test_import_sync_query_replay_and_disappearance ||
             "$1" = "$(registry_cms_successor_native_nodeid)" ) ]]; then
@@ -2833,6 +2833,8 @@ run_network_registry_postgres() (
       --output "$registry_nodeids" -- "${registry_arguments[@]}"
     ci_phase_end
     registry_arguments=("@$registry_nodeids")
+    # The slowest dealt shards use about 400 s of pytest time on an ordinary runner.
+    scoped_archive_deadline=600s
   fi
   local database="hc_network_registry_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
   local archive_url="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440"
