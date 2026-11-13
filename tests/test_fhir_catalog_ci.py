@@ -203,6 +203,19 @@ run_scoped_archive_postgres hc_catalog_test NETWORK_REGISTRY_TEST_DSN postgresql
                     self.assertEqual(calls[-1], "drop")
                     self.assertEqual(shlex.split(calls[1])[:2], ["--foreground", deadline])
                     self.assertEqual("pg_trgm" in (self.root / "sql").read_text(), trigram)
+        # Only a dealt registry shard states a longer budget, and the connected node keeps its own.
+        for arguments, deadline in (("@catalog-selection --verbosity=1 --junitxml report.xml", "600s"),
+                                    (f"{NODEID} --junitxml report.xml", "1500s")):
+            with self.subTest(dealt=arguments):
+                (self.root / "calls").unlink(missing_ok=True)
+                result = self.shell("scoped_archive_deadline=600s\nset -- " + arguments + "\n" + script, TEST_STATUS="0")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = (self.root / "calls").read_text().splitlines()
+                self.assertEqual(shlex.split(calls[1])[:2], ["--foreground", deadline])
+        registry = FUNCTIONS.split("run_network_registry_postgres() (\n", 1)[1].split("\n)\n", 1)[0]
+        dealt = registry.split('if [[ -n "$shard" ]]; then\n', 1)[1].split("\n  fi\n", 1)[0]
+        self.assertIn("scoped_archive_deadline=600s", dealt)
+        self.assertEqual(FUNCTIONS.count("scoped_archive_deadline=600s"), 1)
 
     def test_connected_lane_requires_exact_passing_report_and_current_source_receipt(self):
         git = self.binary / "git"
