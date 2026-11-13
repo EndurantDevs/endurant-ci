@@ -804,8 +804,8 @@ def collect(arguments, producer, source_repository_id, execution=None):
     helper_root = Path(__file__).resolve().parents[1]
     inputs["verifier_checkout"] = checkout_identity(helper_root)
     inputs["verifier_git"] = equivalent.git_execution_context(helper_root)
-    # No scope currently claims that source/ref identity is unobservable. Keep
-    # these actual values: a rewritten checkout therefore takes the full path.
+    # Keep these actual values unless an enrolled profile below claims they are
+    # unobservable: otherwise a rewritten checkout takes the full path.
     inputs["identity_environment"] = {
         name: os.environ.get(name)
         for name in (
