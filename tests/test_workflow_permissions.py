@@ -82,7 +82,7 @@ class PublicWorkflowPermissions(unittest.TestCase):
             "--evidence-directory", "${COMMON_TEST_EVIDENCE_DIRECTORY:-$RUNNER_TEMP/common-test-evidence}",
             "--evidence-sha256", "${COMMON_TEST_EVIDENCE_SHA256:-}",
             "--measurements", "$RUNNER_TEMP/common-test-measurements", "--", "bash", "-euc",
-            "python -m unittest discover -s tests -p 'test_*.py' -v; python scripts/healthcare/test_measurement.py",
+            "python scripts/parallel_unittest.py; python scripts/healthcare/test_measurement.py",
         ])
         self.assertIn(
             '--evidence-directory "${COMMON_TEST_EVIDENCE_DIRECTORY:-$RUNNER_TEMP/common-test-evidence}"',

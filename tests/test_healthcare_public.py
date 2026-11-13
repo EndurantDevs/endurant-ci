@@ -26,6 +26,16 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECK_FUNCTIONS = (ROOT / "scripts/healthcare/check").read_text().rsplit("\ncase ", 1)[0]
+
+
+def bash_script(*, input, **options):
+    """Bash reads a piped script one byte at a time, and a file in blocks."""
+    with tempfile.TemporaryFile() as script:
+        script.write(input.encode() if isinstance(input, str) else input)
+        script.seek(0)
+        return subprocess.run(["bash", "-eu"], stdin=script, **options)
+
+
 IMAGE_VALIDATORS = (
     "scripts/smoke/provider_directory_runtime_contract.py",
     "scripts/research/provider_directory_coverage_audit.py",
@@ -960,8 +970,7 @@ class HealthcarePublicChecks(unittest.TestCase):
                     if name == changed and stage in {"symlink", "dangling"}:
                         path.unlink()
                         path.symlink_to(source / ("process/__init__.py" if stage == "symlink" else "missing"))
-                result = subprocess.run(
-                    ["bash", "-eu"], input=CHECK_FUNCTIONS + r'''
+                result = bash_script(input=CHECK_FUNCTIONS + r'''
 git() {
   if [[ "$3" = ls-tree && "${!#}" = "$CHANGED_PATH" ]] &&
       [[ "$FAIL_STAGE" = deleted || "$FAIL_STAGE" = staged-deleted ]]; then
@@ -999,8 +1008,7 @@ publication_worker_native_test_paths
             with self.subTest(layout=layout, changed=changed, stage=stage), tempfile.TemporaryDirectory() as temporary:
                 source = Path(temporary)
                 self._initial_inventory_source(source, layout, changed, stage)
-                result = subprocess.run(
-                    ["bash", "-eu"], input=CHECK_FUNCTIONS + r'''
+                result = bash_script(input=CHECK_FUNCTIONS + r'''
 git() {
   if [[ "${!#}" = "$CHANGED_PATH" ]] &&
       [[ "$FAIL_STAGE" = dirty || "$FAIL_STAGE" = staged || "$FAIL_STAGE" = untracked ]]; then return 1; fi
@@ -1061,7 +1069,7 @@ publication_worker_native_test_paths
         rejected = ("registry-48", "registry-49", "registry-100", "registry-01", "registry--1", "registry-1x")
         for shard in (*accepted, *rejected):
             with self.subTest(shard=shard):
-                result = subprocess.run(["bash", "-eu"], input=script, text=True, capture_output=True,
+                result = bash_script(input=script, text=True, capture_output=True,
                                         env={**os.environ, "CI_DEPS_READY": "1", "TEST_SHARD": shard,
                                              "CI_ROOT": str(ROOT), "SOURCE_ROOT": str(ROOT)}, timeout=10)
                 self.assertEqual(result.returncode, 73 if shard in accepted else 2, result.stderr)
@@ -1424,8 +1432,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.touch()
                 script = CHECK_FUNCTIONS + "\ngit() { return 0; }\nprovider_plan_native_test_paths && cms_profile_native_test_paths && cms_profile_directory_native_test_paths && managed_provider_detail_native_test_paths && managed_provider_collection_native_test_paths\n"
-                result = subprocess.run(
-                    ["bash", "-eu"], input=script, cwd=source,
+                result = bash_script(input=script, cwd=source,
                     env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT)},
                     capture_output=True, text=True, timeout=10, check=False)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -1478,8 +1485,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     if stage == "untracked":
                         subprocess.run(["git", "rm", "--cached", "-q", "--", changed],
                                        cwd=source, env=environment, check=True)
-                result = subprocess.run(
-                    ["bash", "-eu"], input=CHECK_FUNCTIONS + "\nmanaged_pricing_source_native_test_paths\n",
+                result = bash_script(input=CHECK_FUNCTIONS + "\nmanaged_pricing_source_native_test_paths\n",
                     cwd=source, env=environment, capture_output=True, text=True, timeout=10, check=False)
                 self.assertEqual(result.returncode, int(bool(changed)), result.stderr)
                 expected = list(MANAGED_PRICING_SOURCE_HOST_TESTS) if stage == "complete" else []
@@ -1499,8 +1505,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.touch()
             script = CHECK_FUNCTIONS + "\ngit() { return 0; }\nmanaged_provider_collection_native_test_paths\n"
-            result = subprocess.run(
-                ["bash", "-eu"], input=script, cwd=source,
+            result = bash_script(input=script, cwd=source,
                 env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT)},
                 capture_output=True, text=True, timeout=10, check=False)
             self.assertEqual(result.returncode, 1, result.stderr)
@@ -1535,9 +1540,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                     target = source / name
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.touch()
-                result = subprocess.run(
-                    ["bash", "-eu"],
-                    input=CHECK_FUNCTIONS + "\ngit() { return 0; }\nregistry_source_lifecycle_native_test_paths\n",
+                result = bash_script(input=CHECK_FUNCTIONS + "\ngit() { return 0; }\nregistry_source_lifecycle_native_test_paths\n",
                     cwd=source, env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT)},
                     capture_output=True, text=True, timeout=10, check=False)
                 self.assertEqual(result.returncode, int(missing is not None), result.stderr)
@@ -1556,8 +1559,7 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
         def run(case):
             root, source, runner, log, script, environment, call = case
             try:
-                result = subprocess.run(
-                    ["bash", "-eu"], input=script + "\n" + call,
+                result = bash_script(input=script + "\n" + call,
                     env=environment, cwd=source if cwd is None else cwd, capture_output=True, text=True,
                     timeout=timeout, check=False)
             except (OSError, subprocess.SubprocessError) as error:
@@ -1986,7 +1988,7 @@ REPORT
 rm() { [[ "$FAIL_STAGE" != cleanup ]] || return 23; command rm "$@"; }
 run_registry_ptg_scope_postgres postgresql://synthetic/runtime_test
 '''
-                    result = subprocess.run(["bash", "-eu"], input=script, cwd=source, env=environment,
+                    result = bash_script(input=script, cwd=source, env=environment,
                                             capture_output=True, text=True, timeout=15, check=False)
                     failed = layout == "only" or bool(stage)
                     expected_status = 17 if stage == "pytest" else 1 if failed else 0
@@ -2052,8 +2054,7 @@ run_registry_ptg_scope_postgres postgresql://synthetic/runtime_test
             environment = {**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT)}
             for shard in ("", "-1", "6", "00", "1.0", "true"):
                 with self.subTest(shard=shard):
-                    result = subprocess.run(
-                        ["bash", "-eu"], input=CHECK_FUNCTIONS + '\nrun_python_main "$INVALID_SHARD"\n',
+                    result = bash_script(input=CHECK_FUNCTIONS + '\nrun_python_main "$INVALID_SHARD"\n',
                         env={**environment, "INVALID_SHARD": shard}, capture_output=True, text=True,
                     )
                     self.assertEqual(result.returncode, 2, result.stderr)
@@ -2117,7 +2118,7 @@ for shard in 0 1 2 3 4 5; do run_python_main "$shard"; done
                     **os.environ, "SOURCE_ROOT": str(source_root), "CI_ROOT": str(ROOT),
                     "CI_DEPS_READY": "1", "COVERAGE_BASE_SHA": "a" * 40, "CALL_LOG": str(call_log),
                 }
-                run_result = subprocess.run(["bash", "-eu"], input=script, cwd=source_root, env=environment_map,
+                run_result = bash_script(input=script, cwd=source_root, env=environment_map,
                                             capture_output=True, text=True, check=False)
                 self.assertEqual(run_result.returncode, 0, run_result.stderr)
                 calls = [shlex.split(call) for call in call_log.read_text().splitlines()]
@@ -2251,7 +2252,7 @@ for shard in 0 1 2 3 4 5; do run_python_main "$shard"; done
     timeout() { shift 2; "$@"; }
     for shard in 0 1 2 3 4 5; do run_python_main "$shard" || exit 1; done
     '''
-                        result = subprocess.run(["bash", "-eu"], input=script, cwd=source, env=environment,
+                        result = bash_script(input=script, cwd=source, env=environment,
                                                 capture_output=True, text=True, timeout=30, check=False)
                     except (OSError, subprocess.SubprocessError) as error:
                         result = error
@@ -2325,7 +2326,7 @@ timeout() {
                         "COMPACTION_STATUS": "17" if is_failure else "0",
                         "EXPECTED_SHARD": producer.removeprefix("run_postgres ") if producer.startswith("run_postgres ") else "",
                     }
-                    result = subprocess.run(["bash", "-eu"], input=script + producer, env=environment,
+                    result = bash_script(input=script + producer, env=environment,
                                             capture_output=True, text=True, timeout=10, check=False)
                     self.assertEqual(result.returncode, 17 if is_failure else 0, result.stderr)
                     self.assertEqual(log.read_text().splitlines(),
@@ -2419,7 +2420,7 @@ test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
                     "PYTEST_ADDOPTS": "--cov=process --cov-branch --cov-append --cov-report=",
                 }
                 environment.pop("REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN", None)
-                result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True,
+                result = bash_script(input=script, env=environment, capture_output=True, text=True,
                                         timeout=30, check=False)
                 expected = 17 if failure in ("create", "pytest") else 1 if failure else 0
                 self.assertEqual(result.returncode, expected, result.stderr)
@@ -2664,7 +2665,7 @@ test -z "${HLTHPRT_DIRECTORY_ENTITIES_TEST_DSN:-}"
 test -z "${HLTHPRT_OPENADDRESSES_BATCH_POSTGRES_DSN:-}"
 test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
 '''
-                    result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True, timeout=30)
+                    result = bash_script(input=script, env=environment, capture_output=True, text=True, timeout=30)
                     self.assertEqual(result.returncode, expected, result.stderr)
                     calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
                     observed = [path for call in calls for path in call["selected"]]
@@ -2768,8 +2769,7 @@ test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
                         digest = "0" * 64
                     (prebuilt / "ptg2-address-canon-wheel.sha256").write_text(f"{digest}  {wheel_name}\n")
                     environment_by_name["CI_RUST_BINARIES"] = str(prebuilt)
-                run_result = subprocess.run(
-                    ["bash", "-eu"], input=CHECK_FUNCTIONS + _directory_wheel_script(),
+                run_result = bash_script(input=CHECK_FUNCTIONS + _directory_wheel_script(),
                     env=environment_by_name, capture_output=True, text=True, timeout=30,
                 )
                 expected = 1 if failure == "digest" else 17 if failure else 0
@@ -2866,7 +2866,7 @@ run_provider_directory_postgres postgresql://synthetic/test directory-source
 run_provider_directory_postgres postgresql://synthetic/test directory-source-2
 run_provider_directory_postgres postgresql://synthetic/test registry-19
 '''
-                result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
+                result = bash_script(input=script, env=environment, capture_output=True, text=True)
                 expected = 4 if missing else 17 if failure else 0
                 self.assertEqual(result.returncode, expected, result.stderr)
                 calls = [line.split("\t", 3) for line in calls_path.read_text().splitlines()]
@@ -2920,8 +2920,7 @@ run_owned_provider_directory_postgres() { log_call owned "$@"; }
 run_available_cms_postgres() { log_call cms "$@"; }
 run_source_routes postgresql://synthetic/test "$ROUTE_LANE"
 '''
-                result = subprocess.run(
-                    ["bash", "-eu"], input=script, cwd=source, capture_output=True, text=True,
+                result = bash_script(input=script, cwd=source, capture_output=True, text=True,
                     env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
                          "CALL_LOG": str(call_log), "ROUTE_LANE": lane,
                          "COVERAGE_FILE": ".coverage.postgres.synthetic",
@@ -2979,8 +2978,7 @@ run_owned_provider_directory_postgres() { return 99; }
                     invoke = "run_provider_directory_postgres postgresql://synthetic/test all"
                     script += (f'if {invoke}; then exit 99; else exit "$?"; fi\n'
                                if conditional else invoke + "\n")
-                    result = subprocess.run(
-                        ["bash", "-eu"], input=script, capture_output=True, text=True,
+                    result = bash_script(input=script, capture_output=True, text=True,
                         env={**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT),
                              "CALL_LOG": str(call_log), "FAILED_BATCH": str(failed_batch)},
                     )
@@ -3019,7 +3017,7 @@ run_candidates postgresql://synthetic/test
                                "CALL_LOG": str(call_log), "FAIL_CALL": str(failed),
                                "COVERAGE_FILE": ".coverage.postgres.directory-source-2",
                                "PYTEST_ADDOPTS": "--cov=process --cov-branch --cov-append --cov-report="}
-                result = subprocess.run(["bash", "-eu"], input=script, env=environment,
+                result = bash_script(input=script, env=environment,
                                         capture_output=True, text=True)
                 self.assertEqual(result.returncode, 17 if failed else 0, result.stderr)
                 calls = [line.split("\t", 3) for line in call_log.read_text().splitlines()] if call_log.exists() else []
@@ -3078,7 +3076,7 @@ run_reference_cases postgresql://synthetic/test
                                "FAIL_STAGE": failure, "FAIL_COHORT": str(failed_cohort),
                                "COVERAGE_FILE": ".coverage.postgres.synthetic",
                                "PYTEST_ADDOPTS": "--cov=process --cov-branch --cov-append --cov-report="}
-                result = subprocess.run(["bash", "-eu"], input=script, env=environment,
+                result = bash_script(input=script, env=environment,
                                         capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, 1 if failure == "pytest" else 19 if failure else 0,
                                  result.stderr)
@@ -3129,8 +3127,7 @@ drop_test_database() { :; }
 python3() { printf '%s\n' synthetic; }
 run_core_postgres postgresql://postgres:postgres@localhost:5432/test "$ROUTE_LANE"
 '''
-                result = subprocess.run(
-                    ["bash", "-eu"], input=script, cwd=source, capture_output=True, text=True,
+                result = bash_script(input=script, cwd=source, capture_output=True, text=True,
                     env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
                          "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "postgres",
                          "CALL_LOG": str(call_log), "ROUTE_LANE": lane},
@@ -3178,8 +3175,7 @@ run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-servic
                 for name in present:
                     (tests / name).touch()
                 (source / REQUIRED_IMPORT_NATIVE_TESTS[0]).touch()
-                result = subprocess.run(
-                    ["bash", "-eu"], input=script, cwd=source,
+                result = bash_script(input=script, cwd=source,
                     env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
                          "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "postgres",
                          "ROUTE_LOG": str(log)},
@@ -3204,8 +3200,7 @@ drop_test_database() { printf 'drop %s\n' "$1" >> "$CALL_LOG"; return 13; }
 createdb() { printf 'unexpected create\n' >> "$CALL_LOG"; }
 create_test_database hc_custom_import_test_0123456789abcdef0123456789abcdef || exit "$?"
 '''
-            result = subprocess.run(
-                ["bash", "-eu"], input=script, capture_output=True, text=True, timeout=5,
+            result = bash_script(input=script, capture_output=True, text=True, timeout=5,
                 env={**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT), "CALL_LOG": str(log)},
                 check=False,
             )
@@ -3248,8 +3243,7 @@ test "$PGDATABASE" = sentinel
 test "$HLTHPRT_DB_DATABASE:$HLTHPRT_DB_DATABASE_OVERRIDE" = sentinel:sentinel
 '''
             for status, drop_status, expected in ((0, 0, 0), (17, 0, 17), (0, 7, 1)):
-                result = subprocess.run(
-                    ["bash", "-eu"], input=script,
+                result = bash_script(input=script,
                     env={**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT),
                          "ARCHIVE_LOG": str(log), "TEST_STATUS": str(status),
                          "DROP_STATUS": str(drop_status), "HLTHPRT_DB_HOST": "localhost",
@@ -3325,8 +3319,7 @@ fi
             cases = [(*case, 0) for case in cases] + [(*case, 1) for case in cases if case[0] == paths[0]]
             for path, status, drained, background, acquisition in cases:
                 with self.subTest(path=path, status=status, drained=drained, background=background, acquisition=acquisition):
-                    result = subprocess.run(
-                        ["bash", "-eu"], input=script, capture_output=True, text=True,
+                    result = bash_script(input=script, capture_output=True, text=True,
                         env={**os.environ, "SOURCE_ROOT": temporary, "CI_ROOT": str(ROOT),
                              "RUNNER_TEMP": temporary, "CALL_LOG": str(log),
                              "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "postgres",
@@ -3368,8 +3361,7 @@ run_provider_directory_postgres postgresql://postgres:postgres@127.0.0.1:5432/te
                     path.unlink()
                 for name in present:
                     (tests / name).touch()
-                result = subprocess.run(
-                    ["bash", "-eu"], input=script, cwd=source,
+                result = bash_script(input=script, cwd=source,
                     env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
                          "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "postgres",
                          "ROUTE_LOG": str(log)},
@@ -3418,8 +3410,7 @@ timeout() {
 }
 run_core_postgres postgresql://postgres:postgres@127.0.0.1:5432/test core-ptg
 '''
-            result = subprocess.run(
-                ["bash", "-eu"], input=script, cwd=source,
+            result = bash_script(input=script, cwd=source,
                 env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
                      "HLTHPRT_DB_USER": "postgres", "HLTHPRT_DB_PASSWORD": "postgres",
                      "ROUTE_LOG": str(log), "HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST": "",
@@ -3686,7 +3677,7 @@ ci_phase_begin source-review-route
 run_core_postgres postgresql://postgres@127.0.0.1:5432/test "$ROUTE_LANE"
 ci_phase_end
 '''
-                result = subprocess.run(["bash", "-eu"], input=script, cwd=source, env=environment,
+                result = bash_script(input=script, cwd=source, env=environment,
                                         capture_output=True, text=True, timeout=15)
                 self.assertEqual(result.returncode, expected, result.stderr)
                 endings = [line for line in result.stdout.splitlines() if line.startswith("CI_PHASE end name=source-review-route ")]
@@ -3732,7 +3723,7 @@ ci_phase_end
             (source / "tests").mkdir()
             (source / "tests/test_registry_ptg_cohort_authority_postgres.py").touch()
             script = CHECK_FUNCTIONS + "\ngit() { return 97; }\ninstall_address_canon_wheel() { return 98; }\nrun_registry_ptg_scope_postgres synthetic\n"
-            result = subprocess.run(["bash", "-eu"], input=script, cwd=source,
+            result = bash_script(input=script, cwd=source,
                                     env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT)},
                                     capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -3778,8 +3769,7 @@ timeout() { shift 2; "$@"; }
 run_python_main 0
 run_provider_profile_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" profile-publication
 '''
-                result = subprocess.run(
-                    ["bash", "-eu"], input=script, cwd=source, env=env, capture_output=True, text=True
+                result = bash_script(input=script, cwd=source, env=env, capture_output=True, text=True
                 )
                 self.assertEqual(result.returncode == 0, not fail, result.stderr)
                 calls = call_log.read_text().splitlines()
@@ -3810,7 +3800,7 @@ uv() { printf 'uv %s\n' "$*"; }
 python() { printf 'python %s\n' "$*"; }
 run_quality
 '''
-            result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
+            result = bash_script(input=script, env=environment, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         for retained in ("commit policy", "requirements-python-quality.lock", "--require-hashes",
                          "python_format.py", "compileall", "coverage_reports.py --check",
@@ -3836,7 +3826,7 @@ python() {
 }
 run_quality
 '''
-            result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
+            result = bash_script(input=script, env=environment, capture_output=True, text=True)
         self.assertEqual(result.returncode, 23, result.stderr)
         self.assertIn("python_format.py", result.stdout)
         for later_stage in ("compileall", "coverage_reports.py", "request_time_external_call_guard.py"):
@@ -3853,7 +3843,7 @@ python() { printf 'python %s\n' "$*"; }
 timeout() { printf 'timeout %s\n' "$*"; }
 run_api_contract
 '''
-            result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
+            result = bash_script(input=script, env=environment, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         for retained in ("runtime dependencies", "runtime-aware native inference", "runtime import contracts",
                          "provider_directory_runtime_contract.py",
@@ -3874,8 +3864,7 @@ run_api_contract
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary)
             environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT)}
-            result = subprocess.run(
-                ["bash", "-eu"], input=CHECK_FUNCTIONS + "\nrun_runtime_contracts\n",
+            result = bash_script(input=CHECK_FUNCTIONS + "\nrun_runtime_contracts\n",
                 cwd=source, env=environment, capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 2, result.stderr)
@@ -3899,7 +3888,7 @@ run_api_contract
             environment = {**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
                            "RUNNER_TEMP": str(root), "VIRTUAL_ENV": str(runtime)}
             script = CHECK_FUNCTIONS + '\nuv() { return 19; }\nrun_python_inference\n'
-            result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
+            result = bash_script(input=script, env=environment, capture_output=True, text=True)
             self.assertEqual(result.returncode, 19, result.stderr)
             self.assertEqual(set(root.iterdir()), {source, runtime})
         self.assertNotIn("sys.path.extend", CHECK_FUNCTIONS)
@@ -3936,7 +3925,7 @@ uv() {
 }
 run_python_inference
 '''
-            result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
+            result = bash_script(input=script, env=environment, capture_output=True, text=True)
             self.assertEqual(result.returncode, 23, result.stderr)
             self.assertEqual(set(root.iterdir()), {source, runtime})
             self.assertEqual(marker.read_text(), "runtime state")
@@ -3962,8 +3951,7 @@ run_python_inference
             for target in targets:
                 with self.subTest(target=target):
                     (source / target).unlink()
-                    result = subprocess.run(
-                        ["bash", "-eu"], input=script,
+                    result = bash_script(input=script,
                         check=False,
                         cwd=source,
                         env=environment,
@@ -4080,8 +4068,7 @@ class Box:
                     "PATH": str(root) + os.pathsep + os.environ["PATH"], "CAPTURE": str(capture),
                     "HLTHPRT_DB_PASSWORD": "synthetic"}
                 environment.pop("HLTHPRT_PROVIDER_DIRECTORY_PROFILE_POSTGRES_DSN", None)
-                result = subprocess.run(
-                    ["bash", "-eu"], input=CHECK_FUNCTIONS + "\ncreate_test_database() { :; }\n"
+                result = bash_script(input=CHECK_FUNCTIONS + "\ncreate_test_database() { :; }\n"
                      "drop_test_database() { :; }\nrun_provider_profile_postgres postgresql://synthetic/test\n",
                     env=environment, capture_output=True, text=True,
                 )
@@ -4132,7 +4119,7 @@ create_test_database() { printf 'create:%s\n' "$1" >> "$LIFECYCLE"; }
 drop_test_database() { printf 'drop:%s\n' "$1" >> "$LIFECYCLE"; }
 run_provider_profile_postgres postgresql://synthetic/original
 '''
-                result = subprocess.run(["bash", "-eu"], input=script, env=environment,
+                result = bash_script(input=script, env=environment,
                                         capture_output=True, text=True)
                 self.assertEqual(result.returncode, int(failure is not None), result.stderr)
                 count = 3 if failure is None else failure + 1
@@ -4246,7 +4233,7 @@ run_security
                 environment = {**os.environ, "SOURCE_ROOT": str(root), "CI_ROOT": str(ROOT),
                                "RUNNER_TEMP": str(root), "AUDIT_LOG": str(log), "FAILURE": failure,
                                "SOURCE_SHA": "a" * 40, "GITHUB_EVENT_PATH": ""}
-                result = subprocess.run(["bash", "-eu"], input=script, cwd=root, env=environment,
+                result = bash_script(input=script, cwd=root, env=environment,
                                         capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, status, result.stderr)
                 stages = ["locked", "version", "tool", "scan"]
@@ -4818,7 +4805,7 @@ python() {
 }
 run_rust
 '''
-                result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
+                result = bash_script(input=script, env=environment, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0 if failure_index == len(phases) else 17, result.stderr)
                 ends = re.findall(r"CI_PHASE end name=([a-z-]+) elapsed_seconds=\d+ exit_code=(\d+)", result.stdout)
                 expected = [(name, "0") for name in phases]
@@ -4869,7 +4856,7 @@ verify_registry_native_wheel() {
 }
 run_rust
 '''
-            result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
+            result = bash_script(input=script, env=environment, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             calls = [line.split("\t") for line in capture.read_text().splitlines()]
             coverage_target = str(source / "support/ptg2_scanner/target/llvm-cov-target")
@@ -4956,7 +4943,7 @@ timeout() { shift 2; "$@"; }
 install_address_canon_wheel() { printf 'unexpected-wheel\n' >> "$CALL_LOG"; }
 run_rust
 '''
-        result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
+        result = bash_script(input=script, env=environment, capture_output=True, text=True)
         self.assertEqual(result.returncode, 17, result.stderr)
         calls = [line.split("\t") for line in capture.read_text().splitlines()]
         expected = [
@@ -5344,7 +5331,7 @@ prepare_postgres "$PREPARE_SHARD"
 [[ "$HLTHPRT_DB_READER_USER" = existing_reader ]] || exit 98
 printf 'tests\n' >> "$CALL_LOG"
 '''
-                result = subprocess.run(["bash", "-eu"], input=script, env=environment,
+                result = bash_script(input=script, env=environment,
                                         capture_output=True, text=True, timeout=15, check=False)
                 self.assertEqual(result.returncode, 1 if failure.startswith("parity") else 17 if failure else 0, result.stderr)
                 if cache == "hit":
@@ -5390,7 +5377,7 @@ run_core_postgres() { [ "$ci_phase_name" != "$FAIL_PHASE" ] || return 17; }
 run_postgres core
 echo unexpected-continuation
 '''
-                result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
+                result = bash_script(input=script, env=environment, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 17, result.stderr)
                 self.assertRegex(result.stdout, rf"CI_PHASE end name={failure} elapsed_seconds=\d+ exit_code=17")
                 self.assertNotIn("unexpected-continuation", result.stdout)
@@ -5433,7 +5420,7 @@ docker() {
 }
 run_container_package
 '''
-                    result = subprocess.run(["bash", "-eu"], input=script, env=env,
+                    result = bash_script(input=script, env=env,
                                             capture_output=True, text=True)
                     self.assertEqual(result.returncode, expected, result.stderr)
                     if not listing:
@@ -5483,7 +5470,7 @@ docker() {
 python3() { [ "${2:-}" = prepare-engine ] || log_call python3 "$@"; }
 run_container_package
 '''
-                result = subprocess.run(["bash", "-eu"], input=script, env=environment, capture_output=True, text=True)
+                result = bash_script(input=script, env=environment, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0 if failure == "none" else 1 if failure == "missing-validator" else 17,
                                  result.stderr)
                 calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]
@@ -5568,7 +5555,7 @@ timeout() {
 run_python_main 0
 run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner"
 '''
-                subprocess.run(["bash", "-eu"], input=(script).encode(), cwd=source, env=env, check=True)
+                bash_script(input=(script).encode(), cwd=source, env=env, check=True)
                 calls = call_log.read_text().splitlines()
                 for index, test_path in enumerate(test_paths):
                     matching = [call for call in calls if test_path in call]
@@ -5631,8 +5618,7 @@ git() {
 }
 "$CAPABILITY_SELECTOR"
 '''
-                result = subprocess.run(
-                    ["bash", "-eu"], input=script, cwd=source, capture_output=True, text=True, timeout=10,
+                result = bash_script(input=script, cwd=source, capture_output=True, text=True, timeout=10,
                     env={**os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
                          "FAIL_STAGE": stage, "CHANGED_PATH": changed,
                          "CAPABILITY_SELECTOR": selector}, check=False)
@@ -5760,7 +5746,7 @@ else
 fi
 printf 'complete\n' >> "$CALL_LOG"
 '''
-                result = subprocess.run(["bash", "-eu"], input=script, cwd=source, env=environment,
+                result = bash_script(input=script, cwd=source, env=environment,
                                         capture_output=True, text=True, timeout=30, check=False)
                 expected_status = {"create": 19, "setup": 23, "pytest": 17}.get(stage, 1 if stage else 0)
                 self.assertEqual(result.returncode, expected_status, result.stderr)
@@ -5865,9 +5851,7 @@ run_core_postgres postgresql://synthetic core-snapshots-2 && printf 'complete\n'
 exit "$status"
 """
                 )
-                result = subprocess.run(
-                    ["bash", "-eu"],
-                    input=script,
+                result = bash_script(input=script,
                     cwd=root,
                     env=environment,
                     capture_output=True,
@@ -6202,8 +6186,7 @@ fi
                 root = Path(temporary)
                 base = root / "earlier-coverage"
                 base.write_text("earlier\n")
-                result = subprocess.run(
-                    ["bash", "-eu"], input=_import_family_pair_script(), capture_output=True, text=True, timeout=10,
+                result = bash_script(input=_import_family_pair_script(), capture_output=True, text=True, timeout=10,
                     env={**_import_family_environment(root), "FAILURE_PATH": failure, "COMBINE_STATUS": str(combine_status)},
                     check=False,
                 )
@@ -6234,8 +6217,7 @@ fi
                 (root / "earlier-coverage").write_text("earlier\n")
                 functions = _import_family_signal_hook(CHECK_FUNCTIONS, location, signum)
                 with (root / "stdout").open("w") as stdout, (root / "stderr").open("w") as stderr:
-                    result = subprocess.run(
-                        ["bash", "-eu"], input=(_import_family_cancellation_script(functions)).encode(),
+                    result = bash_script(input=(_import_family_cancellation_script(functions)).encode(),
                         stdout=stdout, stderr=stderr, timeout=10, env=_import_family_environment(root),
                         check=False,
                     )
@@ -6287,8 +6269,7 @@ run_scoped_archive_postgres hc_custom_import_test_0123456789abcdef0123456789abcd
             for status in (0, 17):
                 with self.subTest(signum=signum, status=status), tempfile.TemporaryDirectory() as temporary:
                     root = Path(temporary)
-                    result = subprocess.run(
-                        ["bash", "-eu"], input=script, capture_output=True, text=True, timeout=5,
+                    result = bash_script(input=script, capture_output=True, text=True, timeout=5,
                         env={**_import_family_environment(root), "DROP_SIGNAL": signum, "TEST_STATUS": str(status)},
                         check=False,
                     )
@@ -6311,8 +6292,7 @@ run_import_family_postgres postgresql://synthetic
 '''
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            result = subprocess.run(
-                ["bash", "-eu"], input=script, capture_output=True, text=True, timeout=5,
+            result = bash_script(input=script, capture_output=True, text=True, timeout=5,
                 env=_import_family_environment(root), check=False,
             )
             self.assertEqual(result.returncode, 143, result.stderr)
@@ -6369,7 +6349,7 @@ timeout() { shift 2; "$@"; }
 run_python_main 0
 run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" "$ROUTE_LANE"
 '''
-                    result = subprocess.run(["bash", "-eu"], input=script, cwd=source, env=env, capture_output=True, text=True)
+                    result = bash_script(input=script, cwd=source, env=env, capture_output=True, text=True)
                     selected = lane in ("core-imports-2", "all")
                     self.assertEqual(result.returncode == 0, not (fail and selected), result.stderr)
                     calls = call_log.read_text().splitlines()
@@ -6420,7 +6400,7 @@ run_core_postgres "$BASE_DSN" "$ROUTE_LANE"
                            "HLTHPRT_DB_DATABASE": "base", "HLTHPRT_PTG_IMPORT_WAVE_RECOVERY_POSTGRES_DSN": "",
                            "HLTHPRT_UHC_SEMANTIC_POSTGRES_DSN": "", "BASE_DSN": dsn,
                            "ROUTE_LANE": lane, "FAILURE_PATH": failure}
-                    result = subprocess.run(["bash", "-eu"], input=script, env=env, capture_output=True, text=True)
+                    result = bash_script(input=script, env=env, capture_output=True, text=True)
                     selected = lane == "core-imports-2"
                     self.assertEqual(result.returncode, (23 if failure == paths[-1] else 1) if selected and failure else 0,
                                      result.stderr)
@@ -6513,7 +6493,7 @@ timeout() {
 run_python_main 0
 run_core_postgres "postgresql://postgres:postgres@localhost:5432/ptg2_v3_lifecycle_test_ci_runner" "$ROUTE_LANE"
 '''
-                result = subprocess.run(["bash", "-eu"], input=script, cwd=source, env=env, capture_output=True, text=True)
+                result = bash_script(input=script, cwd=source, env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, int(bool(failed_path) and lane != "core-imports"), result.stderr)
                 calls = call_log.read_text().splitlines()
                 main_call = next(call for call in calls if "--ci-shard-count 6" in call)
@@ -6573,13 +6553,13 @@ stage_native_wheel "$OUTPUT_DIRECTORY"
             environment = {**os.environ, "CI_ROOT": str(ROOT), "SOURCE_ROOT": str(source), "CALL_LOG": str(log),
                            "OUTPUT_DIRECTORY": str(output), "WHEEL_NAME": wheel_name, "RUSTC_VERSION": "1.98.0"}
             # The build site keeps the pinned toolchain guarantee that consumers no longer check.
-            rejected = subprocess.run(["bash", "-eu"], input=script, text=True, capture_output=True, timeout=10,
+            rejected = bash_script(input=script, text=True, capture_output=True, timeout=10,
                                       env=environment)
             self.assertEqual(rejected.returncode, 1, rejected.stderr)
             self.assertEqual(log.read_text().splitlines(), ["deps"])
             self.assertFalse(output.exists() and any(output.iterdir()))
             log.unlink()
-            result = subprocess.run(["bash", "-eu"], input=script, text=True, capture_output=True, timeout=10,
+            result = bash_script(input=script, text=True, capture_output=True, timeout=10,
                                     env={**environment, "RUSTC_VERSION": "1.98.1"})
             self.assertEqual(result.returncode, 0, result.stderr)
             calls = log.read_text().splitlines()
@@ -6592,7 +6572,7 @@ stage_native_wheel "$OUTPUT_DIRECTORY"
 
             # A relative output directory resolves against the source root, not the crate directory.
             log.unlink()
-            relative = subprocess.run(["bash", "-eu"], input=script, text=True, capture_output=True, timeout=10,
+            relative = bash_script(input=script, text=True, capture_output=True, timeout=10,
                                       env={**environment, "RUSTC_VERSION": "1.98.1", "OUTPUT_DIRECTORY": "relative-artifact"})
             self.assertEqual(relative.returncode, 0, relative.stderr)
             self.assertEqual(sorted(path.name for path in (source / "relative-artifact").iterdir()),
@@ -6642,7 +6622,7 @@ install_address_canon_wheel
                     (prebuilt / wheel_name).unlink()
                     (prebuilt / wheel_name).symlink_to(root / "elsewhere.whl")
                 log = root / "calls"
-                result = subprocess.run(["bash", "-eu"], input=reuse_script, text=True, capture_output=True, timeout=10,
+                result = bash_script(input=reuse_script, text=True, capture_output=True, timeout=10,
                                         env={**os.environ, "CI_ROOT": str(ROOT), "SOURCE_ROOT": str(root),
                                              "CALL_LOG": str(log), "FAIL_STAGE": stage,
                                              "CI_RUST_BINARIES": (str(root / "absent") if stage == "missing-directory"
@@ -6695,7 +6675,7 @@ install_address_canon_wheel
         script = CHECK_FUNCTIONS + "\npostgres_block_runs \"$LANE\" \"$HOME_LANE\" \"$BLOCK\"\n"
 
         def runs(lane, home, block):
-            result = subprocess.run(["bash", "-eu"], input=script, text=True, capture_output=True, timeout=10,
+            result = bash_script(input=script, text=True, capture_output=True, timeout=10,
                                     env={**os.environ, "CI_ROOT": str(ROOT), "SOURCE_ROOT": str(ROOT),
                                          "LANE": lane, "HOME_LANE": home, "BLOCK": block})
             self.assertIn(result.returncode, (0, 1), result.stderr)
@@ -6751,7 +6731,7 @@ run_postgres "$ROUTE_LANE"
         for lane, expected in expected_by_lane.items():
             with self.subTest(lane=lane), tempfile.TemporaryDirectory() as temporary:
                 log = Path(temporary) / "calls"
-                result = subprocess.run(["bash", "-eu"], input=script, text=True, capture_output=True, timeout=10,
+                result = bash_script(input=script, text=True, capture_output=True, timeout=10,
                                         env={**os.environ, "CI_ROOT": str(ROOT), "SOURCE_ROOT": str(ROOT),
                                              "CI_DEPS_READY": "1", "ROUTE_LANE": lane, "CALL_LOG": str(log),
                                              "RUNNER_TEMP": temporary, "COVERAGE_FILE": str(Path(temporary) / "cov")})
