@@ -13,13 +13,17 @@ public_common_test_run() {
         ( -z "${GH_TOKEN:-}" && "$evidence" != true ) ||
         ( "$source_repository" != "${GITHUB_REPOSITORY:-$source_repository}" && "$evidence" != true ) ]]; then
     local -a hidden=(GH_TOKEN GITHUB_TOKEN SOURCE_TOKEN)
-    # An enrolled same-commit command never sees the start labels, with or without the engine.
-    # Scope and labels mirror SAME_COMMIT_SCOPES and START_LABELS in common_test_result.py.
-    if [[ "$scope" =~ ^healthcare-(python-main-[0-5]|capacity)$ ]]; then
+    # An enrolled command never sees what its profile hides, with or without the engine. Scopes
+    # and names mirror SAME_COMMIT_SCOPES, SAME_TREE_SCOPES and SAME_TREE_HIDDEN in
+    # common_test_result.py.
+    local same_tree=false
+    [[ ! "$scope" =~ ^same-tree-[a-z0-9][a-z0-9-]*$ ]] || same_tree=true
+    if [[ "$scope" =~ ^healthcare-(python-main-[0-5]|capacity)$ || "$same_tree" == true ]]; then
       hidden+=(GITHUB_SHA GITHUB_WORKFLOW_SHA GITHUB_REF GITHUB_REF_NAME GITHUB_REF_TYPE
                GITHUB_REF_PROTECTED GITHUB_HEAD_REF GITHUB_BASE_REF GITHUB_EVENT_NAME
                GITHUB_EVENT_PATH GITHUB_WORKFLOW_REF PR_NUMBER SOURCE_PR_TITLE SOURCE_BRANCH)
     fi
+    [[ "$same_tree" != true ]] || hidden+=(SOURCE_SHA)
     (unset "${hidden[@]}"; "$@")
     return
   fi

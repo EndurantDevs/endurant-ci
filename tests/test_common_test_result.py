@@ -652,6 +652,8 @@ class CommonResultIntegrationTests(unittest.TestCase):
     def same_tree_original(self):
         """Record an enrolled scope's execution as the pull-request run of its tree would."""
         self.arguments.scope = "same-tree-unit-0"
+        # Declaring a hidden name does not bind it: the command never sees it.
+        self.arguments.environment = ["SOURCE_SHA", "PR_NUMBER"]
         self.base = {"BASE_SHA": "b" * 40}
         with patch.dict(
             os.environ,
@@ -717,6 +719,7 @@ class CommonResultIntegrationTests(unittest.TestCase):
             ["BASE_SHA", "GITHUB_REPOSITORY", "SOURCE_REPOSITORY"],
         )
         self.assertEqual(sorted(current["inputs"]["source_git"]), ["head", "shallow"])
+        self.assertEqual(current["inputs"]["environment"], {"declared_context": "none"})
         self.assertNotIn("recipe_git", current["inputs"])
         self.assertNotIn("verifier_git", current["inputs"])
 

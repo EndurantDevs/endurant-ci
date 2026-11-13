@@ -791,7 +791,11 @@ def collect(arguments, producer, source_repository_id, execution=None):
             if name in os.environ
             else None
         )
-        for name in sorted(set(arguments.environment))
+        # A same-tree command never sees the names its profile hides, even if declared.
+        for name in sorted(
+            set(arguments.environment)
+            - (set(SAME_TREE_HIDDEN) if same_tree(arguments.scope) else set())
+        )
     }
     if inputs["environment"].get("PYTHONPATH"):
         inputs["environment"]["PYTHONPATH"] = path_inputs(
