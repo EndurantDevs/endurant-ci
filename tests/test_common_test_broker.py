@@ -651,6 +651,7 @@ class CommonTestBrokerIntegrationTests(unittest.TestCase):
                 [common.CONTENT_SCOPE],
                 [common.PYTEST_CONTENT_SCOPE],
                 ["unit/full", common.CONTENT_SCOPE],
+                ["same-tree-unit-0"],
             )
         ):
             with self.subTest(scopes=scopes):

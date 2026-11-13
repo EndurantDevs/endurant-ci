@@ -134,19 +134,21 @@ if "--output-file" in sys.argv:
         engine = importlib.util.module_from_spec(spec)
         with patch.object(sys, "path", [str(ROOT / "scripts"), *sys.path]):
             spec.loader.exec_module(engine)
-        labels = {name: "synthetic-label" for name in engine.START_LABELS}
+        labels = {name: "synthetic-label" for name in engine.SAME_TREE_HIDDEN}
         seen = "env | grep -c synthetic-label || true"
+        # A same-commit command still sees SOURCE_SHA; a same-tree command does not.
         for scope, expected in (
-            ("healthcare-python-main-0", "0"),
-            ("healthcare-python-main-5", "0"),
-            ("healthcare-capacity", "0"),
+            ("healthcare-python-main-0", "1"),
+            ("healthcare-python-main-5", "1"),
+            ("healthcare-capacity", "1"),
+            ("same-tree-unit-0", "0"),
             ("healthcare-python-main-6", str(len(labels))),
             ("healthcare-unit", str(len(labels))),
         ):
             with self.subTest(scope=scope):
                 self.assertEqual(
-                    engine.same_commit(scope),
-                    expected == "0",
+                    (engine.same_commit(scope), engine.same_tree(scope)),
+                    (expected == "1", expected == "0"),
                     "shell and engine enrolment differ",
                 )
                 result = self.shell(

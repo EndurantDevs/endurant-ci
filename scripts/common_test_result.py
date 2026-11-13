@@ -69,6 +69,13 @@ START_LABELS = (
     "SOURCE_PR_TITLE",
     "SOURCE_BRANCH",
 )
+# A caller enrolls a scope whose command cannot observe which commit holds its source tree by
+# naming it same-tree-*: it may reuse an execution of the same tree at another commit, such as
+# the pull-request run of a change whose merge commit kept its tree and base. The command sees
+# neither the start labels nor the source commit; the base commit stays bound.
+SAME_TREE_PROFILE = "same-tree-v1"
+SAME_TREE_SCOPES = re.compile(r"same-tree-[a-z0-9][a-z0-9-]*\Z")
+SAME_TREE_HIDDEN = START_LABELS + ("SOURCE_SHA",)
 # A native wheel's bill of materials gets a new serial number and timestamp on every build,
 # and the installer stamps a locally built wheel with the time it was cached.
 GENERATED_DOCUMENTS = re.compile(r"\.dist-info/(?:sboms/[^/]+|uv_cache\.json)\Z")
@@ -539,6 +546,10 @@ def same_commit(scope):
     return SAME_COMMIT_SCOPES.fullmatch(scope) is not None
 
 
+def same_tree(scope):
+    return SAME_TREE_SCOPES.fullmatch(scope) is not None
+
+
 def producer_events(measurement):
     """Only a same-commit measurement may come from, or originate in, a merge-queue run."""
     if measurement["inputs"].get("execution_profile") == SAME_COMMIT_PROFILE:
@@ -551,6 +562,8 @@ def command_environment(scope):
     hidden = {"GH_TOKEN", "GITHUB_TOKEN", "SOURCE_TOKEN"}
     if same_commit(scope):
         hidden.update(START_LABELS)
+    elif same_tree(scope):
+        hidden.update(SAME_TREE_HIDDEN)
     return {name: value for name, value in os.environ.items() if name not in hidden}
 
 
@@ -756,7 +769,8 @@ def collect(arguments, producer, source_repository_id, execution=None):
         allowed_outputs=arguments.allowed_source_output
         + (arguments.output_file if arguments.data_root.resolve() == root else []),
         generated_documents=GENERATED_DOCUMENTS
-        if execution is None and same_commit(arguments.scope)
+        if execution is None
+        and (same_commit(arguments.scope) or same_tree(arguments.scope))
         else None,
     )
     # The names are declared by the reviewed caller. Their actual values, not
@@ -777,7 +791,11 @@ def collect(arguments, producer, source_repository_id, execution=None):
             if name in os.environ
             else None
         )
-        for name in sorted(set(arguments.environment))
+        # A same-tree command never sees the names its profile hides, even if declared.
+        for name in sorted(
+            set(arguments.environment)
+            - (set(SAME_TREE_HIDDEN) if same_tree(arguments.scope) else set())
+        )
     }
     if inputs["environment"].get("PYTHONPATH"):
         inputs["environment"]["PYTHONPATH"] = path_inputs(
@@ -790,8 +808,8 @@ def collect(arguments, producer, source_repository_id, execution=None):
     helper_root = Path(__file__).resolve().parents[1]
     inputs["verifier_checkout"] = checkout_identity(helper_root)
     inputs["verifier_git"] = equivalent.git_execution_context(helper_root)
-    # No scope currently claims that source/ref identity is unobservable. Keep
-    # these actual values: a rewritten checkout therefore takes the full path.
+    # Keep these actual values unless an enrolled profile below claims they are
+    # unobservable: otherwise a rewritten checkout takes the full path.
     inputs["identity_environment"] = {
         name: os.environ.get(name)
         for name in (
@@ -830,6 +848,17 @@ def collect(arguments, producer, source_repository_id, execution=None):
         for name in START_LABELS:
             inputs["identity_environment"].pop(name, None)
         inputs["execution_profile"] = SAME_COMMIT_PROFILE
+    elif same_tree(arguments.scope):
+        # The tree fixes every source byte. Which commit and refs hold it, and which commits
+        # the recipe and verifier came from, are not visible to the command; their files stay
+        # bound by content.
+        for name in ("commit", "references_sha256", "shallow_boundary_sha256"):
+            inputs["source_git"].pop(name)
+        inputs.pop("recipe_git")
+        inputs.pop("verifier_git")
+        for name in SAME_TREE_HIDDEN:
+            inputs["identity_environment"].pop(name, None)
+        inputs["execution_profile"] = SAME_TREE_PROFILE
     inputs["verifier_files"] = equivalent.file_inventory(
         helper_root, ["scripts/result_equivalence.py", "scripts/common_test_result.py"]
     )
@@ -1240,7 +1269,7 @@ def execute(arguments, *, read=api, choose=select, run=subprocess.run):
     with tempfile.TemporaryDirectory(prefix="common-test-bytecode-") as cache:
         os.environ.update(PYTHONPYCACHEPREFIX=cache, PYTHONDONTWRITEBYTECODE="1")
         try:
-            if same_commit(arguments.scope):
+            if same_commit(arguments.scope) or same_tree(arguments.scope):
                 return execute_isolated(arguments, read=read, choose=choose, run=run)
             # Merge-queue runs produce and consume nothing outside the same-commit profile.
             if (
