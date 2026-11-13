@@ -10,6 +10,7 @@ import re
 import sys
 import tempfile
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 _HELPER_CACHE = tempfile.TemporaryDirectory(prefix="common-test-helper-cache-")
@@ -17,6 +18,18 @@ sys.pycache_prefix = _HELPER_CACHE.name
 sys.dont_write_bytecode = True
 
 import common_test_result as engine
+
+EXECUTION_FIELDS = (
+    "run_id",
+    "head_sha",
+    "status",
+    "conclusion",
+    "labels",
+    "started_at",
+    "completed_at",
+    "runner_id",
+    "runner_name",
+)
 
 
 def coverage_reference(document, data):
@@ -185,9 +198,48 @@ def verify(
     return references
 
 
+def original_execution(records):
+    """Resolve retained copies to the execution that uploaded the immutable artifact."""
+    latest = records[-1]
+    if len(records) == 1:
+        return latest
+    window = latest.get("started_at"), latest.get("completed_at")
+    engine.equivalent.require(
+        all(isinstance(value, str) and value for value in window),
+        "Retained execution window is missing",
+    )
+    start, end = (
+        datetime.fromisoformat(value.replace("Z", "+00:00")) for value in window
+    )
+    engine.equivalent.require(
+        start.tzinfo is not None and end.tzinfo is not None and start <= end,
+        "Retained execution window is invalid",
+    )
+    original = next(
+        job
+        for job in records
+        if (job.get("started_at"), job.get("completed_at")) == window
+    )
+    for job in records:
+        if job["run_attempt"] >= original["run_attempt"]:
+            engine.equivalent.require(
+                all(
+                    field in job and field in original and job[field] == original[field]
+                    for field in EXECUTION_FIELDS
+                )
+                and (
+                    job.get("steps") == original.get("steps")
+                    or job.get("steps") == []
+                    and job["run_attempt"] > original["run_attempt"]
+                ),
+                "Retained job differs from its original execution",
+            )
+    return original
+
+
 def selected_producers(run, repository):
-    """Select current native job executions without reviving a superseded failed job."""
-    selected, identifiers = {}, set()
+    """Select original executions without reviving a superseded failed job."""
+    groups, identifiers, names = {}, set(), set()
     page_size = 50
     total = None
     for page in range(1, 21):
@@ -222,33 +274,38 @@ def selected_producers(run, repository):
                 and 0 < job["run_attempt"] <= run["run_attempt"]
                 and job.get("head_sha") == run["head_sha"]
                 and isinstance(job.get("name"), str)
-                and job["name"],
+                and job["name"]
+                and isinstance(job.get("steps"), list)
+                and all(isinstance(step, dict) for step in job["steps"]),
                 "Current native job identity is invalid or duplicated",
             )
             identifiers.add(job["id"])
-            previous = selected.get(job["name"])
+            identity = job["name"], job["run_attempt"]
             engine.equivalent.require(
-                previous is None or previous["run_attempt"] != job["run_attempt"],
+                identity not in names,
                 "Current native job name/attempt is ambiguous",
             )
-            if previous is None or previous["run_attempt"] < job["run_attempt"]:
-                selected[job["name"]] = job
+            names.add(identity)
+            groups.setdefault(job["name"], []).append(job)
         if len(rows) < page_size:
             break
     else:
         raise ValueError("Current native job inventory exceeds its bounded window")
-    return {
-        job["id"]: job["run_attempt"]
-        for job in selected.values()
-        if job.get("status") == "completed"
-        and job.get("conclusion") == "success"
-        and any(
+    selected = {}
+    for records in groups.values():
+        records.sort(key=lambda job: job["run_attempt"])
+        latest = records[-1]
+        if latest.get("status") != "completed" or latest.get("conclusion") != "success":
+            continue
+        job = original_execution(records)
+        if any(
             step.get("name") == engine.UPLOAD_STEP
             and step.get("status") == "completed"
             and step.get("conclusion") == "success"
             for step in job.get("steps", [])
-        )
-    }
+        ):
+            selected[job["id"]] = job["run_attempt"]
+    return selected
 
 
 def main():

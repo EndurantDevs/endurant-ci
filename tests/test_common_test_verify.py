@@ -39,6 +39,13 @@ class SelectedProducerTests(unittest.TestCase):
             "name": name,
             "status": "completed",
             "conclusion": "success",
+            "started_at": f"2026-01-{attempt:02d}T00:00:00Z",
+            "completed_at": f"2026-01-{attempt:02d}T00:01:00Z",
+            "labels": ["ubuntu-latest"],
+            "runner_id": 10,
+            "runner_name": "runner-example",
+            "runner_group_id": 1,
+            "runner_group_name": "Hosted",
             "steps": [
                 {
                     "name": common.UPLOAD_STEP,
@@ -63,6 +70,78 @@ class SelectedProducerTests(unittest.TestCase):
         ]
         self.assertEqual(self.select(first), {33: 2, 34: 1})
         self.assertEqual(self.select(list(reversed(first))), {33: 2, 34: 1})
+
+    def test_retained_copies_select_original_execution_with_or_without_steps(self):
+        original = self.job()
+        self.run["run_attempt"] = 3
+        copies = [
+            {**copy.deepcopy(original), "id": 33, "run_attempt": 2},
+            {**copy.deepcopy(original), "id": 34, "run_attempt": 3, "steps": []},
+        ]
+        self.assertEqual(self.select([original, *copies]), {32: 1})
+        self.assertEqual(self.select([*reversed(copies), original]), {32: 1})
+
+    def test_new_execution_then_retained_copy_uses_the_new_original(self):
+        first, latest = self.job(), self.job(33, 2)
+        self.run["run_attempt"] = 3
+        retained = {**copy.deepcopy(latest), "id": 34, "run_attempt": 3, "steps": []}
+        self.assertEqual(self.select([first, retained, latest]), {33: 2})
+
+    def test_retained_copy_uses_original_when_runner_group_id_becomes_null(self):
+        original = self.job(runner_group_id=0)
+        retained = {
+            **copy.deepcopy(original),
+            "id": 33,
+            "run_attempt": 2,
+            "runner_group_id": None,
+        }
+        self.assertEqual(self.select([original, retained]), {32: 1})
+
+    def test_retained_copy_cannot_change_or_omit_execution_fields(self):
+        original = self.job()
+        fields = (
+            "labels",
+            "runner_id",
+            "runner_name",
+            "steps",
+        )
+        for field in fields:
+            for missing in (False, True):
+                with self.subTest(field=field, missing=missing):
+                    retained = {**copy.deepcopy(original), "id": 33, "run_attempt": 2}
+                    if missing:
+                        retained.pop(field)
+                    else:
+                        retained[field] = (
+                            ["changed"] if field in ("labels", "steps") else "changed"
+                        )
+                    with self.assertRaises(ValueError):
+                        self.select([original, retained])
+
+    def test_missing_execution_window_cannot_identify_an_original(self):
+        for field in ("started_at", "completed_at"):
+            with self.subTest(field=field):
+                original = self.job()
+                original.pop(field)
+                retained = {**copy.deepcopy(original), "id": 33, "run_attempt": 2}
+                with self.assertRaises(ValueError):
+                    self.select([original, retained])
+
+    def test_invalid_reversed_or_timezone_free_execution_window_is_rejected(self):
+        for changes in (
+            {"started_at": "invalid"},
+            {"started_at": "2026-01-01T00:02:00Z"},
+            {"started_at": "2026-01-01T00:00:00"},
+        ):
+            with self.subTest(changes=changes):
+                original = self.job(**changes)
+                retained = {**copy.deepcopy(original), "id": 33, "run_attempt": 2}
+                with self.assertRaises(ValueError):
+                    self.select([original, retained])
+
+    def test_duplicate_older_name_and_attempt_is_rejected_after_a_later_job(self):
+        with self.assertRaises(ValueError):
+            self.select([self.job(33, 2), self.job(), self.job(34)])
 
     def test_newer_failed_skipped_or_incomplete_job_never_revives_older_success(self):
         for changes in (
@@ -188,7 +267,9 @@ class SelectedProducerTests(unittest.TestCase):
                 verify.selected_producers(self.run, REPOSITORY)
 
     def test_rejects_a_page_larger_than_requested(self):
-        rows = [self.job(100 + index, 1, f"Complete test {index}") for index in range(51)]
+        rows = [
+            self.job(100 + index, 1, f"Complete test {index}") for index in range(51)
+        ]
         with self.assertRaises(ValueError):
             self.select(rows)
 
