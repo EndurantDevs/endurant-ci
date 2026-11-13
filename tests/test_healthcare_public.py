@@ -1707,7 +1707,9 @@ test -z "${NETWORK_REGISTRY_TEST_DSN:-}${HLTHPRT_NETWORK_MEMBERSHIP_POSTGRES_DSN
                             timeout.write_text(f"#!{sys.executable}\n" + r'''
 import json, os, pathlib, signal, sys, xml.etree.ElementTree as ET
 arguments = sys.argv[1:]
-assert arguments[:6] == ["--foreground", "420s", "python", "-m", "pytest", "-q"]
+# A dealt shard runs from a node-id file and states the longer budget.
+budget = "600s" if arguments[6].startswith("@") else "420s"
+assert arguments[:6] == ["--foreground", budget, "python", "-m", "pytest", "-q"]
 record = {"event": "pytest", "arguments": arguments, "registry": os.getenv("NETWORK_REGISTRY_TEST_DSN"),
           "migration": os.getenv("HLTHPRT_PTG2_V4_MIGRATION_POSTGRES_DSN"), "map": os.getenv("HLTHPRT_PTG2_V4_MAP_POSTGRES_TEST"),
           "profile": os.getenv("HLTHPRT_PROVIDER_DIRECTORY_PROFILE_POSTGRES_DSN"),
