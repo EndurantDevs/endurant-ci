@@ -65,6 +65,13 @@ elif name == "apt-get":
     assert options["DPkg::Lock::Timeout"] == "30"
     assert options["APT::Update::Error-Mode"] == "any"
     texts = {p.name: p.read_text() for p in sources.iterdir()}
+    packages = [Path(arg) for arg in args if arg.endswith(".deb")]
+    if packages:
+        # Cached packages install with no configured source, so nothing can be downloaded.
+        assert not texts and "install" in args
+        assert {package.parent for package in packages} == {Path(os.environ["POSTGRES_CLIENT_CACHE"])}
+        record(sources=texts, packages=[package.name for package in packages])
+        sys.exit(100 if os.environ.get("CACHED_INSTALL_FAILURE") else 0)
     assert texts and set(texts) <= {"ubuntu.sources", "pgdg.sources"}
     for source in texts.values():
         assert "Signed-By:" in source
@@ -93,6 +100,8 @@ elif name == "apt-get":
             time.sleep(1)
     if "ca-certificates" in args:
         (root / "bootstrapped").touch()
+    if "postgresql-client-18" in args and "--simulate" not in args:
+        (Path(options["Dir::Cache::archives"]) / "postgresql-client-18_18.2_amd64.deb").write_text("package")
 elif name in {"psql", "pg_dump", "pg_restore"}:
     record()
     print(name + " (PostgreSQL) " + ("17.9" if name == os.environ.get("BAD_VERSION") else "18.2"))
@@ -102,7 +111,7 @@ else:
 
 
 class InstallPostgresClientChecks(unittest.TestCase):
-    def run_installer(self, **extra):
+    def run_installer(self, cache=None, **extra):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             commands, workspace = root / "bin", root / "temporary"
@@ -132,7 +141,16 @@ class InstallPostgresClientChecks(unittest.TestCase):
             environment = dict(os.environ, FAKE_ROOT=str(root), RUNNER_TEMP=str(workspace),
                                GITHUB_PATH=str(root / "github-path"), PATH=str(commands) + os.pathsep + os.environ["PATH"])
             environment.update(extra)
+            # cache=False is an empty CI cache directory; cache=True holds packages from an earlier install.
+            package_cache, output = root / "package-cache", root / "github-output"
+            if cache is not None:
+                environment.update(POSTGRES_CLIENT_CACHE=str(package_cache), GITHUB_OUTPUT=str(output))
+            if cache:
+                package_cache.mkdir()
+                (package_cache / "postgresql-client-18_18.2_amd64.deb").write_text("cached package")
             result = subprocess.run(["bash", str(target)], env=environment, capture_output=True, text=True, timeout=15)
+            self.cached = sorted(path.name for path in package_cache.glob("*.deb"))
+            self.output = output.read_text() if output.exists() else ""
             log = root / "commands.jsonl"
             calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
             self.assertEqual(list(workspace.iterdir()), [], result.stderr)
@@ -207,6 +225,33 @@ class InstallPostgresClientChecks(unittest.TestCase):
         result, _, path_written = self.run_installer(STALL="1")
         self.assertEqual(result.returncode, 124, result.stderr)
         self.assertFalse(path_written)
+
+    def test_cache_miss_stages_signed_install_packages(self):
+        result, calls, path_written = self.run_installer(cache=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sum(call["command"] == "curl" for call in calls), 1)
+        self.assertEqual(self.cached, ["postgresql-client-18_18.2_amd64.deb"])
+        self.assertEqual(self.output, "cache-ready=true\n")
+        self.assertTrue(path_written)
+
+    def test_cache_hit_installs_offline_without_key_or_index_downloads(self):
+        result, calls, path_written = self.run_installer(cache=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(any(call["command"] == "curl" for call in calls))
+        self.assertEqual([(call["sources"], call["packages"]) for call in calls if call["command"] == "apt-get"],
+                         [({}, ["postgresql-client-18_18.2_amd64.deb"])])
+        self.assertIn("Installed PostgreSQL client from cached packages", result.stdout)
+        self.assertEqual(self.output, "")
+        self.assertTrue(path_written)
+
+    def test_rejected_cache_falls_back_to_signed_indexes(self):
+        result, calls, path_written = self.run_installer(cache=True, CACHED_INSTALL_FAILURE="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sum(call["command"] == "curl" for call in calls), 1)
+        apt = [call for call in calls if call["command"] == "apt-get"]
+        self.assertEqual([bool(call.get("packages")) for call in apt], [True, False, False, False])
+        self.assertEqual(self.output, "")
+        self.assertTrue(path_written)
 
     def test_wrong_native_client_major_fails_before_path_publication(self):
         result, _, path_written = self.run_installer(BAD_VERSION="pg_dump")

@@ -15,10 +15,17 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 setup_directory=$(mktemp -d "${RUNNER_TEMP:?}/postgres-client.XXXXXX")
+# Optional CI cache directory: packages from an earlier signed install, or empty to receive this install's packages.
+package_cache=${POSTGRES_CLIENT_CACHE:-}
+cached_packages=''
+if [ -n "$package_cache" ] && compgen -G "$package_cache/*.deb" >/dev/null; then
+  cached_packages=$package_cache
+fi
 
 # The root-owned timeout can terminate every apt descendant before cleanup.
-sudo timeout --signal=TERM --kill-after=5s 180s bash -euo pipefail -s -- "$setup_directory" <<'INSTALL'
+sudo timeout --signal=TERM --kill-after=5s 180s bash -euo pipefail -s -- "$setup_directory" "$cached_packages" <<'INSTALL'
 setup_directory=$1
+cached_packages=$2
 export DEBIAN_FRONTEND=noninteractive
 . /etc/os-release
 [[ "$ID" = ubuntu && "$VERSION_CODENAME" =~ ^[a-z][a-z0-9]*$ ]]
@@ -56,6 +63,20 @@ apt_options=(
   -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
   -o DPkg::Lock::Timeout=30 -o APT::Update::Error-Mode=any
 )
+client_ready() {
+  local tool
+  for tool in psql pg_dump pg_restore; do
+    "/usr/lib/postgresql/18/bin/$tool" --version | grep -Eq "^$tool \\(PostgreSQL\\) 18\\." || return 1
+  done
+}
+# No source is configured yet, so cached packages install offline; any mismatch falls back to the signed indexes.
+if [ -n "$cached_packages" ]; then
+  if apt-get "${apt_options[@]}" install --yes --no-install-recommends "$cached_packages"/*.deb </dev/null && client_ready; then
+    echo 'Installed PostgreSQL client from cached packages'
+    exit 0
+  fi
+  echo 'Cached PostgreSQL client packages did not apply; installing from the signed indexes' >&2
+fi
 if ! curl --version >/dev/null 2>&1 || [ ! -s /etc/ssl/certs/ca-certificates.crt ]; then
   cp "$setup_directory/ubuntu.sources" "$setup_directory/sources/ubuntu.sources"
   apt-get "${apt_options[@]}" update -qq </dev/null
@@ -80,9 +101,15 @@ if ! apt-get "${apt_options[@]}" --simulate install --yes --no-install-recommend
   apt-get "${apt_options[@]}" update -qq </dev/null
 fi
 apt-get "${apt_options[@]}" install --yes --no-install-recommends postgresql-client-18 </dev/null
-for tool in psql pg_dump pg_restore; do
-  "/usr/lib/postgresql/18/bin/$tool" --version | grep -Eq "^$tool \\(PostgreSQL\\) 18\\."
-done
+client_ready
 INSTALL
+# Caching is an optimization: a staging failure leaves the verified install in place.
+if [ -n "$package_cache" ] && [ -z "$cached_packages" ] && compgen -G "$setup_directory/archives/*.deb" >/dev/null; then
+  if mkdir -p "$package_cache" && cp -- "$setup_directory"/archives/*.deb "$package_cache/"; then
+    printf 'cache-ready=true\n' >> "${GITHUB_OUTPUT:?}"
+  else
+    echo 'PostgreSQL client packages were not staged for caching' >&2
+  fi
+fi
 test -n "${GITHUB_PATH:?}"
 printf '%s\n' /usr/lib/postgresql/18/bin >> "$GITHUB_PATH"

@@ -1133,7 +1133,7 @@ publication_worker_native_test_paths
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         setup = next(step for step in workflow["jobs"]["address-canonical-db-tests"]["steps"]
                      if step["name"] == "Prepare source and toolchain")
-        self.assertNotIn("with", setup)
+        self.assertEqual(setup["with"], {"postgres-schema-cache": "true", "postgres-client": "true"})
         cases = [(lane, "", "") for lane in (
             "core-services", "core-services-2", "core", "core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", "core-ptg", "directory-source", "directory-source-2", "directory-storage",
             "directory-address", "profile-storage", "profile-publication",
