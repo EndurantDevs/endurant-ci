@@ -322,6 +322,8 @@ class CommonResultIntegrationTests(unittest.TestCase):
         }
         self.addCleanup(patch.stopall)
         patch.dict(os.environ, self.environment).start()
+        # An enclosing content-isolated suite sets its own Git boundary; fixtures start without it.
+        os.environ.pop("GIT_CEILING_DIRECTORIES", None)
         patch.object(
             common, "__file__", str(self.root / "scripts/common_test_result.py")
         ).start()

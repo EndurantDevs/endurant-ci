@@ -21,9 +21,9 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Install pinned uv
-        run: bash scripts/install_uv
+        run: bash scripts/install_uv "$RUNNER_TEMP/uv"
       - name: Install uv-managed Python
-        run: bash scripts/setup_python
+        run: bash scripts/setup_python "$RUNNER_TEMP/uv-python"
       - name: Verify managed Python shared library
         run: python -c 'import ctypes, sysconfig; ctypes.CDLL(sysconfig.get_config_var("LDLIBRARY"))'
       - name: Prepare read-only common-test evidence
@@ -53,7 +53,8 @@ jobs:
             --source-root . --source-repository "$GITHUB_REPOSITORY" \
             --recipe-root . --recipe-file @tracked \
             --scope package-unit --step 'Check public workflow and helper contracts' \
-            --environment PUBLIC_CI_DOCKER_COMPATIBILITY \
+            --environment PUBLIC_CI_DOCKER_COMPATIBILITY --environment GITHUB_ACTIONS \
+            --environment RUNNER_ENVIRONMENT --environment RUNNER_TEMP \
             --evidence-directory "${COMMON_TEST_EVIDENCE_DIRECTORY:-$RUNNER_TEMP/common-test-evidence}" \
             --evidence-sha256 "${COMMON_TEST_EVIDENCE_SHA256:-}" \
             --measurements "$RUNNER_TEMP/common-test-measurements" \

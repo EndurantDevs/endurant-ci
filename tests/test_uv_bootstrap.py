@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class UvBootstrapTests(unittest.TestCase):
-    def _archive_case(self, case):
+    def _archive_case(self, case, fixed=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             binaries, runner = root / "bin", root / "runner"
@@ -58,7 +58,7 @@ elif name == "tar":
                 executable.write_text(tools)
                 executable.chmod(0o755)
             result = subprocess.run(
-                ["bash", str(ROOT / "scripts/install_uv")],
+                ["bash", str(ROOT / "scripts/install_uv"), *([str(runner / "uv")] if fixed else [])],
                 env={**os.environ, "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
                      "RUNNER_TEMP": str(runner), "GITHUB_PATH": str(path_file),
                      "BOOTSTRAP_CALLS": str(calls), "BOOTSTRAP_CASE": case,
@@ -96,6 +96,38 @@ elif name == "tar":
                     self.assertEqual(len(remaining), 1)
                     self.assertEqual(published_path, f"{remaining[0]}\n")
 
+    def test_fixed_directory_is_published_and_an_existing_one_is_refused(self):
+        result, _, published_path, remaining = self._archive_case("mirror", fixed=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([path.name for path in remaining], ["uv"])
+        self.assertEqual(published_path, f"{remaining[0]}\n")
+        for script in ("install_uv", "setup_python"):
+            with self.subTest(script=script), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                existing, published, binaries = root / "existing", root / "published", root / "bin"
+                existing.mkdir()
+                (existing / "marker").touch()
+                published.touch()
+                binaries.mkdir()
+                # Both tools pass their version gates and record any real work.
+                for name in ("uv", "curl"):
+                    (binaries / name).write_text(
+                        '#!/bin/bash\nif [ "$2" = --version ]; then echo "uv 0.12.17"; exit; fi\n'
+                        'printf "%s\\n" "$*" >> "$BOOTSTRAP_CALLS"\n')
+                    (binaries / name).chmod(0o755)
+                result = subprocess.run(
+                    ["bash", str(ROOT / "scripts" / script), str(existing)],
+                    env={**os.environ, "RUNNER_TEMP": directory, "GITHUB_PATH": str(published),
+                         "GITHUB_ENV": str(published), "BOOTSTRAP_CALLS": str(root / "calls"),
+                         "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}"},
+                    capture_output=True, text=True, check=False, timeout=10,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("File exists", result.stderr)
+                self.assertFalse((root / "calls").exists())
+                self.assertEqual([path.name for path in existing.iterdir()], ["marker"])
+                self.assertEqual(published.read_text(), "")
+
     def test_integrity_extraction_and_version_failure_never_fall_back_or_publish_path(self):
         for case, status, expected_calls in (("checksum", 1, ["curl", "sha256sum"]),
                                              ("extract", 31, ["curl", "sha256sum", "tar"]),
@@ -108,8 +140,9 @@ elif name == "tar":
                 self.assertEqual(remaining, [])
 
     def test_managed_interpreter_environment_is_published_only_after_success(self):
-        for status, has_library in ((0, True), (41, True), (0, False)):
-            with self.subTest(status=status, has_library=has_library), tempfile.TemporaryDirectory() as directory:
+        for status, has_library, fixed in ((0, True, False), (41, True, False), (0, False, False), (0, True, True)):
+            with self.subTest(status=status, has_library=has_library, fixed=fixed), \
+                    tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 binaries = root / "bin"
                 binaries.mkdir()
@@ -134,7 +167,7 @@ elif name == "tar":
                               'exit "$UV_STATUS"\n')
                 uv.chmod(0o755)
                 result = subprocess.run(
-                    ["bash", str(ROOT / "scripts/setup_python")],
+                    ["bash", str(ROOT / "scripts/setup_python"), *([str(runner / "python")] if fixed else [])],
                     env={**os.environ, "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
                          "RUNNER_TEMP": str(runner), "GITHUB_PATH": str(path_file),
                          "GITHUB_ENV": str(env_file), "UV_CALLS": str(calls), "UV_STATUS": str(status),
@@ -149,6 +182,7 @@ elif name == "tar":
                     self.assertEqual(list(runner.iterdir()), [])
                 else:
                     environment = next(runner.iterdir()) / "venv"
+                    self.assertEqual(environment.parent.name == "python", fixed)
                     self.assertEqual(path_file.read_text(), f"{environment}/bin\n")
                     self.assertEqual(env_file.read_text(),
                                      f"VIRTUAL_ENV={environment}\nUV_PYTHON_PREFERENCE=only-managed\n"
