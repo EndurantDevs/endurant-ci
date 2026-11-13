@@ -78,7 +78,7 @@ class PublicWorkflowPermissions(unittest.TestCase):
             "--source-root", ".", "--source-repository", "$GITHUB_REPOSITORY",
             "--recipe-root", ".", "--recipe-file", "@tracked",
             "--scope", "package-unit", "--step", "Check public workflow and helper contracts",
-            "--environment", "PUBLIC_CI_DOCKER_COMPATIBILITY",
+            "--environment", "PUBLIC_CI_DOCKER_COMPATIBILITY", "--environment", "GITHUB_ACTIONS",
             "--evidence-directory", "${COMMON_TEST_EVIDENCE_DIRECTORY:-$RUNNER_TEMP/common-test-evidence}",
             "--evidence-sha256", "${COMMON_TEST_EVIDENCE_SHA256:-}",
             "--measurements", "$RUNNER_TEMP/common-test-measurements", "--", "bash", "-euc",

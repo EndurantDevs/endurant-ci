@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-uv_directory=$(mktemp -d "$RUNNER_TEMP/uv-0.12.17.XXXXXX")
+# An optional fresh fixed directory keeps PATH identical across runs that reuse results.
+if [ -n "${1-}" ]; then
+  uv_directory=$1
+  mkdir -- "$uv_directory"
+else
+  uv_directory=$(mktemp -d "$RUNNER_TEMP/uv-0.12.17.XXXXXX")
+fi
 cleanup() {
   local status=$?
   rm -f -- "$uv_directory/archive.tar.gz"

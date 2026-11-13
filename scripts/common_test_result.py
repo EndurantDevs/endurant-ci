@@ -36,7 +36,15 @@ MAX_BYTES = 256 * 1024 * 1024
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 CONTENT_SCOPE = "python-unittest-content-v1"
 PYTEST_CONTENT_SCOPE = "python-pytest-content-v1"
-CONTENT_SCOPES = (CONTENT_SCOPE, PYTEST_CONTENT_SCOPE)
+# The shared package's own complete suite: it records no raw data, and only the
+# variables its step declares reach it besides the common content environment.
+PACKAGE_UNIT_SCOPE = "package-unit"
+PACKAGE_UNIT_COMMAND = [
+    "bash",
+    "-euc",
+    "python scripts/parallel_unittest.py; python scripts/healthcare/test_measurement.py",
+]
+CONTENT_SCOPES = (CONTENT_SCOPE, PYTEST_CONTENT_SCOPE, PACKAGE_UNIT_SCOPE)
 NATIVE_EVENTS = frozenset({"push", "pull_request", "workflow_dispatch"})
 # An enrolled scope may reuse an execution of the same commit that GitHub started under
 # another event or ref, such as the merge-queue run of a commit that was then pushed.
@@ -90,13 +98,18 @@ def content_execution(arguments, temporary):
     root = arguments.source_root.resolve()
     command = arguments.command
     pytest = arguments.scope == PYTEST_CONTENT_SCOPE
-    environment_names = CONTENT_ENVIRONMENT + (
-        ("PYTHON_VERSION", "PYTHON_BIN") if pytest else ()
+    package = arguments.scope == PACKAGE_UNIT_SCOPE
+    environment_names = (
+        CONTENT_ENVIRONMENT
+        + (("PYTHON_VERSION", "PYTHON_BIN") if pytest else ())
+        + (tuple(arguments.environment) if package else ())
     )
     project = root / "pyproject.toml"
     configuration = tomllib.loads(project.read_text()) if project.is_file() else {}
     shape = (
-        command[1:]
+        command == PACKAGE_UNIT_COMMAND
+        if package
+        else command[1:]
         == ["-m", "coverage", "run", "--branch", "--source=.", "-m", "pytest", "-q"]
         if pytest
         else len(command) == 12
@@ -104,13 +117,15 @@ def content_execution(arguments, temporary):
         and re.fullmatch(r"--source=[A-Za-z_][A-Za-z0-9_]*", command[5])
         and command[6:] == ["-m", "unittest", "discover", "-s", "tests", "-v"]
     )
+    # The package command starts its interpreter by name; it must be this measured one.
+    interpreter = "python" if package else command[0]
     equivalent.require(
         command
         and shape
-        and Path(shutil.which(command[0]) or command[0]).absolute()
+        and Path(shutil.which(interpreter) or interpreter).absolute()
         == Path(sys.executable).absolute()
         and arguments.data_root.resolve() == root
-        and arguments.output_file == [".coverage"]
+        and arguments.output_file == ([] if package else [".coverage"])
         and arguments.collection == "tests"
         and not arguments.runtime_file
         and not arguments.allowed_source_output
@@ -202,13 +217,20 @@ def content_execution(arguments, temporary):
         TMPDIR=str(temporary / "tmp"),
         TEMP=str(temporary / "tmp"),
         TMP=str(temporary / "tmp"),
-        COVERAGE_FILE=str(destination / ".coverage"),
         PYTHONNOUSERSITE="1",
         PYTHONDONTWRITEBYTECODE="1",
         PYTHONPYCACHEPREFIX=str(temporary / "bytecode"),
         GIT_CEILING_DIRECTORIES=str(temporary),
     )
+    if not package:
+        environment["COVERAGE_FILE"] = str(destination / ".coverage")
     tools = {}
+    probes = []
+    if package:
+        probes = [
+            ("fixture-bash", "bash", ["--version"]),
+            ("fixture-git", "git", ["--version", "--build-options"]),
+        ]
     if pytest:
         environment.update(
             GIT_CONFIG_NOSYSTEM="1",
@@ -216,7 +238,7 @@ def content_execution(arguments, temporary):
             GIT_ATTR_NOSYSTEM="1",
             GIT_TEMPLATE_DIR=str(temporary / "git-templates"),
         )
-        for name, executable, probe in (
+        probes = [
             ("fixture-git", "git", ["--version", "--build-options"]),
             ("fixture-shell", "/bin/sh", ["-c", "exit 0"]),
             (
@@ -228,23 +250,24 @@ def content_execution(arguments, temporary):
                     "import sys; print(sys.version); print(sys.prefix); print(sys.base_prefix)",
                 ],
             ),
-        ):
-            path = Path(
-                shutil.which(executable, path=environment.get("PATH")) or executable
-            )
-            equivalent.require(path.is_file(), "A fixture tool is unavailable")
-            measured = subprocess.run(
-                [str(path), *probe],
-                env=environment,
-                capture_output=True,
-                check=True,
-                timeout=10,
-            )
-            tools[name] = {
-                "executable": str(path),
-                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                "stdout": measured.stdout.decode().strip(),
-            }
+        ]
+    for name, executable, probe in probes:
+        path = Path(
+            shutil.which(executable, path=environment.get("PATH")) or executable
+        )
+        equivalent.require(path.is_file(), "A fixture tool is unavailable")
+        measured = subprocess.run(
+            [str(path), *probe],
+            env=environment,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        tools[name] = {
+            "executable": str(path),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "stdout": measured.stdout.decode().strip(),
+        }
     equivalent.require(
         subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
@@ -258,7 +281,7 @@ def content_execution(arguments, temporary):
     )
     return {
         "root": destination,
-        "coverage": temporary / "coverage.data",
+        "coverage": None if package else temporary / "coverage.data",
         "environment": environment,
         "inputs": {
             name: value.replace(str(temporary), "{content}")
@@ -1373,7 +1396,7 @@ def execute_isolated(
             )
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(value)
-        if execution is not None:
+        if execution is not None and execution["coverage"] is not None:
             execution["coverage"].write_bytes(raw[0])
             coverage_paths(data_root / ".coverage", destination=data_root)
         print("Authenticated equivalent original common-test execution")
@@ -1393,7 +1416,7 @@ def execute_isolated(
             env=environment,
             check=False,
         ).returncode
-        if status == 0 and execution is not None:
+        if status == 0 and execution is not None and execution["coverage"] is not None:
             source = execution["root"] / ".coverage"
             equivalent.require(
                 source.is_file() and not source.is_symlink(),

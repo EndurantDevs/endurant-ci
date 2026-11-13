@@ -334,5 +334,132 @@ class ContentExecutionTests(unittest.TestCase):
         self.assertFalse(list(self.fixture.directory.glob("*/measurement.json")))
 
 
+@unittest.skipUnless(
+    Path(sys.executable).name == "python",
+    "the package command starts its interpreter as python",
+)
+class PackageUnitExecutionTests(unittest.TestCase):
+    content_setup = ContentExecutionTests.setUp
+    child = ContentExecutionTests.child
+    execute = ContentExecutionTests.execute
+    document = ContentExecutionTests.document
+    original = ContentExecutionTests.original
+
+    def setUp(self):
+        self.content_setup()
+        scripts = self.root / "scripts"
+        (scripts / "healthcare").mkdir()
+        (scripts / "parallel_unittest.py").write_text(
+            "import os\nfrom pathlib import Path\n"
+            "assert not Path('.git').exists()\n"
+            "assert os.environ['PUBLIC_CI_DOCKER_COMPATIBILITY'] == '1'\n"
+            "assert not set(os.environ) & {'GITHUB_SHA', 'SOURCE_SHA', 'ARBITRARY_FEATURE', "
+            "'GH_TOKEN', 'COVERAGE_FILE'}\n"
+        )
+        (scripts / "healthcare/test_measurement.py").write_text("print('measured')\n")
+        self.fixture.source_sha = self.commit("Add package suite")
+        self.fixture.tree = self.fixture.git("rev-parse", "HEAD^{tree}").strip()
+        for value in (self.fixture.run, self.fixture.job, self.fixture.check):
+            value["head_sha"] = self.fixture.source_sha
+        self.fixture.producer["commit"] = self.fixture.source_sha
+        self.arguments.scope = common.PACKAGE_UNIT_SCOPE
+        self.arguments.output_file = []
+        self.arguments.command = list(common.PACKAGE_UNIT_COMMAND)
+        self.arguments.environment = ["PUBLIC_CI_DOCKER_COMPATIBILITY"]
+        path = str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"]
+        patch.dict(
+            os.environ, {"PUBLIC_CI_DOCKER_COMPATIBILITY": "1", "PATH": path}
+        ).start()
+
+    def commit(self, message, *options):
+        self.fixture.git("add", ".")
+        self.fixture.git(
+            "-c",
+            "user.name=Example",
+            "-c",
+            "user.email=example@example.invalid",
+            "commit",
+            *options,
+            "-qm",
+            message,
+        )
+        return self.fixture.git("rev-parse", "HEAD").strip()
+
+    def test_equal_tree_merge_reuses_the_isolated_original_without_raw_data(self):
+        with patch.dict(os.environ, {"ARBITRARY_FEATURE": "first"}):
+            self.original()
+        original = self.document()["measurement"]
+        self.assertTrue(original["executed"])
+        self.assertEqual(self.document()["outputs"], [])
+        self.assertEqual(original["inputs"]["execution_profile"], "package-unit")
+        self.assertEqual(
+            original["inputs"]["environment"]["PUBLIC_CI_DOCKER_COMPATIBILITY"], "1"
+        )
+        self.assertNotIn("COVERAGE_FILE", original["inputs"]["environment"])
+        self.assertLessEqual(
+            {"fixture-bash", "fixture-git"}, set(original["inputs"]["toolchains"])
+        )
+        self.assertNotEqual(self.calls[0]["cwd"], self.root)
+        current_sha = self.commit("Merge the same tree", "--allow-empty")
+        self.assertNotEqual(current_sha, self.fixture.source_sha)
+        self.assertEqual(
+            self.fixture.git("rev-parse", "HEAD^{tree}").strip(), self.fixture.tree
+        )
+        self.fixture.current_producer.return_value = (
+            {**self.fixture.producer, "commit": current_sha, "run_id": 21},
+            self.fixture.run,
+        )
+        with patch.dict(
+            os.environ, {"GITHUB_SHA": current_sha, "ARBITRARY_FEATURE": "second"}
+        ):
+            self.assertEqual(self.execute(), 0)
+        current = self.document()
+        self.assertEqual(len(self.calls), 1)
+        self.assertFalse(current["measurement"]["executed"])
+        self.assertEqual(current["outputs"], [])
+        self.assertEqual(current["measurement"]["source"]["commit"], current_sha)
+        self.assertEqual(
+            current["origin"]["origin"]["source"]["commit"], self.fixture.source_sha
+        )
+        self.assertEqual(current["measurement"]["fingerprint"], original["fingerprint"])
+        self.assertIn(
+            "artifact_name=common-tests-21-",
+            (self.root.parent / "github-output").read_text(),
+        )
+
+    def test_missing_original_or_changed_declared_value_runs_the_complete_suite(self):
+        self.arguments.environment.append("EXAMPLE_FLAG")
+        with patch.dict(os.environ, {"EXAMPLE_FLAG": "first"}):
+            self.assertEqual(self.execute(), 0)
+            self.assertTrue(self.document()["measurement"]["executed"])
+            self.original()
+        with patch.dict(os.environ, {"EXAMPLE_FLAG": "second"}):
+            self.assertEqual(self.execute(), 0)
+        self.assertEqual(len(self.calls), 3)
+        self.assertTrue(self.document()["measurement"]["executed"])
+        self.assertIsNone(self.document()["origin"])
+
+    def test_other_command_or_interpreter_keeps_the_stock_suite_without_a_record(self):
+        other = self.root.parent / "other-bin"
+        other.mkdir()
+        (other / "python").write_text("#!/bin/sh\nexit 0\n")
+        (other / "python").chmod(0o755)
+        for command, path in (
+            (["bash", "-euc", "true"], os.environ["PATH"]),
+            (
+                list(common.PACKAGE_UNIT_COMMAND),
+                f"{other}{os.pathsep}{os.environ['PATH']}",
+            ),
+        ):
+            with self.subTest(command=command), patch.dict(os.environ, {"PATH": path}):
+                self.calls.clear()
+                self.arguments.command = command
+                self.assertEqual(self.execute(), 0)
+                self.assertEqual(self.calls[0]["cwd"], self.root.resolve())
+                self.assertFalse(
+                    list(self.fixture.directory.glob("*/measurement.json"))
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,7 +2,13 @@
 set -euo pipefail
 
 test "$(uv --no-config --version | awk '{print $2}')" = 0.12.17
-python_directory=$(mktemp -d "$RUNNER_TEMP/uv-python.XXXXXX")
+# An optional fresh fixed directory keeps installed launchers identical across runs.
+if [ -n "${1-}" ]; then
+  python_directory=$1
+  mkdir -- "$python_directory"
+else
+  python_directory=$(mktemp -d "$RUNNER_TEMP/uv-python.XXXXXX")
+fi
 cleanup() {
   local status=$?
   if [ "$status" -ne 0 ]; then rm -rf -- "$python_directory"; fi
