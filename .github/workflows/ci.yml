@@ -111,4 +111,15 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Install PostgreSQL client
+        env:
+          POSTGRES_CLIENT_CACHE: ${{ runner.temp }}/postgres-client-cache
         run: bash scripts/install_postgres_client
+      - name: Reinstall PostgreSQL client from cached packages
+        env:
+          POSTGRES_CLIENT_CACHE: ${{ runner.temp }}/postgres-client-cache
+        run: |
+          set -o pipefail
+          sudo apt-get purge --yes postgresql-client-18
+          test ! -e /usr/lib/postgresql/18/bin/psql
+          bash scripts/install_postgres_client | tee "$RUNNER_TEMP/cached-install.log"
+          grep -qx 'Installed PostgreSQL client from cached packages' "$RUNNER_TEMP/cached-install.log"

@@ -531,8 +531,9 @@ jobs:
         persist-credentials: false
     - name: Prepare source and toolchain
       uses: ./ci/scripts/healthcare/setup
-    - name: Install PostgreSQL client
-      run: bash "$CI_ROOT/scripts/install_postgres_client"
+      with:
+        postgres-schema-cache: 'true'
+        postgres-client: 'true'
     - name: Download exact-source Rust test binaries
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       with:
@@ -870,12 +871,11 @@ jobs:
         persist-credentials: false
     - name: Prepare source and toolchain
       uses: ./ci/scripts/healthcare/setup
+      with:
+        postgres-client: 'true'
     - name: Check catalog integration capability
       id: catalog-capability
       run: bash "$CI_ROOT/scripts/healthcare/check" fhir-catalog-capability >> "$GITHUB_OUTPUT"
-    - name: Install PostgreSQL client
-      run: bash "$CI_ROOT/scripts/install_postgres_client"
-      if: steps.catalog-capability.outputs.present == 'true'
     - name: Download exact-source Rust test binaries
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       with:
