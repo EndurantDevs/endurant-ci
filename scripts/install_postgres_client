@@ -27,6 +27,8 @@ sudo timeout --signal=TERM --kill-after=5s 180s bash -euo pipefail -s -- "$setup
 setup_directory=$1
 cached_packages=$2
 export DEBIAN_FRONTEND=noninteractive
+# Keep apt's needrestart hook from restarting unrelated runner services.
+export NEEDRESTART_SUSPEND=1
 . /etc/os-release
 [[ "$ID" = ubuntu && "$VERSION_CODENAME" =~ ^[a-z][a-z0-9]*$ ]]
 architecture=$(dpkg --print-architecture)
@@ -69,9 +71,11 @@ client_ready() {
     "/usr/lib/postgresql/18/bin/$tool" --version | grep -Eq "^$tool \\(PostgreSQL\\) 18\\." || return 1
   done
 }
-# No source is configured yet, so cached packages install offline; any mismatch falls back to the signed indexes.
+# No source is configured yet, so the simulation proves the cached set installs offline with no downgrade.
+# dpkg then installs it without apt's pre-install and post-invoke hooks; any mismatch falls back to the signed indexes.
 if [ -n "$cached_packages" ]; then
-  if apt-get "${apt_options[@]}" install --yes --no-install-recommends "$cached_packages"/*.deb </dev/null && client_ready; then
+  if apt-get "${apt_options[@]}" --simulate install --yes --no-install-recommends "$cached_packages"/*.deb </dev/null \
+    && dpkg --install "$cached_packages"/*.deb </dev/null && client_ready; then
     echo 'Installed PostgreSQL client from cached packages'
     exit 0
   fi

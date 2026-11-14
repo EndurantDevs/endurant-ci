@@ -43,8 +43,15 @@ elif name == "timeout":
     code = child.wait(timeout=10)
     sys.exit(code)
 elif name == "dpkg":
-    assert args == ["--print-architecture"]
-    print(os.environ.get("ARCHITECTURE", "amd64"))
+    if args == ["--print-architecture"]:
+        print(os.environ.get("ARCHITECTURE", "amd64"))
+    else:
+        # Only cached packages that apt already simulated are installed directly.
+        assert args[0] == "--install" and os.read(0, 1) == b""
+        packages = [Path(arg) for arg in args[1:]]
+        assert packages and {package.parent for package in packages} == {Path(os.environ["POSTGRES_CLIENT_CACHE"])}
+        record(packages=[package.name for package in packages])
+        sys.exit(100 if os.environ.get("CACHED_DPKG_FAILURE") else 0)
 elif name == "curl":
     if args == ["--version"]:
         sys.exit(1 if os.environ.get("BOOTSTRAP") and not (root / "bootstrapped").exists() else 0)
@@ -58,6 +65,7 @@ elif name == "apt-get":
         record(unscoped=True)
         raise AssertionError("apt sources were not isolated")
     assert os.environ["DEBIAN_FRONTEND"] == "noninteractive" and os.read(0, 1) == b""
+    assert os.environ["NEEDRESTART_SUSPEND"] == "1"
     assert Path(options["Dir::Etc::sourcelist"]).read_text() == ""
     sources = Path(options["Dir::Etc::sourceparts"])
     assert sources.parent.parent == root / "temporary"
@@ -68,7 +76,7 @@ elif name == "apt-get":
     packages = [Path(arg) for arg in args if arg.endswith(".deb")]
     if packages:
         # Cached packages install with no configured source, so nothing can be downloaded.
-        assert not texts and "install" in args
+        assert not texts and "install" in args and "--simulate" in args
         assert {package.parent for package in packages} == {Path(os.environ["POSTGRES_CLIENT_CACHE"])}
         record(sources=texts, packages=[package.name for package in packages])
         sys.exit(100 if os.environ.get("CACHED_INSTALL_FAILURE") else 0)
@@ -238,20 +246,24 @@ class InstallPostgresClientChecks(unittest.TestCase):
         result, calls, path_written = self.run_installer(cache=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(any(call["command"] == "curl" for call in calls))
-        self.assertEqual([(call["sources"], call["packages"]) for call in calls if call["command"] == "apt-get"],
-                         [({}, ["postgresql-client-18_18.2_amd64.deb"])])
+        package = ["postgresql-client-18_18.2_amd64.deb"]
+        self.assertEqual([(call["command"], call.get("sources"), call["packages"]) for call in calls if "packages" in call],
+                         [("apt-get", {}, package), ("dpkg", None, package)])
         self.assertIn("Installed PostgreSQL client from cached packages", result.stdout)
         self.assertEqual(self.output, "")
         self.assertTrue(path_written)
 
     def test_rejected_cache_falls_back_to_signed_indexes(self):
-        result, calls, path_written = self.run_installer(cache=True, CACHED_INSTALL_FAILURE="1")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(sum(call["command"] == "curl" for call in calls), 1)
-        apt = [call for call in calls if call["command"] == "apt-get"]
-        self.assertEqual([bool(call.get("packages")) for call in apt], [True, False, False, False])
-        self.assertEqual(self.output, "")
-        self.assertTrue(path_written)
+        for failure, dpkg_calls in (("CACHED_INSTALL_FAILURE", 0), ("CACHED_DPKG_FAILURE", 1)):
+            with self.subTest(failure=failure):
+                result, calls, path_written = self.run_installer(cache=True, **{failure: "1"})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(sum(call["command"] == "curl" for call in calls), 1)
+                apt = [call for call in calls if call["command"] == "apt-get"]
+                self.assertEqual([bool(call.get("packages")) for call in apt], [True, False, False, False])
+                self.assertEqual(sum(call["command"] == "dpkg" for call in calls), dpkg_calls)
+                self.assertEqual(self.output, "")
+                self.assertTrue(path_written)
 
     def test_wrong_native_client_major_fails_before_path_publication(self):
         result, _, path_written = self.run_installer(BAD_VERSION="pg_dump")
