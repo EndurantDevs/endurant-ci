@@ -79,7 +79,9 @@ elif name == "apt-get":
         assert not texts and "install" in args and "--simulate" in args
         assert {package.parent for package in packages} == {Path(os.environ["POSTGRES_CLIENT_CACHE"])}
         record(sources=texts, packages=[package.name for package in packages])
-        sys.exit(100 if os.environ.get("CACHED_INSTALL_FAILURE") else 0)
+        # A plan that removes a package must abort: dpkg would not carry the removal out.
+        removal = os.environ.get("CACHED_REMOVAL_PLAN") and "--no-remove" in args
+        sys.exit(100 if os.environ.get("CACHED_INSTALL_FAILURE") or removal else 0)
     assert texts and set(texts) <= {"ubuntu.sources", "pgdg.sources"}
     for source in texts.values():
         assert "Signed-By:" in source
@@ -254,7 +256,7 @@ class InstallPostgresClientChecks(unittest.TestCase):
         self.assertTrue(path_written)
 
     def test_rejected_cache_falls_back_to_signed_indexes(self):
-        for failure, dpkg_calls in (("CACHED_INSTALL_FAILURE", 0), ("CACHED_DPKG_FAILURE", 1)):
+        for failure, dpkg_calls in (("CACHED_INSTALL_FAILURE", 0), ("CACHED_REMOVAL_PLAN", 0), ("CACHED_DPKG_FAILURE", 1)):
             with self.subTest(failure=failure):
                 result, calls, path_written = self.run_installer(cache=True, **{failure: "1"})
                 self.assertEqual(result.returncode, 0, result.stderr)

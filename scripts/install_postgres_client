@@ -71,10 +71,10 @@ client_ready() {
     "/usr/lib/postgresql/18/bin/$tool" --version | grep -Eq "^$tool \\(PostgreSQL\\) 18\\." || return 1
   done
 }
-# No source is configured yet, so the simulation proves the cached set installs offline with no downgrade.
+# No source is configured yet, so the simulation proves the cached set installs offline with no downgrade or removal.
 # dpkg then installs it without apt's pre-install and post-invoke hooks; any mismatch falls back to the signed indexes.
 if [ -n "$cached_packages" ]; then
-  if apt-get "${apt_options[@]}" --simulate install --yes --no-install-recommends "$cached_packages"/*.deb </dev/null \
+  if apt-get "${apt_options[@]}" --simulate install --yes --no-remove --no-install-recommends "$cached_packages"/*.deb </dev/null \
     && dpkg --install "$cached_packages"/*.deb </dev/null && client_ready; then
     echo 'Installed PostgreSQL client from cached packages'
     exit 0
