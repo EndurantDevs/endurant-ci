@@ -655,15 +655,19 @@ class CommonResultIntegrationTests(unittest.TestCase):
         # Declaring a hidden name does not bind it: the command never sees it.
         self.arguments.environment = ["SOURCE_SHA", "PR_NUMBER"]
         self.base = {"BASE_SHA": "b" * 40}
-        with patch.dict(
-            os.environ,
-            {
-                **self.base,
-                "GITHUB_SHA": "a" * 40,
-                "GITHUB_REF": "refs/heads/feature",
-                "SOURCE_SHA": self.source_sha,
-                "PR_NUMBER": "7",
-            },
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    **self.base,
+                    "GITHUB_SHA": "a" * 40,
+                    "GITHUB_REF": "refs/heads/feature",
+                    "SOURCE_SHA": self.source_sha,
+                    "PR_NUMBER": "7",
+                },
+            ),
+            # Another runner host of the same image.
+            patch("platform.platform", return_value="Linux-6.8.0-142-generic-x86_64"),
         ):
             self.original_execution()
 
@@ -692,20 +696,27 @@ class CommonResultIntegrationTests(unittest.TestCase):
         head = self.merge_commit()
         self.assertEqual(self.git("rev-parse", "HEAD^{tree}").strip(), self.tree)
         (self.root / "count").unlink()
-        with patch.dict(
-            os.environ,
-            {
-                **self.base,
-                "GITHUB_SHA": "d" * 40,
-                "GITHUB_REF": "refs/heads/dev",
-                "SOURCE_SHA": head,
-                "PR_NUMBER": "0",
-            },
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    **self.base,
+                    "GITHUB_SHA": "d" * 40,
+                    "GITHUB_REF": "refs/heads/dev",
+                    "SOURCE_SHA": head,
+                    "PR_NUMBER": "0",
+                },
+            ),
+            patch("platform.platform", return_value="Linux-6.8.0-139-generic-x86_64"),
         ):
             self.assertEqual(common.execute(self.arguments, read=self.read), 0)
         self.assertEqual((self.root / "count").read_text(), "1")
         receipt = json.loads(
             next(self.directory.glob("*/measurement.json")).read_text()
+        )
+        self.assertNotIn(
+            "6.8.0",
+            receipt["measurement"]["inputs"]["toolchains"]["python"]["platform"],
         )
         current = receipt["measurement"]
         self.assertFalse(current["executed"])

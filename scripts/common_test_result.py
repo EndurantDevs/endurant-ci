@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import platform
 import re
 import shutil
 import sqlite3
@@ -858,6 +859,10 @@ def collect(arguments, producer, source_repository_id, execution=None):
         inputs.pop("verifier_git")
         for name in SAME_TREE_HIDDEN:
             inputs["identity_environment"].pop(name, None)
+        # The runner image digest pins the userland; runner hosts differ in kernel release.
+        inputs["toolchains"]["python"]["platform"] = "-".join(
+            (platform.system(), platform.machine(), *platform.libc_ver())
+        )
         inputs["execution_profile"] = SAME_TREE_PROFILE
     inputs["verifier_files"] = equivalent.file_inventory(
         helper_root, ["scripts/result_equivalence.py", "scripts/common_test_result.py"]
