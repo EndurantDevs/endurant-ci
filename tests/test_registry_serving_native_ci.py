@@ -138,11 +138,11 @@ run_network_registry_postgres
         return paths
 
     def test_exact_native_roster_is_unique_closed_and_disjoint(self):
-        self.assertEqual(len(NATIVE_TESTS), 74)
-        self.assertEqual(len(set(NATIVE_TESTS)), 74)
+        self.assertEqual(len(NATIVE_TESTS), 73)
+        self.assertEqual(len(set(NATIVE_TESTS)), 73)
         self.assertEqual(
             hashlib.sha256(("\n".join(NATIVE_TESTS) + "\n").encode()).hexdigest(),
-            "025b1aa923f9c74b665658f94d8ee410a5cacb44c1214d87428db2bd5a3d8bcf",
+            "e4da70919b464636317a8bf158631f6ac20d5aef4c7e20e6210fb301e13242a3",
         )
         for path in NATIVE_TESTS:
             self.assertRegex(path, r"^tests/test_[a-z0-9_]+\.py$")

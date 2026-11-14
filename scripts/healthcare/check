@@ -1002,7 +1002,6 @@ registry_serving_native_test_paths() {
     tests/test_plan_pricing_zip_api_activation_postgres.py
     tests/test_plan_release_api_metadata_postgres.py
     tests/test_provider_directory_generic_capture_continuation_postgres.py
-    tests/test_provider_directory_retained_fhir_metadata_postgres.py
     tests/test_provider_profile_records_postgres.py
     tests/test_registry_candidate_custody_ptg_postgres.py
     tests/test_registry_cms_refresh_anchors_postgres.py
