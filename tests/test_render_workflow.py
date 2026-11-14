@@ -246,8 +246,13 @@ class RenderWorkflowChecks(unittest.TestCase):
             "name": "Check catalog integration capability", "id": "catalog-capability",
             "run": 'bash "$CI_ROOT/scripts/healthcare/check" fhir-catalog-capability >> "$GITHUB_OUTPUT"',
         })
+        gate = "steps.catalog-capability.outputs.present == 'true'"
         for step in steps[3:]:
-            self.assertEqual(step["if"], "steps.catalog-capability.outputs.present == 'true'")
+            # The cache save adds its own hit and staging conditions behind the capability gate.
+            if step["name"] == "Save PostgreSQL client packages":
+                self.assertTrue(step["if"].startswith(gate + " && "), step["if"])
+            else:
+                self.assertEqual(step["if"], gate)
         self.assertIn('postgres "$CI_SHARD"', steps[-2]["run"])
         self.assertEqual(steps[-1]["with"]["if-no-files-found"], "error")
         self.assertIn("fhir-catalog-integration", jobs["measurement"]["needs"])
