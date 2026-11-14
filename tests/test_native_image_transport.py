@@ -11,6 +11,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import call, patch
 
 from scripts.healthcare.install_rust_tools import _download_archive
 
@@ -21,6 +22,60 @@ REPOSITORY = "docker.io/library/python"
 INDEX = "sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6"
 MANIFEST = "sha256:810da6270e43d30a1f3e0e1eabbeb6fbd9d78ad9dd2e754d5297a3d6cb42df46"
 CONFIG = "sha256:9b84b0c75adf7a34fb1b00b406a50dc9f7bebd3bfbe3e7fd9ff168a6f9d0dfb9"
+
+
+def inspect(kind, reference, *, prefix=("docker",)):
+    result = subprocess.run([*prefix, kind, "inspect", reference], capture_output=True, timeout=30)
+    if result.returncode:
+        if f"no such {kind}".encode() not in result.stderr.lower():
+            raise RuntimeError(result.stderr.decode())
+        return None
+    return json.loads(result.stdout)[0]
+
+
+def remove_images(prefix, *references):
+    for reference in references:
+        if inspect("image", reference, prefix=prefix) is not None:
+            subprocess.run([*prefix, "image", "rm", "--no-prune", reference],
+                           check=True, capture_output=True, timeout=180)
+
+
+class NativeImageCleanupTests(unittest.TestCase):
+    def test_cleanup_checks_each_reference_after_shared_alias_removal(self):
+        prefix = ("docker", "exec", "owned-container", "docker")
+        tag, immutable = "localhost/fixture:owned", REPOSITORY + "@" + MANIFEST
+        present = subprocess.CompletedProcess([], 0, stdout=b'[{"Id":"fixture"}]', stderr=b"")
+        missing = subprocess.CompletedProcess([], 1, stdout=b"", stderr=b"Error response from daemon: No such image")
+        removed = subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
+        for removes_alias in (False, True):
+            responses = [present, removed, missing] if removes_alias else [present, removed, present, removed]
+            with self.subTest(removes_alias=removes_alias), patch.object(subprocess, "run", side_effect=responses) as run:
+                remove_images(prefix, tag, immutable)
+                expected = [
+                    call([*prefix, "image", "inspect", tag], capture_output=True, timeout=30),
+                    call([*prefix, "image", "rm", "--no-prune", tag], check=True, capture_output=True, timeout=180),
+                    call([*prefix, "image", "inspect", immutable], capture_output=True, timeout=30),
+                ]
+                if not removes_alias:
+                    expected.append(call([*prefix, "image", "rm", "--no-prune", immutable],
+                                         check=True, capture_output=True, timeout=180))
+                self.assertEqual(run.call_args_list, expected)
+
+    def test_unexpected_inspection_failure_is_not_treated_as_absent(self):
+        failed = subprocess.CompletedProcess([], 1, stdout=b"", stderr=b"Cannot connect to the Docker daemon")
+        with patch.object(subprocess, "run", return_value=failed) as run, \
+                self.assertRaisesRegex(RuntimeError, "Cannot connect"):
+            remove_images(("docker",), "localhost/fixture:owned")
+        run.assert_called_once_with(["docker", "image", "inspect", "localhost/fixture:owned"],
+                                    capture_output=True, timeout=30)
+
+    def test_unexpected_removal_failure_is_not_ignored(self):
+        present = subprocess.CompletedProcess([], 0, stdout=b'[{}]', stderr=b"")
+        failed = subprocess.CalledProcessError(1, ["docker", "image", "rm"], stderr=b"permission denied")
+        with patch.object(subprocess, "run", side_effect=[present, failed]), \
+                self.assertRaises(subprocess.CalledProcessError) as raised:
+            remove_images(("docker",), "localhost/fixture:owned")
+        self.assertIs(raised.exception, failed)
 
 
 @unittest.skipUnless(os.environ.get("GITHUB_ACTIONS") == "true"
@@ -41,14 +96,6 @@ class NativeImageTransport(unittest.TestCase):
         def command(*args, **kwargs):
             return subprocess.run(args, check=True, stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE, timeout=180, **kwargs).stdout
-
-        def inspect(kind, reference):
-            result = subprocess.run(["docker", kind, "inspect", reference], capture_output=True, timeout=30)
-            if result.returncode:
-                if f"no such {kind}".encode() not in result.stderr.lower():
-                    raise RuntimeError(result.stderr.decode())
-                return None
-            return json.loads(result.stdout)[0]
 
         def cleanup():
             errors = []
@@ -207,5 +254,5 @@ class NativeImageTransport(unittest.TestCase):
                     self.assertNotIn(tag, ctr("images", "list", "--quiet").decode().splitlines())
                     print(f"native transport: {case} target={target} manifest={MANIFEST} config={CONFIG}")
                 finally:
-                    docker("image", "rm", "--no-prune", tag, immutable)
+                    remove_images(("docker", "exec", container_id, "docker"), tag, immutable)
                     self.assertEqual(docker("image", "ls", "--all", "--quiet").strip(), b"")

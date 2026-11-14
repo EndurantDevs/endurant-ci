@@ -266,7 +266,8 @@ class CompletedCleanupArtifactChecks(unittest.TestCase):
                          "started_at": (self.created - timedelta(seconds=1)).isoformat(),
                          "completed_at": (self.created + timedelta(seconds=1)).isoformat()}]
         return {"id": identifier, "name": f"healthcare-public-{prefix}-123-{attempt}",
-                "expired": False, "size_in_bytes": 100, "created_at": self.created.isoformat(),
+                "expired": False, "size_in_bytes": 100, "digest": "sha256:" + "e" * 64,
+                "created_at": self.created.isoformat(),
                 "expires_at": (self.created + timedelta(days=90)).isoformat(),
                 "workflow_run": {"id": 123, "head_sha": "a" * 40}}
 
@@ -300,6 +301,11 @@ class CompletedCleanupArtifactChecks(unittest.TestCase):
                           [{**self.measurement, "created_at": (self.created - timedelta(minutes=1)).isoformat()}]):
             with self.subTest(artifacts=artifacts), self.assertRaises(ValueError):
                 self.discover(artifacts)
+        for change in ({"digest": None}, {"digest": "bad"}, {"digest": "sha256:" + "0" * 64},
+                       {"size_in_bytes": 0}, {"size_in_bytes": True}, {"size_in_bytes": "100"},
+                       {"size_in_bytes": 128 * 1024 * 1024 + 1}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.discover([{**self.measurement, **change}])
         for change in ({"status": "in_progress"}, {"conclusion": "failure"}, {"steps": []}):
             rows = deepcopy(self.jobs)
             measurement_job = next(job for job in self.jobs if job["name"] == "Coverage results")

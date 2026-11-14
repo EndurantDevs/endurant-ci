@@ -37,6 +37,54 @@ def job_name(label, matrix_job=None):
     return "${{ " + METADATA_ONLY + f" && '{label} (metadata only)' || '{label}' " + "}}"
 
 
+def publication_job(kind, revision, producer_job, measurement_job, validation_job):
+    return {
+        "name": "DEV image publication", "runs-on": "ubuntu-latest", "timeout-minutes": 30,
+        "needs": list(dict.fromkeys(["smoke", validation_job, producer_job, measurement_job])),
+        "permissions": {"contents": "read", "pull-requests": "read", "actions": "read", "packages": "write"},
+        "env": {
+            "CI_REVISION": revision,
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "IMAGE_ARTIFACT_ID": "${{ needs." + producer_job + ".outputs.image_artifact_id }}",
+            "MEASUREMENT_ARTIFACT_ID": "${{ needs." + measurement_job + ".outputs.measurement_artifact_id }}",
+        },
+        "steps": [
+            {"name": "Check out trusted image publisher",
+             "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+             "with": {"repository": "EndurantDevs/endurant-ci", "ref": revision,
+                      "path": "ci", "persist-credentials": False}},
+            {"name": "Authenticate DEV image input", "id": "image",
+             "env": {"GH_TOKEN": "${{ github.token }}"},
+             "run": "python3 ci/scripts/source_image.py prepare"},
+            {"name": "Download validated image archive", "if": "steps.image.outputs.publish == 'true'",
+             "uses": "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+             "with": {"artifact-ids": "${{ steps.image.outputs.artifact_id }}", "digest-mismatch": "error",
+                      "path": "${{ runner.temp }}/public-image-download", "merge-multiple": True}},
+            {"name": "Stage DEV image publication intent", "if": "steps.image.outputs.publish == 'true'",
+             "env": {"GH_TOKEN": "${{ github.token }}"},
+             "run": "python3 ci/scripts/source_image.py stage"},
+            {"name": "Upload DEV image publication intent", "if": "steps.image.outputs.publish == 'true'",
+             "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+             "with": {"name": kind + "-public-image-intent-${{ github.run_id }}-${{ github.run_attempt }}",
+                      "path": "${{ runner.temp }}/public-image-intent/intent.json",
+                      "if-no-files-found": "error", "retention-days": 1}},
+            {"name": "Publish validated DEV image", "if": "steps.image.outputs.publish == 'true'",
+             "env": {"GH_TOKEN": "${{ github.token }}"},
+             "run": "python3 ci/scripts/source_image.py publish"},
+            {"name": "Upload DEV image receipt", "if": "steps.image.outputs.publish == 'true'",
+             "id": "receipt-artifact",
+             "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+             "with": {"name": kind + "-public-image-${{ github.run_id }}-${{ github.run_attempt }}",
+                      "path": "${{ runner.temp }}/public-image-receipt/image.json",
+                      "if-no-files-found": "error", "retention-days": 90}},
+            {"name": "Reconcile DEV image publication", "if": "always() && steps.image.outputs.publish == 'true'",
+             "env": {"GH_TOKEN": "${{ github.token }}"},
+             "run": "python3 ci/scripts/source_image.py reconcile"},
+        ],
+        "outputs": {"receipt_artifact_id": "${{ steps.receipt-artifact.outputs.artifact-id }}"},
+    }
+
+
 def render_workflow(kind, revision, caller):
     if kind not in {"healthcare", "drug"} or not re.fullmatch(r"[0-9a-f]{40}", revision) or set(revision) == {"0"}:
         raise ValueError("an approved workflow kind and exact nonzero package revision are required")
@@ -86,51 +134,8 @@ def render_workflow(kind, revision, caller):
     measurement_job = "measurement" if kind == "healthcare" else "publish"
     validation_job = "source-validation" if kind == "healthcare" else "publish"
     # Source execution remains read-only; privileged jobs execute pinned helpers only.
-    workflow["jobs"]["dev-image-publication"] = {
-        "name": "DEV image publication", "runs-on": "ubuntu-latest", "timeout-minutes": 30,
-        "needs": list(dict.fromkeys(["smoke", validation_job, producer_job, measurement_job])),
-        "permissions": {"contents": "read", "pull-requests": "read", "actions": "read", "packages": "write"},
-        "env": {
-            "CI_REVISION": revision,
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "IMAGE_ARTIFACT_ID": "${{ needs." + producer_job + ".outputs.image_artifact_id }}",
-            "MEASUREMENT_ARTIFACT_ID": "${{ needs." + measurement_job + ".outputs.measurement_artifact_id }}",
-        },
-        "steps": [
-            {"name": "Check out trusted image publisher",
-             "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-             "with": {"repository": "EndurantDevs/endurant-ci", "ref": revision,
-                      "path": "ci", "persist-credentials": False}},
-            {"name": "Authenticate DEV image input", "id": "image",
-             "env": {"GH_TOKEN": "${{ github.token }}"},
-             "run": "python3 ci/scripts/source_image.py prepare"},
-            {"name": "Download validated image archive", "if": "steps.image.outputs.publish == 'true'",
-             "uses": "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
-             "with": {"artifact-ids": "${{ steps.image.outputs.artifact_id }}", "digest-mismatch": "error",
-                      "path": "${{ runner.temp }}/public-image-download", "merge-multiple": True}},
-            {"name": "Stage DEV image publication intent", "if": "steps.image.outputs.publish == 'true'",
-             "env": {"GH_TOKEN": "${{ github.token }}"},
-             "run": "python3 ci/scripts/source_image.py stage"},
-            {"name": "Upload DEV image publication intent", "if": "steps.image.outputs.publish == 'true'",
-             "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
-             "with": {"name": kind + "-public-image-intent-${{ github.run_id }}-${{ github.run_attempt }}",
-                      "path": "${{ runner.temp }}/public-image-intent/intent.json",
-                      "if-no-files-found": "error", "retention-days": 1}},
-            {"name": "Publish validated DEV image", "if": "steps.image.outputs.publish == 'true'",
-             "env": {"GH_TOKEN": "${{ github.token }}"},
-             "run": "python3 ci/scripts/source_image.py publish"},
-            {"name": "Upload DEV image receipt", "if": "steps.image.outputs.publish == 'true'",
-             "id": "receipt-artifact",
-             "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
-             "with": {"name": kind + "-public-image-${{ github.run_id }}-${{ github.run_attempt }}",
-                      "path": "${{ runner.temp }}/public-image-receipt/image.json",
-                      "if-no-files-found": "error", "retention-days": 90}},
-            {"name": "Reconcile DEV image publication", "if": "always() && steps.image.outputs.publish == 'true'",
-             "env": {"GH_TOKEN": "${{ github.token }}"},
-             "run": "python3 ci/scripts/source_image.py reconcile"},
-        ],
-        "outputs": {"receipt_artifact_id": "${{ steps.receipt-artifact.outputs.artifact-id }}"},
-    }
+    workflow["jobs"]["dev-image-publication"] = publication_job(
+        kind, revision, producer_job, measurement_job, validation_job)
     if kind == "healthcare":
         workflow["jobs"]["dev-image-publication"]["permissions"]["actions"] = "write"
         workflow["jobs"]["dev-image-publication"]["steps"].append(cleanup_dispatch_step())
@@ -289,17 +294,58 @@ def render_metadata_recovery(kind, revision):
     return "# Generated from the pinned metadata recovery helper.\n" + yaml.safe_dump(workflow, sort_keys=False, width=120)
 
 
+def render_image_recovery(kind, revision):
+    if kind != "healthcare" or not re.fullmatch(r"[0-9a-f]{40}", revision) or set(revision) == {"0"}:
+        raise ValueError("Healthcare image recovery requires an exact nonzero package revision")
+    job = publication_job(kind, revision, "container-package", "measurement", "source-validation")
+    job.pop("needs")
+    job["if"] = "github.repository == 'EndurantDevs/healthcare-mrf-api' && github.ref == 'refs/heads/dev'"
+    inputs = ("source_run_id", "source_run_attempt", "image_artifact_id", "measurement_artifact_id")
+    for name in inputs:
+        job["env"][name.upper()] = "${{ inputs." + name + " }}"
+    job["steps"][1:1] = [
+        {"name": "Install pinned uv", "run": "bash ci/scripts/install_uv"},
+        {"name": "Install uv-managed Python", "run": "bash ci/scripts/setup_python"},
+        {"name": "Install locked publisher dependencies",
+         "run": "uv --no-config pip install --require-hashes --only-binary=:all: -r ci/scripts/requirements-python-quality.lock"},
+    ]
+    for step in job["steps"]:
+        if step.get("name") == "Authenticate DEV image input":
+            step["name"] = "Authenticate retained DEV image input"
+        if step.get("run", "").startswith("python3 ci/scripts/source_image.py "):
+            mode = step["run"].rsplit(" ", 1)[1]
+            step["run"] = "python3 ci/scripts/source_image_recovery.py " + mode
+        if step.get("name") == "Download validated image archive":
+            step["with"].update({"run-id": "${{ inputs.source_run_id }}", "github-token": "${{ github.token }}"})
+        if step.get("name") in {"Upload DEV image publication intent", "Upload DEV image receipt"}:
+            step["with"]["name"] = step["with"]["name"].replace("public-image-", "public-image-recovery-", 1)
+    workflow = {
+        "name": "Retained DEV image publication",
+        "run-name": "Retained DEV image ${{ inputs.source_run_id }}-${{ inputs.source_run_attempt }}",
+        "on": {"workflow_dispatch": {"inputs": {name: {"required": True, "type": "string"} for name in inputs}}},
+        "permissions": {"contents": "read", "actions": "read"},
+        "concurrency": {"group": "retained-dev-image-${{ inputs.source_run_id }}-${{ inputs.source_run_attempt }}",
+                        "cancel-in-progress": False},
+        "jobs": {"dev-image-publication": job},
+    }
+    return "# Generated from the pinned retained image publisher.\n" + yaml.safe_dump(workflow, sort_keys=False, width=120)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("kind", choices=("healthcare", "drug"))
     parser.add_argument("revision")
     parser.add_argument("caller", type=Path)
+    parser.add_argument("--image-recovery", action="store_true",
+                        help="write only the trusted sibling publish-retained-image.yml workflow")
     parser.add_argument("--metadata-recovery", action="store_true",
                         help="write only the trusted sibling metadata-recovery.yml workflow")
     parser.add_argument("--preserve-stage-contracts", action="store_true",
                         help="keep existing database and release stages when updating common test proof")
     args = parser.parse_args()
-    if args.metadata_recovery:
+    if args.image_recovery:
+        args.caller.with_name("publish-retained-image.yml").write_text(render_image_recovery(args.kind, args.revision))
+    elif args.metadata_recovery:
         args.caller.with_name("metadata-recovery.yml").write_text(render_metadata_recovery(args.kind, args.revision))
     elif args.preserve_stage_contracts:
         args.caller.write_text(render_common_test_update(args.kind, args.revision, args.caller))
