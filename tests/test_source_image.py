@@ -118,14 +118,23 @@ class AdmissionChecks(unittest.TestCase):
         jobs[0]["steps"] = [{"name": transfer.UPLOAD, "status": "completed", "conclusion": "success",
                              "started_at": (NOW - timedelta(seconds=5)).isoformat(),
                              "completed_at": (NOW + timedelta(seconds=5)).isoformat()}]
+        jobs[1]["steps"] = [{"name": "Upload public measurement", "status": "completed", "conclusion": "success",
+                             "started_at": (NOW - timedelta(seconds=5)).isoformat(),
+                             "completed_at": (NOW + timedelta(seconds=5)).isoformat()}]
         items = [artifact(44, "drug-public-image-staging-123-2", 1), artifact(55, "drug-public-measurement-123-2", 1)]
         return run, jobs, items
 
-    def admit(self, run, jobs, items, head="a" * 40, producer_jobs=None):
+    def comparison(self):
+        return {"status": "ahead", "ahead_by": 3, "behind_by": 0, "total_commits": 3,
+                "base_commit": {"sha": "a" * 40}, "merge_base_commit": {"sha": "a" * 40}}
+
+    def admit(self, run, jobs, items, head="a" * 40, producer_jobs=None, comparison=None, measurement_id="55", image_id="44"):
         def api(repository, path):
             self.assertEqual(repository, REPOSITORY)
             if path == "commits/dev":
                 return {"sha": head}
+            if path == f"compare/{IDENTITY['source_sha']}...{head}?per_page=1":
+                return deepcopy(comparison)
             if path.startswith("contents/.github/workflows/ci.yml?ref="):
                 return {"sha": "f" * 40}
             raise AssertionError(path)
@@ -136,8 +145,8 @@ class AdmissionChecks(unittest.TestCase):
                 return deepcopy(producer_jobs)
             return deepcopy(jobs if key == "jobs" else items)
 
-        with patch.dict(os.environ, {"GITHUB_JOB": "dev-image-publication", "IMAGE_ARTIFACT_ID": "44",
-                                     "MEASUREMENT_ARTIFACT_ID": "55"}), \
+        with patch.dict(os.environ, {"GITHUB_JOB": "dev-image-publication", "IMAGE_ARTIFACT_ID": image_id,
+                                     "MEASUREMENT_ARTIFACT_ID": measurement_id}), \
                 patch.object(transfer, "context", return_value=(IDENTITY, run)), \
                 patch.object(transfer.github, "api", side_effect=api), patch.object(transfer.github, "pages", side_effect=pages):
             return transfer.admit()
@@ -156,8 +165,30 @@ class AdmissionChecks(unittest.TestCase):
                         [items[0], {**items[1], "expired": True}]):
             with self.subTest(items=changed), self.assertRaises(ValueError):
                 self.admit(run, jobs, changed)
-        with self.assertRaisesRegex(ValueError, "advanced"):
-            self.admit(run, jobs, items, head="b" * 40)
+
+    def test_immutable_publication_accepts_verified_dev_ancestor(self):
+        run, jobs, items = self.fixtures()
+        self.assertEqual(self.admit(run, jobs, items, head="c" * 40, comparison=self.comparison()), expected())
+
+    def test_dev_ancestry_rejects_unknown_divergent_or_forged_comparisons(self):
+        run, jobs, items = self.fixtures()
+        changes = ({"status": value} for value in (None, "identical", "behind", "diverged", "unknown"))
+        changes = [*changes, {"ahead_by": 0}, {"ahead_by": True}, {"ahead_by": "3"},
+                   {"behind_by": 1}, {"behind_by": False}, {"total_commits": 2}, {"total_commits": True},
+                   {"base_commit": {"sha": "b" * 40}}, {"merge_base_commit": {"sha": "b" * 40}},
+                   {"base_commit": None}, {"merge_base_commit": []}]
+        comparisons = [None, {}, [], *({**self.comparison(), **change} for change in changes)]
+        comparisons.extend({key: value for key, value in self.comparison().items() if key != missing}
+                           for missing in self.comparison())
+        for comparison in comparisons:
+            with self.subTest(comparison=comparison), self.assertRaisesRegex(ValueError, "DEV ancestor"):
+                self.admit(run, jobs, items, head="c" * 40, comparison=comparison)
+
+    def test_invalid_dev_head_never_authorizes_publication(self):
+        run, jobs, items = self.fixtures()
+        for head in (None, "", "bad", "0" * 40, "A" * 40, 123):
+            with self.subTest(head=head), self.assertRaisesRegex(ValueError, "DEV head"):
+                self.admit(run, jobs, items, head=head, comparison=self.comparison())
 
     def test_failed_only_rerun_uses_exact_prior_attempt_outputs(self):
         run, jobs, items = self.fixtures()
@@ -177,6 +208,54 @@ class AdmissionChecks(unittest.TestCase):
         changed[0]["steps"][0]["conclusion"] = "failure"
         with self.assertRaises(ValueError):
             self.admit(run, jobs, items, producer_jobs=changed)
+
+    def test_new_measurement_upload_rejects_an_earlier_complete_attempt_artifact(self):
+        run, jobs, items = self.fixtures()
+        current = {**items[1], "id": 56}
+        items[1] = {**items[1], "name": "drug-public-measurement-123-1", "digest": "sha256:" + "c" * 64,
+                    "created_at": (NOW - timedelta(hours=1)).isoformat()}
+        items.append(current)
+        with self.assertRaisesRegex(ValueError, "current successful measurement upload"):
+            self.admit(run, jobs, items)
+        selected = self.admit(run, jobs, items, measurement_id="56")
+        self.assertEqual(selected["measurement"]["id"], 56)
+        self.assertEqual(selected["measurement"]["digest"], current["digest"])
+        self.assertEqual(selected["measurement_run_attempt"], 2)
+
+    def test_new_image_upload_rejects_an_earlier_complete_attempt_artifact(self):
+        run, jobs, items = self.fixtures()
+        current = {**items[0], "id": 45}
+        items[0] = {**items[0], "name": "drug-public-image-staging-123-1", "digest": "sha256:" + "c" * 64,
+                    "created_at": (NOW - timedelta(hours=1)).isoformat()}
+        items.append(current)
+        with self.assertRaisesRegex(ValueError, "current successful image upload"):
+            self.admit(run, jobs, items)
+        selected = self.admit(run, jobs, items, image_id="45")
+        self.assertEqual(selected["artifact"]["id"], 45)
+        self.assertEqual(selected["artifact"]["digest"], current["digest"])
+        self.assertEqual(selected["producer_run_attempt"], 2)
+
+    def test_staging_image_metadata_keeps_positive_integer_size_without_a_cap(self):
+        run, jobs, items = self.fixtures()
+        items[0]["size_in_bytes"] = 4 * 1024 * 1024 * 1024
+        self.assertEqual(self.admit(run, jobs, items)["artifact"]["size_in_bytes"], items[0]["size_in_bytes"])
+        for size in (0, -1, True, 1.0, "100"):
+            items[0]["size_in_bytes"] = size
+            with self.subTest(size=size), self.assertRaises(ValueError):
+                self.admit(run, jobs, items)
+
+    def test_carried_measurement_upload_keeps_its_verified_original_window(self):
+        run, jobs, items = self.fixtures()
+        original = {**deepcopy(jobs[1]), "run_attempt": 1}
+        items[1]["name"] = "drug-public-measurement-123-1"
+        items.append({**items[1], "id": 56, "name": "drug-public-measurement-123-2",
+                      "created_at": (NOW + timedelta(hours=1)).isoformat()})
+        selected = self.admit(run, jobs, items, producer_jobs=[original])
+        self.assertEqual(selected["measurement"]["id"], 55)
+        self.assertEqual(selected["measurement_run_attempt"], 1)
+        original["steps"][0]["completed_at"] = (NOW + timedelta(seconds=6)).isoformat()
+        with self.assertRaisesRegex(ValueError, "original successful execution"):
+            self.admit(run, jobs, items, producer_jobs=[original])
 
     def test_publication_restarts_incomplete_job_read_before_source_and_artifacts(self):
         run, jobs, items = self.fixtures()
@@ -285,7 +364,7 @@ class TransferChecks(unittest.TestCase):
         return record
 
     def exercise(self, directory, record, *, loaded_config=ROOT_DIGEST, failure=None, stale=False, cleanup_failure=False,
-                 stale_after_readback=False):
+                 stale_after_readback=False, authority=None):
         calls, images = [], set()
         digest = ROOT_DIGEST
 
@@ -329,14 +408,16 @@ class TransferChecks(unittest.TestCase):
             values = [expected(), expected(), {**expected(), "workflow_id": 999}]
         environment = {"RUNNER_TEMP": str(directory.parent), "GH_TOKEN": "synthetic token", "GITHUB_ACTOR": "synthetic"}
         with patch.dict(os.environ, environment), patch.object(transfer, "command", side_effect=command), \
-                patch.object(transfer, "admit", return_value=expected(), side_effect=values), \
+                patch.object(transfer, "admit", return_value=expected(), side_effect=values) as default_admission, \
                 patch.object(transfer, "authenticated_intent", return_value=({"producer": record}, {}, {})), \
                 patch.object(transfer, "configure_containerd_store"), \
                 patch.object(transfer, "require_absent_registry_tag"):
 
             try:
-                transfer.publish(expected(), directory)
+                transfer.publish(expected(), directory, authority=authority)
             finally:
+                if authority is not None:
+                    default_admission.assert_not_called()
                 self.assertEqual(images, {expected()["image"]} if cleanup_failure else set(),
                                  "cleanup must attempt every owned image even after one removal fails")
                 self.assertFalse(list(directory.parent.glob("public-image-auth-*")), "credentials must be removed")
@@ -838,7 +919,7 @@ class ReconciliationChecks(unittest.TestCase):
 
     def exercise(self, *, version_change=None, prior=False, receipts=None, delete_error=None,
                  absent=False, no_new_versions=False, changed_final=False, deletion_remains=False, active=True,
-                 indexed=False, existing_child=False, tagged_child=False, shared_index=False):
+                 indexed=False, existing_child=False, tagged_child=False, shared_index=False, authority=None):
         intent, digest, version = self.fixtures()
         if version_change:
             version.update(version_change)
@@ -871,8 +952,14 @@ class ReconciliationChecks(unittest.TestCase):
                 raise urllib.error.HTTPError("https://api.github.com/synthetic", 404, "missing", {}, io.BytesIO())
             return {**current, "updated_at": NOW.isoformat()} if changed_final else current
 
-        with patch.object(transfer, "authenticated_intent", return_value=(intent, {}, {}),
-                          side_effect=None if active else ValueError("publisher completed")), \
+        def authenticated(*args, **kwargs):
+            if not active:
+                raise ValueError("publisher completed")
+            if authority is not None:
+                self.assertIs(kwargs.get("authority"), authority)
+            return intent, {}, {}
+
+        with patch.object(transfer, "authenticated_intent", side_effect=authenticated), \
                 patch.object(transfer, "uploaded_payload", return_value=None, side_effect=receipts), \
                 patch.object(transfer, "package_id", return_value=321), \
                 patch.object(transfer, "registry_publication", return_value=None if absent else [digest, *[item["name"] for item in versions[1:]]]), \
@@ -882,7 +969,7 @@ class ReconciliationChecks(unittest.TestCase):
                 patch.object(transfer, "package_api", side_effect=api), patch.object(transfer, "command") as docker, \
                 patch.object(transfer, "admit", side_effect=AssertionError("cleanup must not re-admit")):
             try:
-                return transfer.reconcile(expected()), calls
+                return transfer.reconcile(expected(), authority=authority), calls
             finally:
                 docker.assert_not_called()
                 for item in versions:

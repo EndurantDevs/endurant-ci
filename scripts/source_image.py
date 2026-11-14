@@ -336,6 +336,64 @@ def snapshot(item):
     return {key: item.get(key) for key in artifacts.ARTIFACT_FIELDS}
 
 
+def require_dev_ancestor(repository, source):
+    commit = github.api(repository, "commits/dev")
+    head = commit.get("sha") if isinstance(commit, dict) else None
+    if not isinstance(head, str) or not github.SHA.fullmatch(head) or set(head) == {"0"}:
+        raise ValueError("DEV head identity is missing or invalid")
+    if head == source:
+        return
+    comparison = github.api(repository, f"compare/{source}...{head}?per_page=1")
+    if not (isinstance(comparison, dict) and comparison.get("status") == "ahead"
+            and all(type(comparison.get(key)) is int for key in ("ahead_by", "behind_by", "total_commits"))
+            and comparison["ahead_by"] > 0 and comparison["behind_by"] == 0
+            and comparison["total_commits"] == comparison["ahead_by"]
+            and all(isinstance(comparison.get(key), dict) and comparison[key].get("sha") == source
+                    for key in ("base_commit", "merge_base_commit"))):
+        raise ValueError("image source is not a verified DEV ancestor")
+
+
+def image_inputs(identity, run, jobs):
+    """Authenticate the exact tested archive and measurement producer outputs."""
+    repository = identity["repository"]
+    items = list(github.pages(repository, f"actions/runs/{run['id']}/artifacts", "artifacts"))
+    identifiers = (os.environ.get("IMAGE_ARTIFACT_ID", ""), os.environ.get("MEASUREMENT_ARTIFACT_ID", ""))
+    if any(not re.fullmatch(r"[1-9][0-9]*", value) for value in identifiers):
+        raise ValueError("publication requires exact image and measurement artifact outputs")
+    candidates = [item for item in items if item.get("id") == int(identifiers[0])]
+    finals = [item for item in items if item.get("id") == int(identifiers[1])]
+    kind = artifacts.KINDS[repository]
+    image = artifacts.completed_upload(repository, run, jobs, items, PRODUCERS[repository], UPLOAD, "image-staging")
+    if len(candidates) != 1 or candidates[0] != image:
+        raise ValueError("publication requires the exact current successful image upload")
+    producer_attempt = (artifacts.artifact_attempt(candidates[0].get("name"), f"{kind}-public-image-staging", run)
+                        if len(candidates) == 1 else None)
+    measurement = artifacts.completed_upload(repository, run, jobs, items,
+                                            "Coverage results", "Upload public measurement", "measurement")
+    if len(finals) != 1 or finals[0] != measurement:
+        raise ValueError("publication requires the exact current successful measurement upload")
+    measurement_attempt = artifacts.artifact_attempt(measurement["name"], f"{kind}-public-measurement", run)
+    producer_jobs = (jobs if producer_attempt == run["run_attempt"]
+                     else artifacts.attempt_jobs(repository, run, producer_attempt))
+    producer = [job for job in producer_jobs if job["name"] == PRODUCERS[repository]
+                and job.get("run_attempt") == producer_attempt]
+    if (len(producer) != 1 or producer[0].get("status") != "completed"
+            or producer[0].get("conclusion") != "success"):
+        raise ValueError("the exact image producer attempt is missing")
+    uploads = [step for step in producer[0].get("steps", []) if step.get("name") == UPLOAD]
+    if len(uploads) != 1 or uploads[0].get("status") != "completed" or uploads[0].get("conclusion") != "success":
+        raise ValueError("the exact image producer upload must succeed")
+    if (len(candidates) != 1 or not artifacts.available(candidates[0], run)
+            or not DIGEST.fullmatch(candidates[0].get("digest", "")) or candidates[0].get("size_in_bytes", 0) <= 0
+            or not (artifacts.timestamp(uploads[0]["started_at"]) <= artifacts.timestamp(candidates[0]["created_at"])
+                    <= artifacts.timestamp(uploads[0]["completed_at"]))
+            or measurement_attempt is None or not artifacts.current_evidence(finals[0], run)):
+        raise ValueError("publication requires its exact completed artifact and current measurement")
+    return {"artifact": snapshot(candidates[0]), "measurement": snapshot(finals[0]),
+            "producer_run_attempt": producer_attempt, "measurement_run_attempt": measurement_attempt,
+            "producer_job_id": producer[0]["id"]}
+
+
 def admit():
     if os.environ["GITHUB_JOB"] != "dev-image-publication":
         raise ValueError("publication requires its own trusted job")
@@ -355,8 +413,7 @@ def admit():
         raise ValueError("publication job identity differs from its consumer attempt")
     if run["event"] != "push" or identity["source_branch"] != "dev":
         return None  # Authenticated PR/main no-op, including fork PRs; no Docker or registry access.
-    if github.api(repository, "commits/dev").get("sha") != identity["source_sha"]:
-        raise ValueError("DEV source advanced before publication")
+    require_dev_ancestor(repository, identity["source_sha"])
     for job in jobs:
         if job["name"] == JOB:
             continue
@@ -364,42 +421,14 @@ def admit():
             continue
         if job.get("status") != "completed" or job.get("conclusion") != "success":
             raise ValueError("all image consumers must pass before publication")
-    items = list(github.pages(repository, f"actions/runs/{run['id']}/artifacts", "artifacts"))
-    identifiers = (os.environ.get("IMAGE_ARTIFACT_ID", ""), os.environ.get("MEASUREMENT_ARTIFACT_ID", ""))
-    if any(not re.fullmatch(r"[1-9][0-9]*", value) for value in identifiers):
-        raise ValueError("publication requires exact image and measurement artifact outputs")
-    candidates = [item for item in items if item.get("id") == int(identifiers[0])]
-    finals = [item for item in items if item.get("id") == int(identifiers[1])]
-    kind = artifacts.KINDS[repository]
-    producer_attempt = (artifacts.artifact_attempt(candidates[0].get("name"), f"{kind}-public-image-staging", run)
-                        if len(candidates) == 1 else None)
-    measurement_attempt = (artifacts.artifact_attempt(finals[0].get("name"), f"{kind}-public-measurement", run)
-                           if len(finals) == 1 else None)
-    producer_jobs = (jobs if producer_attempt == run["run_attempt"]
-                     else artifacts.attempt_jobs(repository, run, producer_attempt))
-    producer = [job for job in producer_jobs if job["name"] == PRODUCERS[repository]
-                and job.get("run_attempt") == producer_attempt]
-    if (len(producer) != 1 or producer[0].get("status") != "completed"
-            or producer[0].get("conclusion") != "success"):
-        raise ValueError("the exact image producer attempt is missing")
-    uploads = [step for step in producer[0].get("steps", []) if step.get("name") == UPLOAD]
-    if len(uploads) != 1 or uploads[0].get("status") != "completed" or uploads[0].get("conclusion") != "success":
-        raise ValueError("the exact image producer upload must succeed")
-    if (len(candidates) != 1 or not artifacts.available(candidates[0], run)
-            or not DIGEST.fullmatch(candidates[0].get("digest", "")) or candidates[0].get("size_in_bytes", 0) <= 0
-            or not (artifacts.timestamp(uploads[0]["started_at"]) <= artifacts.timestamp(candidates[0]["created_at"])
-                    <= artifacts.timestamp(uploads[0]["completed_at"]))
-            or measurement_attempt is None or not artifacts.current_evidence(finals[0], run)):
-        raise ValueError("publication requires its exact completed artifact and current measurement")
+    inputs = image_inputs(identity, run, jobs)
     caller = github.api(repository, f"contents/.github/workflows/ci.yml?ref={identity['source_sha']}").get("sha", "")
     if not github.SHA.fullmatch(caller):
         raise ValueError("publication caller workflow identity is missing")
     identity = {**identity, "caller_workflow_blob_sha": caller}
     tag = f"dev-main-{identity['source_sha'][:8]}-{artifacts.timestamp(own[0]['started_at']).astimezone(timezone.utc):%Y%m%d%H%M%S}"
-    return {"identity": identity, "artifact": snapshot(candidates[0]), "measurement": snapshot(finals[0]),
-            "image": f"{IMAGES[repository]}:{tag}", "workflow_id": run["workflow_id"],
-            "producer_run_attempt": producer_attempt, "measurement_run_attempt": measurement_attempt,
-            "producer_job_id": producer[0]["id"], "publisher_job_id": own[0]["id"]}
+    return {"identity": identity, **inputs, "image": f"{IMAGES[repository]}:{tag}",
+            "workflow_id": run["workflow_id"], "publisher_job_id": own[0]["id"]}
 
 
 def registry_config(image, digest, environment):
@@ -556,8 +585,9 @@ def active_publisher(expected):
     return run, own[0]
 
 
-def proof_name(identity, intent=False):
-    return f"{artifacts.KINDS[identity['repository']]}-public-image-{'intent-' if intent else ''}{identity['run_id']}-{identity['run_attempt']}"
+def proof_name(identity, intent=False, *, recovery=False):
+    prefix = "recovery-" if recovery else ""
+    return f"{artifacts.KINDS[identity['repository']]}-public-image-{prefix}{'intent-' if intent else ''}{identity['run_id']}-{identity['run_attempt']}"
 
 
 class UploadPending(ValueError):
@@ -584,10 +614,10 @@ def uploaded_payload(expected, run, job, *, intent=False):
 
 def upload_snapshot(expected, run, job, *, intent=False):
     """Authenticate the immutable uploaded ZIP and its single bounded JSON payload."""
-    identity = expected["identity"]
+    identity = expected.get("publisher", expected["identity"])
     repository = identity["repository"]
     max_bytes = INTENT_MAX_BYTES if intent else 65536
-    name = proof_name(identity, intent)
+    name = proof_name(identity, intent, recovery="publisher" in expected)
     items = [item for item in github.pages(repository, f"actions/runs/{run['id']}/artifacts", "artifacts") if item.get("name") == name]
     steps = [step for step in job.get("steps", []) if step.get("name") == (INTENT_UPLOAD if intent else RECEIPT_UPLOAD)]
     if not intent and len(steps) == 1 and steps[0].get("status") == "completed":
@@ -612,6 +642,11 @@ def upload_snapshot(expected, run, job, *, intent=False):
                     <= artifacts.timestamp(steps[0]["completed_at"]))):
         raise ValueError("current publication upload is missing, ambiguous, or incomplete")
     item = items[0]
+    return artifact_payload(repository, item, "intent.json" if intent else "image.json", max_bytes)
+
+
+def artifact_payload(repository, item, filename, max_bytes):
+    """Read one digest-bound inert JSON artifact without source execution."""
     if snapshot(github.api(repository, f"actions/artifacts/{item['id']}")) != snapshot(item):
         raise ValueError("durable publication artifact identity changed")
     raw = command("gh", "api", f"repos/{repository}/actions/artifacts/{item['id']}/zip")
@@ -619,7 +654,7 @@ def upload_snapshot(expected, run, job, *, intent=False):
         raise ValueError("durable publication artifact bytes changed")
     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
         entries = archive.infolist()
-        if (len(entries) != 1 or entries[0].filename != ("intent.json" if intent else "image.json")
+        if (len(entries) != 1 or entries[0].filename != filename
                 or not 0 < entries[0].file_size <= max_bytes or (entries[0].external_attr >> 16) & 0o170000 == 0o120000):
             raise ValueError("durable publication artifact has unexpected files")
         return json.loads(archive.read(entries[0]))
@@ -630,6 +665,8 @@ def transfer_record(expected, directory):
             not path.is_file() or path.is_symlink() for path in directory.iterdir()):
         raise ValueError("unexpected files in the image transfer artifact")
     record = read_json(directory / "producer.json")
+    if "prior_producer" in expected and expected["prior_producer"] != record:
+        raise ValueError("retained image differs from its original publication intent")
     metadata = {"schema": "public-source-image-staging-v1", **producer_identity(expected), "platform": "linux/amd64"}
     if (set(record) != set(metadata) | {"image_id", "config_digest", "archive_sha256"}
             or any(record.get(key) != value for key, value in metadata.items())
@@ -644,8 +681,22 @@ def transfer_record(expected, directory):
     return record, identifiers
 
 
-def stage(expected, directory):
-    if admit() != expected:
+class PublicationAuthority:
+    """Keep source admission separate from the shared image transfer operations."""
+
+    def admit(self):
+        return admit()
+
+    def active_publisher(self, expected):
+        return active_publisher(expected)
+
+    def publication_receipt(self, expected, record, digest):
+        return publication_receipt(expected, record, digest)
+
+
+def stage(expected, directory, *, authority=None):
+    authority = authority or PublicationAuthority()
+    if authority.admit() != expected:
         raise ValueError("publication authority changed before durable intent")
     record, _ = transfer_record(expected, directory)
     created = datetime.now(timezone.utc)
@@ -664,12 +715,13 @@ def stage(expected, directory):
     (destination / "intent.json").write_text(content)
 
 
-def authenticated_intent(expected):
+def authenticated_intent(expected, *, authority=None):
+    authority = authority or PublicationAuthority()
     path = Path(os.environ["RUNNER_TEMP"]) / "public-image-intent/intent.json"
     if path.is_symlink() or not path.is_file():
         raise ValueError("publication requires its fresh local intent")
     intent = read_json(path, max_bytes=INTENT_MAX_BYTES)
-    run, job = active_publisher(expected)
+    run, job = authority.active_publisher(expected)
     now = datetime.now(timezone.utc)
     if (intent.get("schema") != "public-source-image-intent-v1" or intent.get("publication") != expected
             or not (artifacts.timestamp(job["started_at"]) <= artifacts.timestamp(intent["created_at"]) <= now
@@ -694,11 +746,12 @@ def publication_receipt(expected, record, digest):
             "config_digest": record["config_digest"], "image": expected["image"], "manifest_digest": digest}
 
 
-def publish(expected, directory):
-    if admit() != expected:
+def publish(expected, directory, *, authority=None):
+    authority = authority or PublicationAuthority()
+    if authority.admit() != expected:
         raise ValueError("publication authority changed after download authorization")
     record, identifiers = transfer_record(expected, directory)
-    intent, _, _ = authenticated_intent(expected)
+    intent, _, _ = authenticated_intent(expected, authority=authority)
     if intent["producer"] != record:
         raise ValueError("tested image differs from its durable pre-push intent")
     configure_containerd_store()
@@ -720,16 +773,16 @@ def publish(expected, directory):
             raise ValueError("loaded immutable image identity changed")
         tagged = True
         command("docker", "image", "tag", image, target)
-        if admit() != expected:
+        if authority.admit() != expected:
             raise ValueError("publication authority changed before registry push")
-        if authenticated_intent(expected)[0] != intent:
+        if authenticated_intent(expected, authority=authority)[0] != intent:
             raise ValueError("durable intent changed before registry push")
         with tempfile.TemporaryDirectory(prefix="public-image-auth-", dir=os.environ["RUNNER_TEMP"]) as authentication:
             environment = {**os.environ, "DOCKER_CONFIG": authentication}
             command("docker", "login", "ghcr.io", "--username", os.environ["GITHUB_ACTOR"], "--password-stdin",
                     input=os.environ["GH_TOKEN"].encode(), env=environment)
             require_absent_registry_tag(target)
-            if admit() != expected:
+            if authority.admit() != expected:
                 raise ValueError("publication authority changed after upload readback")
             command("docker", "image", "push", target, env=environment)
             digest = command("docker", "buildx", "imagetools", "inspect", target,
@@ -739,9 +792,9 @@ def publish(expected, directory):
             # The exact root retains the native manifest and its SLSA child; config binds runtime bytes.
             if registry_config(IMAGES[repository], digest, environment) != record["config_digest"]:
                 raise ValueError("published registry image differs from the tested configuration")
-        if admit() != expected:
+        if authority.admit() != expected:
             raise ValueError("publication authority changed before its receipt")
-        result = publication_receipt(expected, record, digest)
+        result = authority.publication_receipt(expected, record, digest)
     finally:
         failure = None
         for name, owned in [(target, tagged), *((identifier, loaded) for identifier in sorted(identifiers))]:
@@ -802,13 +855,14 @@ def registry_publication(intent):
     return graph
 
 
-def reconcile(expected):
-    intent, run, job = authenticated_intent(expected)
+def reconcile(expected, *, authority=None):
+    authority = authority or PublicationAuthority()
+    intent, run, job = authenticated_intent(expected, authority=authority)
     # A successful receipt or uncertain upload prevents deletion. Terminal failed
     # uploads cannot satisfy the private consumer's success-bound receipt contract.
     receipt = uploaded_payload(expected, run, job)
     if receipt is not None:
-        if receipt != publication_receipt(expected, intent["producer"], receipt.get("manifest_digest", "")):
+        if receipt != authority.publication_receipt(expected, intent["producer"], receipt.get("manifest_digest", "")):
             raise ValueError("retained publication: uploaded receipt identity is ambiguous")
         print("Preserved publication with its durable receipt.")
         return False
@@ -847,7 +901,7 @@ def reconcile(expected):
     # Validate the whole graph before deleting anything. Its run labels prevent ordinary
     # cross-attempt digest reuse; no existing or tagged child version can be removed.
     require_exclusive_graph(versions)
-    current_intent, run, job = authenticated_intent(expected)
+    current_intent, run, job = authenticated_intent(expected, authority=authority)
     if (current_intent != intent or uploaded_payload(expected, run, job) is not None
             or package_id(image) != intent["package_id"]
             or any(package_api(image, f"/versions/{item['id']}") != item for item in versions)
@@ -861,7 +915,7 @@ def reconcile(expected):
         endpoint = f"/versions/{version['id']}"
         if index:
             require_exclusive_graph(versions[index:])
-            current_intent, run, job = authenticated_intent(expected)
+            current_intent, run, job = authenticated_intent(expected, authority=authority)
             if (current_intent != intent or uploaded_payload(expected, run, job) is not None
                     or package_id(image) != intent["package_id"] or package_api(image, endpoint) != version):
                 raise ValueError("remaining publication graph retained: ownership changed after root cleanup")

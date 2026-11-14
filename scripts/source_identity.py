@@ -113,7 +113,7 @@ def main_source_range(repository, commit, requested_base=None, *, branch="main")
             and pr["base"]["ref"] == branch and SHA.fullmatch(base)
             and SHA.fullmatch(pr["head"]["sha"])):
         raise ValueError("source main merged PR identity changed")
-    if base == parent:
+    if base == parent or (requested_base is None and type(pr.get("commits")) is int and pr["commits"] == 1):
         return parent, [commit]
     comparison = api(repository, f"compare/{base}...{commit['sha']}")
     commits = comparison.get("commits", [])

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -19,6 +20,44 @@ SPEC.loader.exec_module(RENDERER)
 
 
 class RenderWorkflowChecks(unittest.TestCase):
+    def test_retained_image_workflow_has_separate_manual_authority_and_original_artifact_download(self):
+        workflow = yaml.safe_load(RENDERER.render_image_recovery("healthcare", "1" * 40))
+        trigger = workflow.get("on", workflow.get(True))
+        self.assertEqual(set(trigger), {"workflow_dispatch"})
+        self.assertEqual(set(trigger["workflow_dispatch"]["inputs"]),
+                         {"source_run_id", "source_run_attempt", "image_artifact_id", "measurement_artifact_id"})
+        self.assertEqual(workflow["run-name"], "Retained DEV image ${{ inputs.source_run_id }}-${{ inputs.source_run_attempt }}")
+        self.assertEqual(list(workflow["jobs"]), ["dev-image-publication"])
+        job = workflow["jobs"]["dev-image-publication"]
+        self.assertNotIn("needs", job)
+        self.assertEqual(job["permissions"]["packages"], "write")
+        self.assertIn("refs/heads/dev", job["if"])
+        steps = {step["name"]: step for step in job["steps"]}
+        self.assertEqual(steps["Check out trusted image publisher"]["with"]["ref"], "1" * 40)
+        self.assertEqual(steps["Download validated image archive"]["with"]["run-id"], "${{ inputs.source_run_id }}")
+        self.assertEqual(steps["Download validated image archive"]["with"]["github-token"], "${{ github.token }}")
+        self.assertIn("--require-hashes", steps["Install locked publisher dependencies"]["run"])
+        self.assertIn("source_image_recovery.py prepare", steps["Authenticate retained DEV image input"]["run"])
+        self.assertEqual(steps["Upload DEV image receipt"]["with"]["name"],
+                         "healthcare-public-image-recovery-${{ github.run_id }}-${{ github.run_attempt }}")
+        self.assertEqual(steps["Reconcile DEV image publication"]["if"], "always() && steps.image.outputs.publish == 'true'")
+        self.assertFalse(workflow["concurrency"]["cancel-in-progress"])
+
+    def test_retained_image_generator_cli_preserves_normal_caller(self):
+        with tempfile.TemporaryDirectory() as directory:
+            caller = Path(directory) / "ci.yml"
+            caller.write_text("unchanged caller\n")
+            subprocess.run([sys.executable, str(ROOT / "scripts/render_workflow.py"), "healthcare", "1" * 40,
+                            str(caller), "--image-recovery"], check=True)
+            self.assertEqual(caller.read_text(), "unchanged caller\n")
+            self.assertEqual((caller.parent / "publish-retained-image.yml").read_text(),
+                             RENDERER.render_image_recovery("healthcare", "1" * 40))
+
+    def test_retained_image_generator_rejects_unknown_family_or_revision(self):
+        for kind, revision in (("drug", "1" * 40), ("healthcare", "0" * 40), ("healthcare", "main")):
+            with self.subTest(kind=kind, revision=revision), self.assertRaises(ValueError):
+                RENDERER.render_image_recovery(kind, revision)
+
     def test_merge_queue_validates_without_publishing_candidate_images(self):
         with tempfile.TemporaryDirectory() as directory:
             caller = Path(directory) / "ci.yml"

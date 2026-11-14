@@ -484,43 +484,58 @@ def deletion_snapshot(executor, repository, expected, artifact, proofs):
     return values
 
 
+def completed_upload(repository, expected, jobs, artifacts, job_name, step_name, prefix):
+    """Find the exact completed upload, retaining original carried-attempt evidence."""
+    kind = KINDS[repository]
+    producers = [job for job in jobs if job["name"] == job_name]
+    if (len(producers) != 1 or producers[0].get("status") != "completed"
+            or producers[0].get("conclusion") != "success"):
+        raise ValueError("completed cleanup requires its exact successful artifact producer")
+    producer = producers[0]
+    steps = [step for step in producer.get("steps", []) if step.get("name") == step_name]
+    if (len(steps) != 1 or steps[0].get("status") != "completed"
+            or steps[0].get("conclusion") != "success"):
+        raise ValueError("completed cleanup requires its exact successful artifact upload")
+    # Carried jobs can be relabeled with a newer attempt while retaining the original upload window.
+    matches = [item for item in artifacts
+               if 0 < (artifact_attempt(item.get("name"), f"{kind}-public-{prefix}", expected) or 0)
+               <= producer["run_attempt"]
+               and timestamp(steps[0]["started_at"]) <= timestamp(item["created_at"])
+               <= timestamp(steps[0]["completed_at"])]
+    limit = (128 if kind == "healthcare" else 64) * 1024 * 1024 if prefix == "measurement" else 131072
+    if prefix == "image-staging":
+        limit = None
+    if (len(matches) != 1 or type(matches[0].get("size_in_bytes")) is not int
+            or matches[0]["size_in_bytes"] <= 0
+            or limit is not None and matches[0]["size_in_bytes"] > limit
+            or not current_evidence(matches[0], expected)
+            or not isinstance(matches[0].get("digest"), str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", matches[0]["digest"])
+            or matches[0]["digest"] == "sha256:" + "0" * 64):
+        raise ValueError("completed cleanup requires its exact successful artifact upload")
+    attempt = artifact_attempt(matches[0]["name"], f"{kind}-public-{prefix}", expected)
+    if attempt != producer["run_attempt"]:
+        originals = [job for job in attempt_jobs(repository, expected, attempt) if job["name"] == job_name]
+        uploads = [step for job in originals for step in job.get("steps", []) if step.get("name") == step_name]
+        fields = ("name", "status", "conclusion", "started_at", "completed_at")
+        if (len(originals) != 1 or originals[0].get("status") != "completed"
+                or originals[0].get("conclusion") != "success" or len(uploads) != 1
+                or any(uploads[0].get(field) != steps[0].get(field) for field in fields)):
+            raise ValueError("carried artifact upload differs from its original successful execution")
+    return matches[0]
+
+
 def completed_artifact_ids(repository, expected, artifacts):
     """Recover exact successful upload identities, including reused producer attempts."""
     jobs = effective_jobs(repository, expected)
     kind = KINDS[repository]
 
-    def uploaded(job_name, step_name, prefix):
-        producers = [job for job in jobs if job["name"] == job_name]
-        if len(producers) != 1 or producers[0].get("conclusion") != "success":
-            raise ValueError("completed cleanup requires its exact successful artifact producer")
-        producer = producers[0]
-        steps = [step for step in producer.get("steps", []) if step.get("name") == step_name]
-        if (len(steps) != 1 or steps[0].get("status") != "completed"
-                or steps[0].get("conclusion") != "success"):
-            raise ValueError("completed cleanup requires its exact successful artifact upload")
-        # Carried jobs can be relabeled with a newer attempt while retaining the original upload window.
-        matches = [item for item in artifacts
-                   if 0 < (artifact_attempt(item.get("name"), f"{kind}-public-{prefix}", expected) or 0)
-                   <= producer["run_attempt"]
-                   and timestamp(steps[0]["started_at"]) <= timestamp(item["created_at"])
-                   <= timestamp(steps[0]["completed_at"])]
-        if len(matches) != 1 or not current_evidence(matches[0], expected):
-            raise ValueError("completed cleanup requires its exact successful artifact upload")
-        attempt = artifact_attempt(matches[0]["name"], f"{kind}-public-{prefix}", expected)
-        if attempt != producer["run_attempt"]:
-            originals = [job for job in attempt_jobs(repository, expected, attempt) if job["name"] == job_name]
-            uploads = [step for job in originals for step in job.get("steps", []) if step.get("name") == step_name]
-            fields = ("name", "status", "conclusion", "started_at", "completed_at")
-            if (len(originals) != 1 or originals[0].get("status") != "completed"
-                    or originals[0].get("conclusion") != "success" or len(uploads) != 1
-                    or any(uploads[0].get(field) != steps[0].get(field) for field in fields)):
-                raise ValueError("carried artifact upload differs from its original successful execution")
-        return matches[0]
-
-    measurement = uploaded("Coverage results", "Upload public measurement", "measurement")
+    measurement = completed_upload(repository, expected, jobs, artifacts,
+                                   "Coverage results", "Upload public measurement", "measurement")
     identifiers = {"measurement_artifact_id": measurement["id"]}
     if expected["event"] == "push" and expected["head_branch"] == "dev":
-        receipt = uploaded("DEV image publication", "Upload DEV image receipt", "image")
+        receipt = completed_upload(repository, expected, jobs, artifacts,
+                                   "DEV image publication", "Upload DEV image receipt", "image")
         record = publication_record(repository, receipt)
         producer = record.get("producer_artifact") if isinstance(record, dict) else None
         if (not isinstance(producer, dict) or type(producer.get("id")) is not int or producer["id"] <= 0

@@ -31,12 +31,14 @@ role, mode, directory = sys.argv[1:]
 root = Path(directory)
 if role != "controller":
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+if role == "cli" and mode == "interrupt":
+    time.sleep(1.2)  # Reproduce startup taking longer than the supervised run budget.
 (root / (role + ".pid")).write_text(str(os.getpid()))
 if role != "cli":
     child = subprocess.Popen([sys.executable, __file__,
                               "worker" if role == "controller" else "cli", mode, directory])
 if role == "controller":
-    while not (root / "cli.pid").exists():
+    while not (root / "cli.pid").exists() or not (root / "start").exists():
         time.sleep(0.01)
     if mode == "exit":
         os._exit(17)
@@ -49,13 +51,32 @@ while True:
 RUNNER = """
 import importlib.util
 from pathlib import Path
+import subprocess
 import sys
+import time
+from types import SimpleNamespace
 spec = importlib.util.spec_from_file_location("supervisor", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 module.RUN_SECONDS, module.TERM_SECONDS, module.DRAIN_SECONDS = 1, 0.1, 1
-sys.exit(module.supervise([sys.executable, sys.argv[2], "controller", sys.argv[3], sys.argv[4]],
-                         Path(sys.argv[4]) / "drain"))
+root = Path(sys.argv[4])
+command = [sys.executable, sys.argv[2], "controller", sys.argv[3], sys.argv[4]]
+process = subprocess.Popen(command, start_new_session=True)
+deadline = time.monotonic() + 10
+while not (root / "cli.pid").exists():
+    if time.monotonic() >= deadline:
+        raise TimeoutError("test process tree did not become ready")
+    time.sleep(0.01)
+
+def release_tree(arguments, **options):
+    assert arguments == command and options == {"start_new_session": True}
+    (root / "start").touch()
+    return process
+
+# Begin the short deadline only after interpreter startup and handler installation.
+module.subprocess = SimpleNamespace(**vars(subprocess))
+module.subprocess.Popen = release_tree
+sys.exit(module.supervise(command, root / "drain"))
 """
 
 
@@ -175,7 +196,7 @@ class InstalledSupervisorTests(unittest.TestCase):
                 tree.write_text(TREE)
                 result = subprocess.run(
                     [sys.executable, "-c", RUNNER, str(HELPER), str(tree), mode, str(root)],
-                    capture_output=True, text=True, timeout=6,
+                    capture_output=True, text=True, timeout=15,
                 )
                 self.assertEqual(result.returncode, expected, result.stderr)
                 self.assertEqual((root / "drain").read_text(), "drained\n")

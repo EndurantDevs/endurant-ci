@@ -394,6 +394,33 @@ docker() {
         api.assert_called_once_with(payload["repository"]["full_name"], f"commits/{SOURCE}")
         pages.assert_not_called()
 
+    def test_single_commit_range_without_event_uses_actual_queue_parent(self):
+        payload, responses, associated = self._development_push_case()
+        repository = payload["repository"]["full_name"]
+        commit = responses[f"commits/{SOURCE}"]
+        with patch.object(IDENTITY, "api", side_effect=lambda repo, path: responses[path]) as api, \
+                patch.object(IDENTITY, "pages", return_value=associated):
+            base, commits = IDENTITY.main_source_range(repository, commit, branch="dev")
+        self.assertEqual(base, payload["before"])
+        self.assertNotEqual(base, associated[0]["base"]["sha"])
+        self.assertEqual(commits, [commit])
+        api.assert_called_once_with(repository, "pulls/7")
+
+    def test_single_commit_queue_range_keeps_pr_authentication_and_exact_commit_count(self):
+        payload, responses, associated = self._development_push_case()
+        repository = payload["repository"]["full_name"]
+        original = copy.deepcopy(responses["pulls/7"])
+        changes = ({"merged": False}, {"state": "open"}, {"merge_commit_sha": "8" * 40},
+                   {"base": {**original["base"], "ref": "main"}},
+                   {"base": {**original["base"], "repo": {"full_name": "Other/example"}}},
+                   {"commits": True}, {"commits": 1.0}, {"commits": "1"})
+        with patch.object(IDENTITY, "api", side_effect=lambda repo, path: responses[path]), \
+                patch.object(IDENTITY, "pages", return_value=associated):
+            for change in changes:
+                responses["pulls/7"] = {**original, **change}
+                with self.subTest(change=change), self.assertRaises(ValueError):
+                    IDENTITY.main_source_range(repository, responses[f"commits/{SOURCE}"], branch="dev")
+
     def test_push_before_preserves_release_and_other_repository_ranges(self):
         for repository, branch in ((REPOSITORY, "main"), (REPOSITORY, "dev"),
                                    ("EndurantDevs/healthcare-mrf-api", "main")):
@@ -406,14 +433,14 @@ docker() {
                     result = IDENTITY.resolve_identity(repository, "push", payload, SOURCE, payload["ref"])
                 self.assertEqual(result["base_sha"], BASE)
 
-    def test_development_push_without_before_keeps_existing_fallback(self):
+    def test_development_push_without_before_uses_authenticated_single_commit_parent(self):
         payload, responses, associated = self._development_push_case()
         payload.pop("before")
         repository = payload["repository"]["full_name"]
         with patch.object(IDENTITY, "api", side_effect=lambda repo, path: responses[path]), \
                 patch.object(IDENTITY, "pages", return_value=associated) as pages:
-            with self.assertRaises(ValueError):
-                IDENTITY.resolve_identity(repository, "push", payload, SOURCE, payload["ref"])
+            result = IDENTITY.resolve_identity(repository, "push", payload, SOURCE, payload["ref"])
+            self.assertEqual(result["base_sha"], "4" * 40)
             responses["pulls/7"]["base"]["sha"] = "4" * 40
             result = IDENTITY.resolve_identity(repository, "push", payload, SOURCE, payload["ref"])
         self.assertEqual(result["base_sha"], "4" * 40)
