@@ -210,7 +210,7 @@ class PublicWorkflowPermissions(unittest.TestCase):
         self.assertEqual(job["strategy"]["fail-fast"], False)
         setup = next(step for step in job["steps"] if step.get("name") == "Prepare source and toolchain")
         # Database lanes consume the hygiene job's debug binaries and native wheel; no Rust toolchain.
-        self.assertEqual(setup["with"], {"postgres-schema-cache": "true", "postgres-client": "true"})
+        self.assertEqual(setup["with"], {"postgres-schema-cache": "true"})
         hygiene = workflow["jobs"]["public-hygiene"]
         hygiene_setup = next(step for step in hygiene["steps"] if step.get("name") == "Prepare source and toolchain")
         self.assertEqual(hygiene_setup["with"], {"rust": "true", "cargo-cache": "hygiene"})
@@ -235,27 +235,31 @@ class PublicWorkflowPermissions(unittest.TestCase):
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         database_job = workflow["jobs"]["address-canonical-db-tests"]
         self.assertIn("postgis/postgis:18-", database_job["services"]["postgres"]["image"])
-        for job_id in ("address-canonical-db-tests", "fhir-catalog-integration"):
-            setup = next(step for step in workflow["jobs"][job_id]["steps"]
-                         if step.get("name") == "Prepare source and toolchain")
-            self.assertEqual(setup["with"]["postgres-client"], "true", job_id)
-        composite = yaml.safe_load(COMPOSITE_PATH.read_text())
-        self.assertEqual(composite["inputs"]["postgres-client"]["default"], "false")
-        steps = {step["name"]: step for step in composite["runs"]["steps"]}
-        installer = steps["Install PostgreSQL client"]
-        self.assertEqual(installer["if"], "inputs.postgres-client == 'true'")
-        self.assertEqual(installer["run"], 'bash "$CI_ROOT/scripts/install_postgres_client"')
+        names = ["Resolve PostgreSQL client cache key", "Restore PostgreSQL client packages",
+                 "Install PostgreSQL client", "Save PostgreSQL client packages"]
         cache = {"path": "${{ runner.temp }}/postgres-client-cache", "key": "${{ steps.postgres-client-key.outputs.key }}"}
-        self.assertEqual(installer["env"]["POSTGRES_CLIENT_CACHE"], cache["path"])
-        self.assertIn("date -u +%G-W%V", steps["Resolve PostgreSQL client cache key"]["run"])
-        self.assertIn("VERSION_CODENAME", steps["Resolve PostgreSQL client cache key"]["run"])
-        self.assertTrue(steps["Restore PostgreSQL client packages"]["uses"].startswith("actions/cache/restore@"))
-        self.assertTrue(steps["Save PostgreSQL client packages"]["uses"].startswith("actions/cache/save@"))
-        for name in ("Restore PostgreSQL client packages", "Save PostgreSQL client packages"):
-            self.assertEqual(steps[name]["with"], cache, name)
-        self.assertEqual(steps["Save PostgreSQL client packages"]["if"],
-                         "inputs.postgres-client == 'true' && steps.postgres-client-cache.outputs.cache-hit != 'true'"
-                         " && steps.postgres-client.outputs.cache-ready == 'true'")
+        save = "steps.postgres-client-cache.outputs.cache-hit != 'true' && steps.postgres-client.outputs.cache-ready == 'true'"
+        # The catalog lane installs only after its capability probe finds catalog tests in the source.
+        for job_id, after, gate in (("address-canonical-db-tests", "Prepare source and toolchain", None),
+                                    ("fhir-catalog-integration", "Check catalog integration capability",
+                                     "steps.catalog-capability.outputs.present == 'true'")):
+            with self.subTest(job=job_id):
+                job_steps = workflow["jobs"][job_id]["steps"]
+                position = [step.get("name") for step in job_steps].index(after)
+                steps = job_steps[position + 1:position + 5]
+                self.assertEqual([step["name"] for step in steps], names)
+                key, restore, installer, saver = steps
+                self.assertIn("date -u +%G-W%V", key["run"])
+                self.assertIn("VERSION_CODENAME", key["run"])
+                self.assertEqual(key["env"], {"INSTALLER_HASH": "${{ hashFiles('ci/scripts/install_postgres_client') }}"})
+                self.assertTrue(restore["uses"].startswith("actions/cache/restore@"))
+                self.assertTrue(saver["uses"].startswith("actions/cache/save@"))
+                self.assertEqual(restore["with"], cache)
+                self.assertEqual(saver["with"], cache)
+                self.assertEqual(installer["run"], 'bash "$CI_ROOT/scripts/install_postgres_client"')
+                self.assertEqual(installer["env"], {"POSTGRES_CLIENT_CACHE": cache["path"]})
+                self.assertEqual([step.get("if") for step in steps[:3]], [gate] * 3)
+                self.assertEqual(saver["if"], f"{gate} && {save}" if gate else save)
         command = (ROOT / "scripts/install_postgres_client").read_text()
         self.assertIn("https://apt.postgresql.org/pub/repos/apt", command)
         self.assertIn("Acquire::Retries=3", command)
