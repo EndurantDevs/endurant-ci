@@ -31,7 +31,7 @@ class RecoveryChecks(unittest.TestCase):
                        "commit": {"committer": {"date": "2026-09-09T11:00:00Z"}}}
         self.run = {**self.source, "id": 900, "run_attempt": 1, "workflow_id": 789,
                     "event": "workflow_dispatch", "head_sha": "c" * 40, "path": recovery.WORKFLOW,
-                    "status": "in_progress", "conclusion": None, "name": recovery.TITLE,
+                    "status": "in_progress", "conclusion": None, "name": "Retained DEV image 123-2",
                     "display_title": "Retained DEV image 123-2", "created_at": "2026-09-09T12:00:00Z"}
         self.job = {"id": 901, "name": transfer.JOB, "run_id": 900, "run_attempt": 1,
                     "head_sha": "c" * 40, "status": "in_progress", "conclusion": None,
@@ -98,6 +98,11 @@ class RecoveryChecks(unittest.TestCase):
 
     def test_manual_publisher_has_its_own_run_source_and_package(self):
         self.assertEqual(self.publisher_context(), (self.publisher, self.run, self.job))
+
+    def test_manual_publisher_rejects_a_name_other_than_its_exact_run_title(self):
+        for name in ("Retained DEV image publication", "Retained DEV image 124-2", "", None):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "publisher run or workflow identity"):
+                self.publisher_context(change={"name": name})
 
     def test_manual_publisher_rejects_changed_source_attempt_or_workflow(self):
         for change in ({"run_attempt": 2}, {"head_sha": "b" * 40}, {"path": ".github/workflows/ci.yml"},

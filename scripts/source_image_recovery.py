@@ -16,7 +16,6 @@ import yaml
 
 REPOSITORY = "EndurantDevs/healthcare-mrf-api"
 WORKFLOW = ".github/workflows/publish-retained-image.yml"
-TITLE = "Retained DEV image publication"
 INPUTS = {"source_run_id": "SOURCE_RUN_ID", "source_run_attempt": "SOURCE_RUN_ATTEMPT",
           "image_artifact_id": "IMAGE_ARTIFACT_ID", "measurement_artifact_id": "MEASUREMENT_ARTIFACT_ID"}
 SCHEMA = "public-source-image-recovery-v1"
@@ -77,7 +76,7 @@ def publisher_context():
             and run.get("status") == "in_progress" and run.get("conclusion") is None
             and run.get("event") == "workflow_dispatch" and run.get("head_branch") == "dev"
             and run.get("head_sha") == os.environ["GITHUB_SHA"] and run.get("path") == WORKFLOW
-            and run.get("name") == TITLE and run.get("display_title") == title
+            and run.get("name") == title and run.get("display_title") == title
             and positive(run.get("workflow_id")) and run.get("referenced_workflows", []) == []
             and all(run.get(key, {}).get("full_name") == repository for key in ("repository", "head_repository"))):
         raise ValueError("recovery publisher run or workflow identity changed")
