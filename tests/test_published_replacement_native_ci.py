@@ -1,4 +1,4 @@
-"""Run replacement proofs on the owned native database and exclude them from pure Python."""
+"""Run replacement and named-edition Address proofs on the owned native database, never in pure Python."""
 
 import re
 import unittest
@@ -13,7 +13,7 @@ NATIVE_TESTS = tuple(
         "inputs_postgres",
         "recipe_postgres",
     )
-)
+) + ("tests/test_entity_address_named_edition_postgres.py",)
 SERVING_BLOCK = (
     "serving_tests=()\n"
     + support.FUNCTIONS.split("  local serving_tests=() serving_test\n", 1)[1].split(
