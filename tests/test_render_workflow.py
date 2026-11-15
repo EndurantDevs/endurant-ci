@@ -98,6 +98,7 @@ class RenderWorkflowChecks(unittest.TestCase):
                 "smoke": {"name": "portable import checks", "runs-on": "ubuntu-latest", "steps": [{"run": "true"}]}}}))
             caller.write_text(RENDERER.render_workflow("healthcare", "1" * 40, caller))
             original = yaml.safe_load(caller.read_text())
+            original["jobs"]["python-tests"]["strategy"]["fail-fast"] = True
             original["jobs"]["artifact-cleanup"] = {
                 "name": RENDERER.job_name("CI artifact cleanup"), "needs": "dev-image-publication",
                 "runs-on": "ubuntu-latest", "steps": [{"run": "python3 ci/scripts/artifact_cleanup.py"}],
@@ -116,6 +117,10 @@ class RenderWorkflowChecks(unittest.TestCase):
             download["with"]["artifact-ids"] = ",".join(selectors).replace("${{ needs.python-tests", "${{\n  needs.python-tests")
             caller.write_text(yaml.safe_dump(original, sort_keys=False))
             result = yaml.safe_load(RENDERER.render_common_test_update("healthcare", "2" * 40, caller))
+            python = result["jobs"]["python-tests"]
+            self.assertFalse(python["strategy"]["fail-fast"])
+            self.assertEqual(python["strategy"]["matrix"], original["jobs"]["python-tests"]["strategy"]["matrix"])
+            self.assertEqual(python["outputs"], original["jobs"]["python-tests"]["outputs"])
             self.assertEqual(set(result["jobs"]), set(original["jobs"]) - {"artifact-cleanup"})
             for identifier, job in original["jobs"].items():
                 if identifier not in {"python-tests", "capacity-evidence", "measurement", "dev-image-publication", "artifact-cleanup"}:
@@ -215,6 +220,7 @@ class RenderWorkflowChecks(unittest.TestCase):
                     rendered = RENDERER.render_workflow(kind, "1" * 40, caller)
                     workflow = yaml.safe_load(rendered)
                     if kind == "healthcare":
+                        self.assertFalse(workflow["jobs"]["python-tests"]["strategy"]["fail-fast"])
                         self.assertEqual(sum(len(job.get("strategy", {}).get("matrix", {}).get("include", [None]))
                                              for job in workflow["jobs"].values()), 82)
                     expected_events = dict(original["on"])

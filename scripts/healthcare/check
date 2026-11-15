@@ -1099,6 +1099,14 @@ registry_serving_external_native_nodeids() {
   printf '%s\n' \
     'tests/test_network_core_layer_provider_postgres.py::test_real_core_layer_transport_preserves_two_custodied_generations[modern]' \
     tests/test_registry_generic_source_successor_postgres.py::test_generic_source_successor_core_layer_transport
+  # Named publication uses the real peer component rather than the legacy local fixture.
+  if grep -q '^async def _named_generic_source(' \
+      "$repository_root/tests/generic_source_successor_postgres_support.py" 2>/dev/null; then
+    printf '%s\n' \
+      tests/test_registry_generic_source_successor_postgres.py::test_generic_source_successor_refresh_replay \
+      tests/test_verified_witness_readiness_refusal_postgres.py::test_cheap_readiness_defers_mapper_refusal_and_recovers_exact_rejected_request \
+      tests/test_verified_witness_custom_publication_postgres.py::test_source_v2_manual_commands_preserve_custody_and_replay
+  fi
 }
 
 registry_cms_successor_native_nodeid() {
@@ -1403,6 +1411,7 @@ run_python_main() {
     tests/test_provider_directory_published_replacement_recovery_postgres.py \
     tests/test_provider_directory_published_replacement_inputs_postgres.py \
     tests/test_provider_directory_published_replacement_recipe_postgres.py \
+    tests/test_provider_directory_artifact_logical_revision_postgres.py \
     tests/test_entity_address_named_edition_postgres.py; do
     if [ -f "$repository_root/$test_path" ]; then
       collection_args+=(--ignore "$test_path")
@@ -3993,7 +4002,8 @@ run_registry_address_equivalence_postgres() (
   equivalence_report=$(mktemp "${RUNNER_TEMP:-/tmp}/healthcare-registry-address-equivalence.XXXXXX")
   run_owned_provider_directory_postgres hc_address_equivalence REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN \
     "$test_path" --junitxml "$equivalence_report"
-  python - "$equivalence_report" <<'PY'
+  python - "$equivalence_report" "$repository_root/$test_path" <<'PY'
+import ast
 import pathlib
 import sys
 import xml.etree.ElementTree as ET
@@ -4011,8 +4021,14 @@ for suite in suites:
     assert all(int(suite.attrib.get(name, "0")) == 0 for name in ("skipped", "errors", "failures")), "Native address equivalence tests must all pass without skips"
 assert not any(item.tag in ("skipped", "error", "failure") for item in root.iter()), "Native address equivalence tests must all pass without skips"
 cases = list(root.iter("testcase"))
-expected = ("tests.test_network_cms_registry_address_equivalence_postgres", "test_native_copy_preserves_receipts_and_rejects_drift")
-assert len(cases) == 1 and (cases[0].get("classname"), cases[0].get("name")) == expected, "Native address equivalence report differs from its required selector"
+expected = {
+    ("tests.test_network_cms_registry_address_equivalence_postgres", "test_native_copy_preserves_receipts_and_rejects_drift"),
+}
+portability_case = "test_named_and_old_receipts_survive_copy_and_refuse_layout_drift"
+source = ast.parse(pathlib.Path(sys.argv[2]).read_text())
+if any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == portability_case for node in source.body):
+    expected.add(("tests.test_network_cms_registry_address_equivalence_postgres", portability_case))
+assert len(cases) == len(expected) and {(case.get("classname"), case.get("name")) for case in cases} == expected, "Native address equivalence report differs from its required selectors"
 PY
 )
 
@@ -4214,6 +4230,11 @@ run_provider_directory_postgres() {
   fi
 
   if [[ "$lane" = directory-address || "$lane" = all ]]; then
+  local cms_cleanup_case=tests/test_provider_directory_cms_preparation.py::test_native_cleanup_preserves_replacement_oid
+  if grep -q '^async def test_native_cleanup_uses_named_admission_after_snapshot_copy(' \
+      "$repository_root/tests/test_provider_directory_cms_preparation.py" 2>/dev/null; then
+    cms_cleanup_case=tests/test_provider_directory_cms_preparation.py::test_native_cleanup_uses_named_admission_after_snapshot_copy
+  fi
   run_registry_address_equivalence_postgres
   run_available_cms_postgres runtime \
     tests/test_entity_address_candidate_preparation_postgres.py \
@@ -4230,7 +4251,7 @@ run_provider_directory_postgres() {
     tests/test_provider_directory_cms_native_projection_postgres.py \
     tests/test_provider_directory_cms_overlay_projection_postgres.py \
     tests/test_provider_directory_cms_preparation.py::test_native_scope_loads_all_heaps_before_indexes_and_exposure \
-    tests/test_provider_directory_cms_preparation.py::test_native_cleanup_preserves_replacement_oid
+    "$cms_cleanup_case"
   HLTHPRT_OPENADDRESSES_BATCH_POSTGRES_DSN=$dsn run_available_cms_postgres owned \
     tests/test_openaddresses_native_batch_postgres.py \
     tests/test_provider_directory_dataset_rehydrate_db.py \
@@ -4248,6 +4269,7 @@ run_provider_directory_postgres() {
     tests/test_provider_directory_published_replacement_recovery_postgres.py \
     tests/test_provider_directory_published_replacement_inputs_postgres.py \
     tests/test_provider_directory_published_replacement_recipe_postgres.py \
+    tests/test_provider_directory_artifact_logical_revision_postgres.py \
     tests/test_entity_address_named_edition_postgres.py; do
     if [ -f "$repository_root/$serving_test" ]; then
       serving_tests+=("$serving_test")

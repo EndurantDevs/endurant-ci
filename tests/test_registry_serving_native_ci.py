@@ -21,6 +21,20 @@ EXTERNAL_NODEIDS = (
         "test_generic_source_successor_core_layer_transport"
     ),
 )
+NAMED_EXTERNAL_NODEIDS = (
+    (
+        "tests/test_registry_generic_source_successor_postgres.py::"
+        "test_generic_source_successor_refresh_replay"
+    ),
+    (
+        "tests/test_verified_witness_readiness_refusal_postgres.py::"
+        "test_cheap_readiness_defers_mapper_refusal_and_recovers_exact_rejected_request"
+    ),
+    (
+        "tests/test_verified_witness_custom_publication_postgres.py::"
+        "test_source_v2_manual_commands_preserve_custody_and_replay"
+    ),
+)
 CMS_NODEID = (
     "tests/test_registry_membership_refresh_cms_postgres.py::"
     "test_current_cms_edition_keeps_original_scope_and_pins_real_successor"
@@ -166,10 +180,10 @@ run_network_registry_postgres
             set(NATIVE_TESTS).isdisjoint(re.findall(r"tests/[^\s]+\.py", remaining))
         )
         self.assertEqual(
-            tuple(re.findall(r"tests/[^\s']+::[^\s']+", external)), EXTERNAL_NODEIDS
+            tuple(re.findall(r"tests/[^\s']+::[^\s']+", external)), EXTERNAL_NODEIDS + NAMED_EXTERNAL_NODEIDS
         )
         self.assertTrue(
-            {nodeid.split("::", 1)[0] for nodeid in EXTERNAL_NODEIDS}
+            {nodeid.split("::", 1)[0] for nodeid in (*EXTERNAL_NODEIDS, *NAMED_EXTERNAL_NODEIDS)}
             <= set(NATIVE_TESTS)
         )
 
