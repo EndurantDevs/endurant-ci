@@ -1402,7 +1402,8 @@ run_python_main() {
     tests/test_provider_directory_published_replacement_postgres.py \
     tests/test_provider_directory_published_replacement_recovery_postgres.py \
     tests/test_provider_directory_published_replacement_inputs_postgres.py \
-    tests/test_provider_directory_published_replacement_recipe_postgres.py; do
+    tests/test_provider_directory_published_replacement_recipe_postgres.py \
+    tests/test_entity_address_named_edition_postgres.py; do
     if [ -f "$repository_root/$test_path" ]; then
       collection_args+=(--ignore "$test_path")
     fi
@@ -4246,7 +4247,8 @@ run_provider_directory_postgres() {
     tests/test_provider_directory_published_replacement_postgres.py \
     tests/test_provider_directory_published_replacement_recovery_postgres.py \
     tests/test_provider_directory_published_replacement_inputs_postgres.py \
-    tests/test_provider_directory_published_replacement_recipe_postgres.py; do
+    tests/test_provider_directory_published_replacement_recipe_postgres.py \
+    tests/test_entity_address_named_edition_postgres.py; do
     if [ -f "$repository_root/$serving_test" ]; then
       serving_tests+=("$serving_test")
     fi
