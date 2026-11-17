@@ -135,9 +135,8 @@ class PublicWorkflowPermissions(unittest.TestCase):
         for job_id, rows in expected.items():
             job = jobs[job_id]
             if job_id == "address-canonical-db-tests":
-                # Database lanes are capped and listed longest-first; the rows are pinned as a set.
-                self.assertEqual(set(job["strategy"]), {"max-parallel", "fail-fast", "matrix"})
-                self.assertEqual(job["strategy"]["max-parallel"], 48)
+                # Database lanes are uncapped and listed longest-first; the rows are pinned as a set.
+                self.assertEqual(set(job["strategy"]), {"fail-fast", "matrix"})
                 self.assertEqual(job["strategy"]["fail-fast"], False)
                 self.assertEqual(set(job["strategy"]["matrix"]), {"include"})
                 self.assertEqual(sorted(job["strategy"]["matrix"]["include"], key=lambda row: row["shard"]),
