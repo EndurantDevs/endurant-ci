@@ -106,7 +106,9 @@ def prepare(arguments):
             or (
                 scopes
                 and not any(
-                    scope in common.CONTENT_SCOPES or common.same_tree(scope)
+                    scope in common.CONTENT_SCOPES
+                    or common.same_commit(scope)
+                    or common.same_tree(scope)
                     for scope in scopes
                 )
             )
@@ -146,16 +148,13 @@ def prepare(arguments):
                     not in allowed
                 ):
                     continue
-                jobs = common.attempt_jobs(repository, original_run)
-                matches = [item for item in jobs if item.get("name") == job["name"]]
-                common.equivalent.require(
-                    len(matches) == 1, "Original complete job inventory changed"
+                original_job = common.selected_original_job(
+                    repository, original_run, job["name"], artifact_list
                 )
-                original_job = matches[0]
                 original_producer = {
                     **producer,
                     "run_id": original_run["id"],
-                    "run_attempt": original_run["run_attempt"],
+                    "run_attempt": original_job["run_attempt"],
                     "commit": original_run["head_sha"],
                     "job_id": original_job["id"],
                 }
@@ -199,7 +198,7 @@ def prepare(arguments):
                     ),
                     "Original measured source tree differs from the current source",
                 )
-                read(repository, f"actions/jobs/{original_job['id']}")
+                original_job = read(repository, f"actions/jobs/{original_job['id']}")
                 check = re.fullmatch(
                     rf"https://api.github.com/repos/{re.escape(repository)}/check-runs/([1-9][0-9]*)",
                     original_job.get("check_run_url", ""),
