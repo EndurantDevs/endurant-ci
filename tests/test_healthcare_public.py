@@ -947,6 +947,32 @@ def _ordinary_ci_role():
 
 
 class HealthcarePublicChecks(unittest.TestCase):
+    def test_named_source_cases_require_peer_runtime_without_changing_legacy_selection(self):
+        baseline = [
+            'tests/test_network_core_layer_provider_postgres.py::test_real_core_layer_transport_preserves_two_custodied_generations[modern]',
+            'tests/test_registry_generic_source_successor_postgres.py::test_generic_source_successor_core_layer_transport',
+        ]
+        named = [
+            'tests/test_registry_generic_source_successor_postgres.py::test_generic_source_successor_refresh_replay',
+            'tests/test_verified_witness_readiness_refusal_postgres.py::test_cheap_readiness_defers_mapper_refusal_and_recovers_exact_rejected_request',
+            'tests/test_verified_witness_custom_publication_postgres.py::test_source_v2_manual_commands_preserve_custody_and_replay',
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            support = source / 'tests/generic_source_successor_postgres_support.py'
+            support.parent.mkdir()
+            for contents, expected in ((None, baseline), ('async def legacy_fixture():\n    pass\n', baseline),
+                                       ('async def _named_generic_source(monkeypatch):\n    pass\n', baseline + named)):
+                with self.subTest(contents=contents):
+                    if contents is not None:
+                        support.write_text(contents)
+                    result = bash_script(
+                        input=CHECK_FUNCTIONS + '\nregistry_serving_external_native_nodeids',
+                        env={**os.environ, 'SOURCE_ROOT': str(source), 'CI_ROOT': str(ROOT)},
+                        capture_output=True, text=True, check=True,
+                    )
+                    self.assertEqual(result.stdout.splitlines(), expected)
+
     def test_publication_worker_additional_native_modules_are_closed_and_optional(self):
         modules = (
             "tests/test_registry_publication_address_preparation_postgres.py",
@@ -2339,7 +2365,8 @@ timeout() {
         cases += [("directory-address", True, stage) for stage in (
             "create", "pytest", "drop", "report-cleanup", "skipped", "error", "failure", "summary-skipped",
             "no-tests", "bad-count", "wrong-classname", "wrong-name", "duplicate-case", "empty-report",
-            "invalid-report", "large-report",
+            "invalid-report", "large-report", "missing-original", "missing-portability", "extra-case",
+            "legacy-inventory", "legacy-no-tests", "legacy-extra-case", "legacy-skipped", "legacy-duplicate-case",
         )]
         for lane, present, failure in cases:
             with self.subTest(lane=lane, present=present, failure=failure), tempfile.TemporaryDirectory() as temporary:
@@ -2348,7 +2375,12 @@ timeout() {
                 (source / "tests").mkdir(parents=True)
                 runner.mkdir()
                 if present:
-                    (source / REGISTRY_ADDRESS_EQUIVALENCE_TEST).touch()
+                    names = ["test_native_copy_preserves_receipts_and_rejects_drift"]
+                    if not failure.startswith("legacy-"):
+                        names.append("test_named_and_old_receipts_survive_copy_and_refuse_layout_drift")
+                    (source / REGISTRY_ADDRESS_EQUIVALENCE_TEST).write_text(
+                        "".join(f"async def {name}():\n    pass\n" for name in names),
+                    )
                 log, lifecycle = root / "calls", root / "lifecycle"
                 log.touch()
                 lifecycle.touch()
@@ -2372,14 +2404,28 @@ path = pathlib.Path(arguments[arguments.index("--junitxml") + 1])
 if stage in ("empty-report", "invalid-report", "large-report"):
     path.write_text({"empty-report":"", "invalid-report":"<invalid", "large-report":"x"*(16*1024*1024+1)}[stage])
 else:
-    count = 0 if stage == "no-tests" else 2 if stage == "duplicate-case" else 1
+    names = ["test_native_copy_preserves_receipts_and_rejects_drift",
+             "test_named_and_old_receipts_survive_copy_and_refuse_layout_drift"]
+    if stage.startswith("legacy-"):
+        names = names[:1]
+        stage = stage.removeprefix("legacy-")
+    if stage == "no-tests":
+        names = []
+    elif stage == "missing-original":
+        names = names[1:]
+    elif stage == "missing-portability":
+        names = names[:1]
+    elif stage == "duplicate-case":
+        names = [names[0], names[0]]
+    elif stage == "extra-case":
+        names.append("test_unrequested_case")
     report = ET.Element("testsuites")
-    suite = ET.SubElement(report, "testsuite", tests=str(count + (stage == "bad-count")),
+    suite = ET.SubElement(report, "testsuite", tests=str(len(names) + (stage == "bad-count")),
                           skipped="1" if stage == "summary-skipped" else "0", errors="0", failures="0")
-    for _ in range(count):
+    for name in names:
         case = ET.SubElement(suite, "testcase",
             classname="wrong" if stage == "wrong-classname" else "tests.test_network_cms_registry_address_equivalence_postgres",
-            name="wrong" if stage == "wrong-name" else "test_native_copy_preserves_receipts_and_rejects_drift")
+            name="wrong" if stage == "wrong-name" else name)
         if stage in ("skipped", "error", "failure"):
             ET.SubElement(case, stage)
     ET.ElementTree(report).write(path, encoding="utf-8")
@@ -2422,7 +2468,7 @@ test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
                 environment.pop("REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN", None)
                 result = bash_script(input=script, env=environment, capture_output=True, text=True,
                                         timeout=30, check=False)
-                expected = 17 if failure in ("create", "pytest") else 1 if failure else 0
+                expected = 17 if failure in ("create", "pytest") else 1 if failure and failure != "legacy-inventory" else 0
                 self.assertEqual(result.returncode, expected, result.stderr)
                 selected = present and lane in ("directory-address", "all")
                 calls = [json.loads(line) for line in log.read_text().splitlines()]
@@ -2459,6 +2505,7 @@ test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
             "tests/test_provider_directory_serving_capacity_migration_postgres.py",
             "tests/test_provider_directory_serving_read_catalog_postgres.py",
             "tests/test_provider_directory_serving_recovery_postgres.py",
+            "tests/test_provider_directory_artifact_logical_revision_postgres.py",
         )
         routes = {
             "registry-19": (
@@ -2555,10 +2602,13 @@ test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
         # Registry shards that carry provider-profile blocks route through the profile family function.
         profile_lanes = {"profile-storage", "profile-publication", "registry-24", "registry-13", "registry-20"}
         all_paths = tuple(path for paths in routes.values() for path in paths)
+        legacy_cleanup = "tests/test_provider_directory_cms_preparation.py::test_native_cleanup_preserves_replacement_oid"
+        named_cleanup = "tests/test_provider_directory_cms_preparation.py::test_native_cleanup_uses_named_admission_after_snapshot_copy"
         cms_paths = set(routes["registry-19"] + routes["registry-12"] + routes["directory-source-2"]
                         + routes["profile-publication"] + routes["registry-24"] + routes["registry-13"] + routes["registry-20"]
                         + routes["directory-address"][7:] + routes["registry-18"] + routes["registry-39"]
                         + routes["profile-storage"][:4])
+        cms_paths.add(named_cleanup)
         entities_paths = set(routes["profile-storage"][4:6])
         cms_paths -= set(serving_tests)
         entities_paths.update(serving_tests)
@@ -2585,6 +2635,8 @@ test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
             ("profile-storage", (routes["profile-storage"][4],), "", cleanup, expected)
             for cleanup, expected in (("create", 17), ("drop", 1))
         ]
+        cases.append(("directory-address", tuple(named_cleanup if path == legacy_cleanup else path for path in all_paths),
+                      "", "", 0))
         for lane, present, failure, cleanup_failure, expected in cases:
             with self.subTest(lane=lane, present=len(present), failure=failure, cleanup=cleanup_failure):
                 with tempfile.TemporaryDirectory() as temporary:
@@ -2593,6 +2645,10 @@ test -z "${REGISTRY_ADDRESS_EQUIVALENCE_TEST_DSN:-}"
                     (source / "tests").mkdir(parents=True)
                     for path in present:
                         (source / path.split("::", 1)[0]).touch()
+                    if named_cleanup in present:
+                        (source / named_cleanup.split("::", 1)[0]).write_text(
+                            "async def test_native_cleanup_uses_named_admission_after_snapshot_copy():\n    pass\n",
+                        )
                     calls_path, lifecycle = root / "calls", root / "lifecycle"
                     calls_path.touch()
                     lifecycle.touch()
@@ -2631,7 +2687,7 @@ if selected:
                         **os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
                         "RUNNER_TEMP": str(root), "CALL_LOG": str(calls_path), "LIFECYCLE": str(lifecycle),
                         "PATH": str(root) + os.pathsep + os.environ["PATH"],
-                        "NATIVE_TEST_PATHS": json.dumps(all_paths), "FAIL_FILE": failure,
+                        "NATIVE_TEST_PATHS": json.dumps((*all_paths, named_cleanup)), "FAIL_FILE": failure,
                         "CLEANUP_FAILURE": cleanup_failure, "DB_SCHEMA": "stale_alias",
                         "HLTHPRT_DB_SCHEMA": "mrf", "HLTHPRT_DB_DATABASE": "native_directory_test_runner",
                         "HLTHPRT_DB_DATABASE_OVERRIDE": "wrong_database", "HLTHPRT_DB_USER": "postgres",
@@ -2671,6 +2727,8 @@ test -z "${HLTHPRT_PROVIDER_DIRECTORY_PROFILE_ALLOW_SCHEMA_TESTS:-}"
                     observed = [path for call in calls for path in call["selected"]]
                     if not expected:
                         expected_paths = [path for path in routes[lane] if (source / path.split("::", 1)[0]).exists()]
+                        if named_cleanup in present:
+                            expected_paths = [named_cleanup if path == legacy_cleanup else path for path in expected_paths]
                         self.assertEqual(observed, expected_paths)
                     elif failure:
                         self.assertIn(failure, observed)

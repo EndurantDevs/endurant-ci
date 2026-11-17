@@ -13,7 +13,10 @@ NATIVE_TESTS = tuple(
         "inputs_postgres",
         "recipe_postgres",
     )
-) + ("tests/test_entity_address_named_edition_postgres.py",)
+) + (
+    "tests/test_provider_directory_artifact_logical_revision_postgres.py",
+    "tests/test_entity_address_named_edition_postgres.py",
+)
 SERVING_BLOCK = (
     "serving_tests=()\n"
     + support.FUNCTIONS.split("  local serving_tests=() serving_test\n", 1)[1].split(

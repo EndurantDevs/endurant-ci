@@ -213,7 +213,7 @@ jobs:
       artifact_4: ${{ steps.coverage-output.outputs.artifact_4 }}
       artifact_5: ${{ steps.coverage-output.outputs.artifact_5 }}
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
         - shard: '0'
