@@ -178,6 +178,7 @@ def verify(
                 references.append(reference)
             if any(
                 Path(item["path"]).name.startswith(".coverage")
+                or Path(item["path"]).name == "test-coverage-rust.json"
                 for item in document["outputs"]
             ):
                 coverage.append(coverage_reference(document, raw_document))

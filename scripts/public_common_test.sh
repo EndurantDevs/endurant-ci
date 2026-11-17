@@ -18,7 +18,7 @@ public_common_test_run() {
     # common_test_result.py.
     local same_tree=false
     [[ ! "$scope" =~ ^same-tree-[a-z0-9][a-z0-9-]*$ ]] || same_tree=true
-    if [[ "$scope" =~ ^healthcare-(python-main-[0-5]|capacity)$ || "$same_tree" == true ]]; then
+    if [[ "$scope" =~ ^healthcare-(python-main-[0-5]|capacity|api-contract|worker-queue|rust-scanner|postgres-[a-z0-9-]+)$ || "$same_tree" == true ]]; then
       hidden+=(GITHUB_SHA GITHUB_WORKFLOW_SHA GITHUB_REF GITHUB_REF_NAME GITHUB_REF_TYPE
                GITHUB_REF_PROTECTED GITHUB_HEAD_REF GITHUB_BASE_REF GITHUB_EVENT_NAME
                GITHUB_EVENT_PATH GITHUB_WORKFLOW_REF PR_NUMBER SOURCE_PR_TITLE SOURCE_BRANCH)
@@ -66,7 +66,15 @@ public_common_test_run() {
       arguments+=(--runtime-file "support/ptg2_scanner/target/debug/$binary")
     fi
   done
-  if [[ "$scope" == *-postgres ]]; then
+  if [[ "$scope" == healthcare-rust-scanner ]]; then
+    arguments+=(
+      --toolchain-command cargo '["cargo","--version"]'
+      --toolchain-command rustc '["rustc","--version"]'
+      --toolchain-command cargo-llvm-cov '["cargo","llvm-cov","--version"]'
+      --toolchain-command cargo-audit '["cargo","audit","--version"]'
+    )
+  fi
+  if [[ "$scope" == *-postgres || "$scope" == healthcare-postgres-* ]]; then
     local probe
     probe=$("$engine_python" - <<'PY'
 import json

@@ -141,6 +141,11 @@ if "--output-file" in sys.argv:
             ("healthcare-python-main-0", "1"),
             ("healthcare-python-main-5", "1"),
             ("healthcare-capacity", "1"),
+            ("healthcare-api-contract", "1"),
+            ("healthcare-worker-queue", "1"),
+            ("healthcare-rust-scanner", "1"),
+            ("healthcare-postgres-core-services", "1"),
+            ("healthcare-postgres-registry-0", "1"),
             ("same-tree-unit-0", "0"),
             ("healthcare-python-main-6", str(len(labels))),
             ("healthcare-unit", str(len(labels))),
@@ -463,7 +468,14 @@ run_capacity
         for kind, common_jobs in (
             (
                 "healthcare",
-                {"python-tests", "capacity-evidence"},
+                {
+                    "python-tests",
+                    "capacity-evidence",
+                    "api-contract",
+                    "worker-queue-smoke",
+                    "rust-scanner",
+                    "address-canonical-db-tests",
+                },
             ),
             ("drug", {"validate"}),
         ):

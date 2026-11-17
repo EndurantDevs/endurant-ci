@@ -1572,8 +1572,7 @@ run_runtime_contracts() {
 }
 
 
-run_api_contract() {
-  install_python_dependencies
+run_api_contract_exec() {
   run_python_inference
   run_runtime_contracts
   ci_phase_begin api-contract-tests
@@ -1585,6 +1584,15 @@ run_api_contract() {
     tests/test_api_init_and_utils.py \
     tests/test_healthcheck.py
   ci_phase_end
+}
+
+run_api_contract() {
+  install_python_dependencies
+  if [[ "${COMMON_TEST_EQUIVALENCE:-false}" == true ]]; then
+    public_common_test_run healthcare-api-contract - bash "$CI_ROOT/scripts/healthcare/check" api-contract-exec
+  else
+    run_api_contract_exec
+  fi
 }
 
 install_address_canon_wheel() (
@@ -1798,11 +1806,10 @@ PY
   ci_phase_end
 }
 
-run_rust() {
+run_rust_exec() {
   local rust_artifacts
   local -x CARGO_LLVM_COV_TARGET_DIR="$repository_root/support/ptg2_scanner/target/llvm-cov-target"
   rust_artifacts=$(artifact_path coverage-artifacts/rust)
-  install_python_dependencies
   ci_phase_begin rust-lint
   cargo fmt --manifest-path support/ptg2_scanner/Cargo.toml -- --check
   cargo clippy --manifest-path support/ptg2_scanner/Cargo.toml --all-targets -- -D warnings
@@ -1838,14 +1845,6 @@ run_rust() {
     timeout --foreground 420s cargo llvm-cov report --manifest-path support/ptg2_scanner/Cargo.toml \
     --remap-path-prefix --json \
     --output-path "$rust_artifacts/test-coverage-rust.json"
-  require_base_sha
-  timeout --foreground 420s python scripts/coverage_forecast.py write-report-provenance \
-    --base "$COVERAGE_BASE_SHA" \
-    --report-name rust \
-    --report "$rust_artifacts/test-coverage-rust.json" \
-    --output "$rust_artifacts/coverage-provenance-rust.json" \
-    --cargo-llvm-cov-version "$(cargo llvm-cov --version | awk '{print $2}')" \
-    --rust-version "$(rustc --version | awk '{print $2}')"
   ci_phase_end
   ci_phase_begin rust-audit
   test "$(cargo audit --version)" = "cargo-audit-audit 0.22.2"
@@ -1875,6 +1874,28 @@ run_rust() {
       --address-canonicalize-copy "$tmp/raw.copy" "$tmp/keyed.copy"
     test -s "$tmp/keyed.copy"
   )
+}
+
+run_rust() {
+  local rust_artifacts
+  rust_artifacts=$(artifact_path coverage-artifacts/rust)
+  install_python_dependencies
+  mkdir -p "$rust_artifacts"
+  if [[ "${COMMON_TEST_EQUIVALENCE:-false}" == true ]]; then
+    public_common_test_run healthcare-rust-scanner "$rust_artifacts/test-coverage-rust.json" \
+      bash "$CI_ROOT/scripts/healthcare/check" rust-exec
+  else
+    run_rust_exec
+  fi
+  require_base_sha
+  timeout --foreground 420s python scripts/coverage_forecast.py write-report-provenance \
+    --base "$COVERAGE_BASE_SHA" \
+    --report-name rust \
+    --report "$rust_artifacts/test-coverage-rust.json" \
+    --output "$rust_artifacts/coverage-provenance-rust.json" \
+    --cargo-llvm-cov-version "$(cargo llvm-cov --version | awk '{print $2}')" \
+    --rust-version "$(rustc --version | awk '{print $2}')"
+  public_common_test_provenance "$rust_artifacts/coverage-provenance-rust.json" healthcare-rust-scanner
 }
 
 cleanup_container_image() {
@@ -2137,11 +2158,7 @@ run_security() {
       "$semgrep_image"
 }
 
-run_redis() {
-  install_python_dependencies
-  export HLTHPRT_REDIS_ADDRESS=${HLTHPRT_REDIS_ADDRESS:-redis://127.0.0.1:6379}
-  wait_for_service Redis 30 \
-    python -c 'import os; from redis import Redis; Redis.from_url(os.environ["HLTHPRT_REDIS_ADDRESS"], socket_connect_timeout=1, socket_timeout=1).ping()'
+run_redis_exec() {
   python - <<'PY'
 import asyncio
 import os
@@ -2169,6 +2186,18 @@ PY
     tests/test_control_workers.py \
     tests/test_control_imports_api.py \
     tests/test_control_cancel.py
+}
+
+run_redis() {
+  install_python_dependencies
+  export HLTHPRT_REDIS_ADDRESS=${HLTHPRT_REDIS_ADDRESS:-redis://127.0.0.1:6379}
+  wait_for_service Redis 30 \
+    python -c 'import os; from redis import Redis; Redis.from_url(os.environ["HLTHPRT_REDIS_ADDRESS"], socket_connect_timeout=1, socket_timeout=1).ping()'
+  if [[ "${COMMON_TEST_EQUIVALENCE:-false}" == true ]]; then
+    public_common_test_run healthcare-worker-queue - bash "$CI_ROOT/scripts/healthcare/check" redis-exec
+  else
+    run_redis_exec
+  fi
 }
 
 prepare_postgres() {
@@ -4747,12 +4776,36 @@ run_provider_profile_postgres() {
   fi
 }
 
+run_postgres_exec() {
+  local shard=${1:-}
+  if [[ "$shard" = cms-successor ]]; then
+    run_cms_successor_postgres
+  elif [[ "$shard" = core ]]; then
+    run_network_registry_postgres
+  elif [[ "$shard" = registry-* ]]; then
+    run_network_registry_postgres "${shard#registry-}"
+  fi
+  ci_phase_begin postgres-tests
+  local dsn="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@${HLTHPRT_DB_HOST}:${HLTHPRT_DB_PORT}/${HLTHPRT_DB_DATABASE}"
+  case "$shard" in
+    core-*) run_core_postgres "$dsn" "$shard" ;;
+    directory-*) run_provider_directory_postgres "$dsn" "$shard" ;;
+    profile-*) run_provider_profile_postgres "$dsn" "$shard" ;;
+    registry-*)
+      # Registry shards also carry the bounded blocks placed on them above.
+      run_core_postgres "$dsn" "$shard"
+      run_provider_directory_postgres "$dsn" "$shard"
+      run_provider_profile_postgres "$dsn" "$shard"
+      ;;
+    core) run_core_postgres "$dsn" ;;
+    provider-directory) run_provider_directory_postgres "$dsn" ;;
+    provider-profile) run_provider_profile_postgres "$dsn" ;;
+  esac
+  ci_phase_end
+}
+
 run_postgres() {
   local shard=${1:-}
-  # shortcut: Keep stateful native/database/report orchestration complete until it has a closed reusable boundary.
-  if [[ "${COMMON_TEST_EQUIVALENCE:-false}" == true ]]; then
-    printf '%s\n' 'Full PostgreSQL execution required: native preparation, owned databases and required reports share this stage'
-  fi
   case "$shard" in
     core|provider-directory|provider-profile|core-services|core-services-2|core-imports|core-imports-2|core-snapshots|core-snapshots-2|core-ptg|registry-[0-9]|registry-[123][0-9]|registry-4[0-7]|cms-successor|fhir-catalog-integration|directory-source|directory-source-2|directory-storage|directory-address|profile-storage|profile-publication) ;;
     *) usage ;;
@@ -4795,33 +4848,16 @@ run_postgres() {
     run_fhir_catalog_integration
     return
   fi
-  if [[ "$shard" = cms-successor ]]; then
-    run_cms_successor_postgres
-  elif [[ "$shard" = core ]]; then
-    run_network_registry_postgres
-  elif [[ "$shard" = registry-* ]]; then
-    run_network_registry_postgres "${shard#registry-}"
-  fi
   if [[ "$shard" = core-services || "$shard" = directory-source* || "$shard" = directory-address || "$shard" = profile-publication || "$shard" = provider-directory || "$shard" = provider-profile ]]; then
     install_address_canon_wheel
   fi
-  ci_phase_begin postgres-tests
-  local dsn="postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@${HLTHPRT_DB_HOST}:${HLTHPRT_DB_PORT}/${HLTHPRT_DB_DATABASE}"
-  case "$shard" in
-    core-*) run_core_postgres "$dsn" "$shard" ;;
-    directory-*) run_provider_directory_postgres "$dsn" "$shard" ;;
-    profile-*) run_provider_profile_postgres "$dsn" "$shard" ;;
-    registry-*)
-      # Registry shards also carry the bounded blocks placed on them above.
-      run_core_postgres "$dsn" "$shard"
-      run_provider_directory_postgres "$dsn" "$shard"
-      run_provider_profile_postgres "$dsn" "$shard"
-      ;;
-    core) run_core_postgres "$dsn" ;;
-    provider-directory) run_provider_directory_postgres "$dsn" ;;
-    provider-profile) run_provider_profile_postgres "$dsn" ;;
-  esac
-  ci_phase_end
+  mkdir -p "$(dirname "$COVERAGE_FILE")"
+  if [[ "${COMMON_TEST_EQUIVALENCE:-false}" == true ]]; then
+    public_common_test_run "healthcare-postgres-${shard}" "$COVERAGE_FILE" \
+      bash "$CI_ROOT/scripts/healthcare/check" postgres-exec "$shard"
+  else
+    run_postgres_exec "$shard"
+  fi
 
   require_base_sha
   timeout --foreground 420s python "$CI_ROOT/scripts/healthcare/compact_coverage.py" "$COVERAGE_FILE"
@@ -4831,6 +4867,7 @@ run_postgres() {
     --shard "$shard" \
     --coverage "$COVERAGE_FILE" \
     --output "$(artifact_path ".coverage-provenance.postgres.${shard}.json")"
+  public_common_test_provenance "$(artifact_path ".coverage-provenance.postgres.${shard}.json")" "healthcare-postgres-${shard}"
 }
 
 case "${1:-}" in
@@ -4839,11 +4876,15 @@ case "${1:-}" in
   python-main) [ "$#" -eq 2 ] || usage; run_python_main "$2" ;;
   capacity) [ "$#" -eq 1 ] || usage; run_capacity ;;
   api-contract) [ "$#" -eq 1 ] || usage; run_api_contract ;;
+  api-contract-exec) [ "$#" -eq 1 ] || usage; run_api_contract_exec ;;
   rust) [ "$#" -eq 1 ] || usage; run_rust ;;
+  rust-exec) [ "$#" -eq 1 ] || usage; run_rust_exec ;;
   container-package) [ "$#" -eq 1 ] || usage; run_container_package ;;
   security) [ "$#" -eq 1 ] || usage; run_security ;;
   redis) [ "$#" -eq 1 ] || usage; run_redis ;;
+  redis-exec) [ "$#" -eq 1 ] || usage; run_redis_exec ;;
   postgres) [ "$#" -eq 2 ] || usage; run_postgres "$2" ;;
+  postgres-exec) [ "$#" -eq 2 ] || usage; run_postgres_exec "$2" ;;
   fhir-catalog-capability) [ "$#" -eq 1 ] || usage; fhir_catalog_capability ;;
   native-wheel) [ "$#" -eq 2 ] && [ -n "$2" ] || usage; stage_native_wheel "$2" ;;
   *) usage ;;

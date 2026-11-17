@@ -584,6 +584,58 @@ class RetainedAttemptVerificationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.refresh()
 
+    def test_rust_coverage_output_requires_matching_coverage_reference(self):
+        fixture = fixtures.CommonResultIntegrationTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        self.fixture = fixture
+        fixture.arguments.output_file.append("test-coverage-rust.json")
+        fixture.arguments.command[-1] += (
+            "; Path('test-coverage-rust.json').write_bytes(b'{}')"
+        )
+        fixture.original_execution()
+        self.original_archive = self.archive()
+        self.current_sha = fixture.git("rev-parse", "HEAD").strip()
+        self.retained["head_sha"] = self.current_sha
+        self.latest["head_sha"] = self.current_sha
+        self.current_job["head_sha"] = self.current_sha
+        self.current_check["head_sha"] = self.current_sha
+        self.current_artifact["workflow_run"]["head_sha"] = self.current_sha
+        fixture.current_producer.return_value = (
+            {**fixture.producer, "commit": self.current_sha, "run_id": 21, "job_id": 32},
+            self.retained,
+        )
+        self.assertEqual(
+            common.execute_isolated(fixture.arguments, read=fixture.read), 0
+        )
+        raw = next(fixture.directory.glob("*/measurement.json")).read_bytes()
+        document = json.loads(raw)
+        self.current_archive = self.archive()
+        self.current_artifact["digest"] = (
+            "sha256:" + hashlib.sha256(self.current_archive).hexdigest()
+        )
+        reference = verify.coverage_reference(document, raw)
+        with (
+            patch.object(common, "api", side_effect=self.read),
+            patch.object(common, "download", side_effect=self.download),
+        ):
+            result = verify.verify(
+                self.latest,
+                REPOSITORY,
+                document["measurement"]["source"],
+                producer_attempts={32: 1},
+                coverage_references=[reference],
+            )
+            self.assertEqual(result[0]["artifact_id"], 50)
+            with self.assertRaisesRegex(ValueError, "Coverage provenance"):
+                verify.verify(
+                    self.latest,
+                    REPOSITORY,
+                    document["measurement"]["source"],
+                    producer_attempts={32: 1},
+                    coverage_references=[],
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

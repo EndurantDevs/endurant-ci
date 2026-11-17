@@ -187,7 +187,15 @@ class PublicWorkflowPermissions(unittest.TestCase):
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
         base = {"contents": "read", "pull-requests": "read", "actions": "read"}
         self.assertEqual(workflow["permissions"], base)
-        readers = {"python-tests", "capacity-evidence", "measurement"}
+        readers = {
+            "python-tests",
+            "capacity-evidence",
+            "api-contract",
+            "worker-queue-smoke",
+            "rust-scanner",
+            "address-canonical-db-tests",
+            "measurement",
+        }
         for identifier, job in workflow["jobs"].items():
             with self.subTest(job=identifier):
                 if identifier == "source-validation":
@@ -198,7 +206,8 @@ class PublicWorkflowPermissions(unittest.TestCase):
                     })
         steps = workflow["jobs"]["address-canonical-db-tests"]["steps"]
         names = [step.get("name") for step in steps]
-        self.assertNotIn("Upload verified common-test measurements", names)
+        self.assertIn("Prepare read-only common-test evidence", names)
+        self.assertIn("Upload verified common-test measurements", names)
         self.assertIn("Upload PostgreSQL coverage data", names)
         self.assertIn("Expose immutable coverage artifact", names)
 
