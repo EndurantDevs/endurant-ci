@@ -143,7 +143,7 @@ class PublicWorkflowPermissions(unittest.TestCase):
                                  sorted(({"shard": shard, "label": label, "output": output} for shard, label, output in rows),
                                         key=lambda row: row["shard"]))
             else:
-                self.assertEqual(job["strategy"], {"fail-fast": job_id == "python-tests", "matrix": {"include": [
+                self.assertEqual(job["strategy"], {"fail-fast": False, "matrix": {"include": [
                     {"shard": shard, "label": label, "output": output} for shard, label, output in rows]}})
             self.assertEqual(job["name"], "${{ matrix.label }}")
             self.assertEqual(job["needs"], ["public-hygiene", "readability-preflight"])

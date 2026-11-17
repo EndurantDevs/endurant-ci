@@ -11,6 +11,17 @@ CAPABILITY = FUNCTIONS.split("registry_serving_native_test_paths() {\n", 1)[1].s
     "\n}\n", 1
 )[0]
 NATIVE_TESTS = tuple(re.findall(r"tests/[^\s]+\.py", CAPABILITY.split("\n  )", 1)[0]))
+IMPORTED_MARKER = "process/registry_native_provider_source.py"
+IMPORTED_TESTS = tuple(
+    re.findall(
+        r"tests/[^\s]+\.py",
+        CAPABILITY.split("local imported_registry_tests=(", 1)[1].split("\n    )", 1)[0],
+    )
+)
+IMPORTED_PEER_NODEID = (
+    "tests/test_registry_imported_publication_connected_postgres.py::"
+    "test_mixed_sources_publish_native_providers_without_offices"
+)
 EXTERNAL_NODEIDS = (
     (
         "tests/test_network_core_layer_provider_postgres.py::"
@@ -19,6 +30,20 @@ EXTERNAL_NODEIDS = (
     (
         "tests/test_registry_generic_source_successor_postgres.py::"
         "test_generic_source_successor_core_layer_transport"
+    ),
+)
+NAMED_EXTERNAL_NODEIDS = (
+    (
+        "tests/test_registry_generic_source_successor_postgres.py::"
+        "test_generic_source_successor_refresh_replay"
+    ),
+    (
+        "tests/test_verified_witness_readiness_refusal_postgres.py::"
+        "test_cheap_readiness_defers_mapper_refusal_and_recovers_exact_rejected_request"
+    ),
+    (
+        "tests/test_verified_witness_custom_publication_postgres.py::"
+        "test_source_v2_manual_commands_preserve_custody_and_replay"
     ),
 )
 CMS_NODEID = (
@@ -73,7 +98,10 @@ class RegistryServingNativeChecks(unittest.TestCase):
 
     def populate(self):
         paths = set(
-            re.findall(r"(?:api|alembic|process|tests)/[a-zA-Z0-9_./]+", CAPABILITY)
+            re.findall(
+                r"(?:api|alembic|process|tests)/[a-zA-Z0-9_./]+",
+                CAPABILITY.split("  local imported_registry_marker=", 1)[0],
+            )
         )
         for relative in paths:
             path = self.root / relative
@@ -166,10 +194,11 @@ run_network_registry_postgres
             set(NATIVE_TESTS).isdisjoint(re.findall(r"tests/[^\s]+\.py", remaining))
         )
         self.assertEqual(
-            tuple(re.findall(r"tests/[^\s']+::[^\s']+", external)), EXTERNAL_NODEIDS
+            tuple(re.findall(r"tests/[^\s']+::[^\s']+", external)),
+            (*EXTERNAL_NODEIDS, IMPORTED_PEER_NODEID, *NAMED_EXTERNAL_NODEIDS),
         )
         self.assertTrue(
-            {nodeid.split("::", 1)[0] for nodeid in EXTERNAL_NODEIDS}
+            {nodeid.split("::", 1)[0] for nodeid in (*EXTERNAL_NODEIDS, *NAMED_EXTERNAL_NODEIDS)}
             <= set(NATIVE_TESTS)
         )
 
@@ -295,6 +324,32 @@ run_network_registry_postgres
             (self.root / "native-environment").read_text().splitlines(),
             ["", "", "", "", ""],
         )
+
+    def test_imported_registry_requires_complete_native_roster_and_routes_peer_separately(self):
+        self.populate()
+        self.populate_existing_registry()
+        expected = {IMPORTED_MARKER, "tests/effective_catalog_support.py", *IMPORTED_TESTS}
+        self.assertEqual(len(IMPORTED_TESTS), 16)
+        self.assertTrue(set(IMPORTED_TESTS).isdisjoint(NATIVE_TESTS))
+        for relative in expected:
+            (self.root / relative).touch()
+        for script, output, selector in (
+            (self.python_script(), "main-arguments", "--ignore"),
+            (self.native_script(), "registry-arguments", None),
+        ):
+            result = self.shell(script)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            arguments = (self.root / output).read_text().splitlines()
+            for path in IMPORTED_TESTS:
+                self.assertEqual(arguments.count(path), 1)
+                if selector:
+                    self.assertEqual(arguments[arguments.index(path) - 1], selector)
+            if not selector:
+                self.assertEqual(arguments[arguments.index(IMPORTED_PEER_NODEID) - 1], "--deselect")
+        (self.root / IMPORTED_TESTS[-1]).unlink()
+        result = self.shell("registry_serving_native_test_paths")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(IMPORTED_TESTS[-1], result.stderr)
 
     def test_native_failure_removes_only_its_owned_explain_directory(self):
         self.populate()
