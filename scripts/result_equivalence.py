@@ -487,6 +487,7 @@ def authenticate_job_artifact(
     allowed_events,
     artifact_name,
     upload_step,
+    retained_verified=False,
 ):
     """Authenticate a successful native job and its immutable upload, independently of run completion."""
     require(
@@ -495,7 +496,14 @@ def authenticate_job_artifact(
         and type(run.get("check_suite_id")) is int
         and run["check_suite_id"] > 0
         and run.get("id") == producer["run_id"]
-        and run.get("run_attempt") == producer["run_attempt"]
+        and (
+            run.get("run_attempt") == producer["run_attempt"]
+            or (
+                retained_verified is True
+                and type(producer.get("run_attempt")) is int
+                and 0 < producer["run_attempt"] < run["run_attempt"]
+            )
+        )
         and run.get("head_sha") == producer["commit"]
         and run.get("path") == producer["workflow"]
         and run.get("repository", {}).get("id") == producer["repository_id"]
@@ -588,6 +596,7 @@ def verify(
     artifact_name,
     upload_step,
     now=None,
+    retained_verified=False,
 ):
     """Authenticate an original execution; callers retain authority and fresh gates."""
     require(
@@ -665,6 +674,7 @@ def verify(
         allowed_events=allowed_events,
         artifact_name=artifact_name,
         upload_step=upload_step,
+        retained_verified=retained_verified,
     )
     return {
         "source": copy.deepcopy(current["source"]),

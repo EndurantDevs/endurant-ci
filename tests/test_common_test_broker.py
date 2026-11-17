@@ -136,6 +136,11 @@ class CommonTestBrokerIntegrationTests(unittest.TestCase):
             "name": "Complete unit tests",
             "status": "completed",
             "conclusion": "success",
+            "started_at": now,
+            "completed_at": now,
+            "labels": ["ubuntu-latest"],
+            "runner_id": 10,
+            "runner_name": "runner-example",
             "check_run_url": "https://api.github.com/repos/example/project/check-runs/31",
             "steps": [
                 {
@@ -268,6 +273,7 @@ class CommonTestBrokerIntegrationTests(unittest.TestCase):
         os.environ.update(
             GITHUB_RUN_ID="21", GITHUB_RUN_ATTEMPT="2", GITHUB_SHA=self.current_sha
         )
+        self.original_run_jobs = None
         self.api_calls = []
 
     def git(self, *arguments):
@@ -321,6 +327,14 @@ class CommonTestBrokerIntegrationTests(unittest.TestCase):
                 mode, kind, sha = metadata.split()
                 entries.append({"path": name, "mode": mode, "type": kind, "sha": sha})
             return {"sha": self.tree, "truncated": False, "tree": entries}
+        if (
+            path == "actions/runs/20/jobs?filter=all&per_page=50&page=1"
+            and self.original_run_jobs is not None
+        ):
+            return {
+                "jobs": copy.deepcopy(self.original_run_jobs),
+                "total_count": len(self.original_run_jobs),
+            }
         self.assertIn(path, responses, "Unexpected read-only evidence path")
         return copy.deepcopy(responses[path])
 
@@ -651,6 +665,7 @@ class CommonTestBrokerIntegrationTests(unittest.TestCase):
                 [common.CONTENT_SCOPE],
                 [common.PYTEST_CONTENT_SCOPE],
                 ["unit/full", common.CONTENT_SCOPE],
+                ["healthcare-python-main-0"],
                 ["same-tree-unit-0"],
             )
         ):
@@ -1007,6 +1022,48 @@ class CommonTestBrokerIntegrationTests(unittest.TestCase):
                 )
             self.assertIn("Full common-test execution required:", output.getvalue())
             self.assertFalse((directory / "evidence.json").exists())
+
+    def test_retained_unchanged_original_job_from_earlier_attempt_is_reused_offline(
+        self,
+    ):
+        self.original_run["run_attempt"] = 2
+        self.original_run_jobs = [
+            copy.deepcopy(self.original_job),
+            {
+                **copy.deepcopy(self.original_job),
+                "id": 39,
+                "run_attempt": 2,
+                "steps": [],
+            },
+        ]
+        document, download = self.prepare()
+        self.assertIn("50", document["archives"])
+        download.assert_called_once_with("example/project", 50)
+        self.consume()
+        self.assertEqual((self.source / "count").read_text(), "1")
+        record = json.loads(
+            (self.measurements / self.key / "measurement.json").read_bytes()
+        )
+        self.assertFalse(record["measurement"]["executed"])
+        self.assertEqual(record["origin"]["origin"]["producer"]["run_attempt"], 1)
+
+    def test_superseded_original_job_in_retried_run_is_skipped_by_broker(self):
+        self.original_run["run_attempt"] = 2
+        self.original_run_jobs = [
+            copy.deepcopy(self.original_job),
+            {
+                **copy.deepcopy(self.original_job),
+                "id": 39,
+                "run_attempt": 2,
+                "conclusion": "failure",
+            },
+        ]
+        document, download = self.prepare()
+        self.assertEqual(document["archives"], {})
+        download.assert_not_called()
+        (self.source / "count").write_text("1")
+        self.consume()
+        self.assert_stock()
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 """Exercise authenticated reuse and unchanged stock execution at the command boundary."""
 
+import copy
 import hashlib
 import importlib.util
 import io
@@ -14,7 +15,7 @@ import traceback
 import unittest
 import zipfile
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import Message
 from http.client import IncompleteRead
 from pathlib import Path
@@ -280,6 +281,11 @@ class CommonResultIntegrationTests(unittest.TestCase):
             "name": "Complete unit tests",
             "status": "completed",
             "conclusion": "success",
+            "started_at": now,
+            "completed_at": now,
+            "labels": ["ubuntu-latest"],
+            "runner_id": 10,
+            "runner_name": "runner-example",
             "check_run_url": "https://api.github.com/repos/example/project/check-runs/31",
             "steps": [
                 {
@@ -310,6 +316,7 @@ class CommonResultIntegrationTests(unittest.TestCase):
         }
         self.now = now
         self.archive = None
+        self.run_jobs = None
         self.environment = {
             "GH_TOKEN": "example-read-only-token",
             "GITHUB_REPOSITORY": "example/project",
@@ -351,6 +358,17 @@ class CommonResultIntegrationTests(unittest.TestCase):
             return {"workflow_runs": [self.run] if self.archive else []}
         if path == "actions/runs/20":
             return self.run
+        if path == "actions/runs/20/jobs?filter=all&per_page=50&page=1":
+            if self.run_jobs is not None:
+                return {"jobs": self.run_jobs, "total_count": len(self.run_jobs)}
+            if self.run.get("run_attempt", 1) > 1:
+                superseded = {
+                    **copy.deepcopy(self.job),
+                    "id": 39,
+                    "run_attempt": self.run["run_attempt"],
+                    "conclusion": "failure",
+                }
+                return {"jobs": [self.job, superseded], "total_count": 2}
         if path == "actions/runs/20/artifacts?per_page=100":
             return {
                 "artifacts": [
@@ -933,10 +951,143 @@ class CommonResultIntegrationTests(unittest.TestCase):
             self.assertEqual(refreshed["artifact_id"], 50)
             self.run["run_attempt"] = 2
             read.job_read = read.check_read = False
+            self.run_jobs = [
+                self.job,
+                {
+                    **copy.deepcopy(self.job),
+                    "id": 39,
+                    "run_attempt": 2,
+                    "steps": [],
+                },
+            ]
+            refreshed = common.refresh_document(
+                document, artifact, "a" * 64, current_run, "example/project"
+            )
+            self.assertEqual(refreshed["source"]["commit"], self.source_sha)
+            self.assertEqual(refreshed["artifact_id"], 50)
+            self.run_jobs = None
+            read.job_read = read.check_read = False
             with self.assertRaises(ValueError):
                 common.refresh_document(
                     document, artifact, "a" * 64, current_run, "example/project"
                 )
+
+    def test_retained_unchanged_original_in_retried_run_reuses_attempt_artifact(self):
+        self.original_execution()
+        self.run["run_attempt"] = 2
+        self.run_jobs = [
+            self.job,
+            {
+                **copy.deepcopy(self.job),
+                "id": 39,
+                "run_attempt": 2,
+                "steps": [],
+            },
+        ]
+        (self.root / "count").unlink()
+        (self.root / "report.json").unlink()
+        self.assertEqual(common.execute_isolated(self.arguments, read=self.read), 0)
+        self.assertEqual((self.root / "count").read_text(), "1")
+        receipt = json.loads(
+            next(self.directory.glob("*/measurement.json")).read_text()
+        )
+        self.assertFalse(receipt["measurement"]["executed"])
+        self.assertEqual(receipt["origin"]["origin"]["producer"]["run_attempt"], 1)
+
+    def test_superseded_attempt_archive_before_current_attempt_archive_is_skipped(
+        self,
+    ):
+        self.original_execution()
+        first_archive = self.archive
+        first_artifact = {
+            "id": 50,
+            "name": "common-tests-20-1-30",
+            "expired": False,
+            "digest": "sha256:" + hashlib.sha256(first_archive).hexdigest(),
+            "created_at": self.now,
+            "workflow_run": {"id": 20, "head_sha": self.run["head_sha"]},
+        }
+        for path in list(self.directory.glob("*")):
+            shutil.rmtree(path) if path.is_dir() else path.unlink()
+        (self.root / "count").unlink()
+        (self.root / "report.json").unlink()
+        later = (datetime.fromisoformat(self.now) + timedelta(seconds=10)).isoformat()
+        second_run = {**copy.deepcopy(self.run), "run_attempt": 2}
+        second_producer = {
+            **copy.deepcopy(self.producer),
+            "run_attempt": 2,
+            "job_id": 39,
+        }
+        second_job = {
+            **copy.deepcopy(self.job),
+            "id": 39,
+            "run_attempt": 2,
+            "started_at": later,
+            "completed_at": later,
+            "check_run_url": "https://api.github.com/repos/example/project/check-runs/41",
+        }
+        second_check = {
+            **copy.deepcopy(self.check),
+            "id": 41,
+            "details_url": "https://github.com/example/project/actions/runs/20/job/39",
+        }
+        self.current_producer.return_value = (second_producer, second_run)
+        self.assertEqual(
+            common.execute_isolated(
+                self.arguments, read=self.read, choose=lambda *_: (None, None)
+            ),
+            0,
+        )
+        second_output = io.BytesIO()
+        with zipfile.ZipFile(second_output, "w") as archive:
+            for path in self.directory.rglob("*"):
+                if path.is_file():
+                    archive.writestr(
+                        path.relative_to(self.directory).as_posix(), path.read_bytes()
+                    )
+        second_archive = second_output.getvalue()
+        second_artifact = {
+            "id": 51,
+            "name": "common-tests-20-2-39",
+            "expired": False,
+            "digest": "sha256:" + hashlib.sha256(second_archive).hexdigest(),
+            "created_at": self.now,
+            "workflow_run": {"id": 20, "head_sha": self.run["head_sha"]},
+        }
+        self.run["run_attempt"] = 2
+        self.run_jobs = [copy.deepcopy(self.job), second_job]
+        self.current_producer.return_value = (
+            {**self.producer, "run_id": 21, "run_attempt": 1, "job_id": 32},
+            self.run,
+        )
+        original_read = self.read
+
+        def read(repository, path):
+            if path == "actions/runs/20/artifacts?per_page=100":
+                return {"artifacts": [first_artifact, second_artifact]}
+            if path == "actions/jobs/39":
+                return second_job
+            if path == "check-runs/41":
+                return second_check
+            return original_read(repository, path)
+
+        def download(_repository, identifier):
+            return first_archive if identifier == 50 else second_archive
+
+        (self.root / "count").unlink()
+        (self.root / "report.json").unlink()
+        with (
+            patch.object(common, "api", side_effect=read),
+            patch.object(common, "download", side_effect=download),
+        ):
+            self.assertEqual(common.execute_isolated(self.arguments, read=read), 0)
+        self.assertEqual((self.root / "count").read_text(), "1")
+        receipt = json.loads(
+            next(self.directory.glob("*/measurement.json")).read_text()
+        )
+        self.assertFalse(receipt["measurement"]["executed"])
+        self.assertEqual(receipt["origin"]["artifact_id"], 51)
+        self.assertEqual(receipt["origin"]["origin"]["producer"]["run_attempt"], 2)
 
     def test_actual_toolchain_paths_are_bound_to_declared_execution_roles(self):
         self.arguments.toolchain_command = [

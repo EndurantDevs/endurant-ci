@@ -498,8 +498,173 @@ def artifacts(repository, run_id):
     raise ValueError("Immutable artifact inventory exceeds its bounded window")
 
 
+ARTIFACT_NAME = re.compile(r"common-tests-([1-9][0-9]*)-([1-9][0-9]*)-([1-9][0-9]*)\Z")
+EXECUTION_FIELDS = (
+    "run_id",
+    "head_sha",
+    "status",
+    "conclusion",
+    "labels",
+    "started_at",
+    "completed_at",
+    "runner_id",
+    "runner_name",
+)
+
+
 def artifact_name(producer):
     return f"common-tests-{producer['run_id']}-{producer['run_attempt']}-{producer['job_id']}"
+
+
+def original_execution(records):
+    """Resolve retained copies to the execution that uploaded the immutable artifact."""
+    latest = records[-1]
+    if len(records) == 1:
+        return latest
+    window = latest.get("started_at"), latest.get("completed_at")
+    equivalent.require(
+        all(isinstance(value, str) and value for value in window),
+        "Retained execution window is missing",
+    )
+    start, end = (
+        datetime.fromisoformat(value.replace("Z", "+00:00")) for value in window
+    )
+    equivalent.require(
+        start.tzinfo is not None and end.tzinfo is not None and start <= end,
+        "Retained execution window is invalid",
+    )
+    original = next(
+        job
+        for job in records
+        if (job.get("started_at"), job.get("completed_at")) == window
+    )
+    for job in records:
+        if job["run_attempt"] >= original["run_attempt"]:
+            equivalent.require(
+                all(
+                    field in job and field in original and job[field] == original[field]
+                    for field in EXECUTION_FIELDS
+                )
+                and (
+                    job.get("steps") == original.get("steps")
+                    or job.get("steps") == []
+                    and job["run_attempt"] > original["run_attempt"]
+                ),
+                "Retained job differs from its original execution",
+            )
+    return original
+
+
+def selected_producer_jobs(run, repository):
+    """Select original execution records keyed by producer job identifier."""
+    groups, identifiers, names = {}, set(), set()
+    page_size = 50
+    total = None
+    for page in range(1, 21):
+        document = api(
+            repository,
+            f"actions/runs/{run['id']}/jobs?filter=all&per_page={page_size}&page={page}",
+        )
+        rows = document.get("jobs") if isinstance(document, dict) else None
+        count = document.get("total_count") if isinstance(document, dict) else None
+        equivalent.require(
+            isinstance(rows, list)
+            and len(rows) <= page_size
+            and all(isinstance(job, dict) for job in rows)
+            and type(count) is int
+            and 0 <= count < 1000
+            and (total is None or count == total),
+            "Current native job inventory has invalid or changing metadata or exceeds its bounded window",
+        )
+        total = count
+        collected = len(identifiers) + len(rows)
+        equivalent.require(
+            collected <= total and (len(rows) == page_size or collected == total),
+            "Current native job inventory is incomplete or exceeds its declared count",
+        )
+        for job in rows:
+            equivalent.require(
+                type(job.get("id")) is int
+                and job["id"] > 0
+                and job["id"] not in identifiers
+                and job.get("run_id") == run["id"]
+                and type(job.get("run_attempt")) is int
+                and 0 < job["run_attempt"] <= run["run_attempt"]
+                and job.get("head_sha") == run["head_sha"]
+                and isinstance(job.get("name"), str)
+                and job["name"]
+                and isinstance(job.get("steps"), list)
+                and all(isinstance(step, dict) for step in job["steps"]),
+                "Current native job identity is invalid or duplicated",
+            )
+            identifiers.add(job["id"])
+            identity = job["name"], job["run_attempt"]
+            equivalent.require(
+                identity not in names,
+                "Current native job name/attempt is ambiguous",
+            )
+            names.add(identity)
+            groups.setdefault(job["name"], []).append(job)
+        if len(rows) < page_size:
+            break
+    else:
+        raise ValueError("Current native job inventory exceeds its bounded window")
+    selected = {}
+    for records in groups.values():
+        records.sort(key=lambda job: job["run_attempt"])
+        latest = records[-1]
+        if latest.get("status") != "completed" or latest.get("conclusion") != "success":
+            continue
+        job = original_execution(records)
+        if any(
+            step.get("name") == UPLOAD_STEP
+            and step.get("status") == "completed"
+            and step.get("conclusion") == "success"
+            for step in job.get("steps", [])
+        ):
+            selected[job["id"]] = job
+    return selected
+
+
+def selected_producers(run, repository):
+    """Select original executions without reviving a superseded failed job."""
+    return {
+        job_id: job["run_attempt"]
+        for job_id, job in selected_producer_jobs(run, repository).items()
+    }
+
+
+def selected_original_job(repository, run, name, artifact_list):
+    """Resolve the original native producer job for an attempt, including retained jobs."""
+    if run.get("run_attempt") == 1:
+        jobs = attempt_jobs(repository, run)
+        matches = [item for item in jobs if item.get("name") == name]
+        equivalent.require(len(matches) == 1, "Original complete job inventory changed")
+        return matches[0]
+    if any(
+        str(item.get("name", "")).startswith(
+            f"common-tests-{run['id']}-{run['run_attempt']}-"
+        )
+        and item.get("expired") is False
+        for item in artifact_list
+    ):
+        jobs = attempt_jobs(repository, run)
+        matches = [item for item in jobs if item.get("name") == name]
+        equivalent.require(len(matches) <= 1, "Original complete job inventory changed")
+        if len(matches) == 1 and any(
+            item.get("name")
+            == f"common-tests-{run['id']}-{run['run_attempt']}-{matches[0]['id']}"
+            and item.get("expired") is False
+            for item in artifact_list
+        ):
+            return matches[0]
+    matches = [
+        item
+        for item in selected_producer_jobs(run, repository).values()
+        if item["name"] == name
+    ]
+    equivalent.require(len(matches) == 1, "Original complete job measurement is absent")
+    return matches[0]
 
 
 def attempt_jobs(repository, run):
@@ -1056,6 +1221,21 @@ def verify_original(current, original, run, artifact, data, repository):
         identity["tree"],
         api,
     )
+    retained_verified = False
+    if original["producer"]["run_attempt"] != run.get("run_attempt"):
+        equivalent.require(
+            type(original["producer"]["run_attempt"]) is int
+            and type(run.get("run_attempt")) is int
+            and 0 < original["producer"]["run_attempt"] < run["run_attempt"],
+            "Original native run attempt is invalid for the current workflow attempt",
+        )
+        selected = selected_producers(run, repository)
+        equivalent.require(
+            selected.get(original["producer"]["job_id"])
+            == original["producer"]["run_attempt"],
+            "Original native job was superseded or not selected in the latest attempt",
+        )
+        retained_verified = True
     proof = equivalent.verify(
         current,
         original,
@@ -1068,6 +1248,7 @@ def verify_original(current, original, run, artifact, data, repository):
         allowed_events=producer_events(original),
         artifact_name=artifact_name(original["producer"]),
         upload_step=UPLOAD_STEP,
+        retained_verified=retained_verified,
     )
     latest = api(repository, f"actions/runs/{run['id']}")
     equivalent.require(
@@ -1212,9 +1393,8 @@ def select(current, repository, key, arguments):
                 continue
             inventory = artifacts(repository, run["id"])
             for artifact in inventory:
-                if not str(artifact.get("name", "")).startswith(
-                    f"common-tests-{run['id']}-{run['run_attempt']}-"
-                ):
+                match = ARTIFACT_NAME.fullmatch(str(artifact.get("name", "")))
+                if match is None or int(match[1]) != run["id"]:
                     continue
                 try:
                     data = download(repository, artifact["id"])
@@ -1249,9 +1429,14 @@ def select(current, repository, key, arguments):
                 # For a centralized caller this read is supplied by the trusted
                 # source-authority adapter, never by an artifact's source claim.
                 source_authorized(current, original, run, arguments)
-                proof = verify_original(
-                    current, original, run, artifact, data, repository
-                )
+                try:
+                    proof = verify_original(
+                        current, original, run, artifact, data, repository
+                    )
+                except ValueError:
+                    # Earlier attempts in the same run leave older archives whose job
+                    # was superseded; keep scanning the remaining artifacts in this run.
+                    continue
                 return proof, raw
         except (
             HTTPException,
