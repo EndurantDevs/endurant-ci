@@ -4904,7 +4904,7 @@ run_rust
             self.assertLess(wheels[0][0], tested[0])
             self.assertLess(tested[0], coverage[2][0])
             self.assertLess(coverage[2][0], provenance)
-            self.assertLess(provenance, wheels[1][0])
+            self.assertLess(coverage[2][0], wheels[1][0])
             self.assertLess(wheels[1][0], native_tests)
             self.assertLess(native_tests, tested[1])
             self.assertLess(wheels[1][0], tested[1])

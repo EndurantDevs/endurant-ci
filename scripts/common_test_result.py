@@ -50,7 +50,9 @@ NATIVE_EVENTS = frozenset({"push", "pull_request", "workflow_dispatch"})
 # An enrolled scope may reuse an execution of the same commit that GitHub started under
 # another event or ref, such as the merge-queue run of a commit that was then pushed.
 SAME_COMMIT_PROFILE = "same-commit-v1"
-SAME_COMMIT_SCOPES = re.compile(r"healthcare-(?:python-main-[0-5]|capacity)\Z")
+SAME_COMMIT_SCOPES = re.compile(
+    r"healthcare-(?:python-main-[0-5]|capacity|api-contract|worker-queue|rust-scanner|postgres-[a-z0-9-]+)\Z"
+)
 # Its command never sees the labels a workflow starts under, so they cannot change a result.
 # The event commit is one of them: for a pull request it names GitHub's merge commit, which
 # moves with the base branch, not the commit that is checked out and tested.

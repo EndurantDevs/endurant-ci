@@ -303,11 +303,19 @@ jobs:
       artifact_id: ${{ steps.coverage-artifact.outputs.artifact-id }}
   api-contract:
     name: API contract
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+      checks: read
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs:
     - python-quality
     - readability-preflight
+    env:
+      COMMON_TEST_EQUIVALENCE: 'true'
+      COMMON_TEST_STEP: 'Run complete validation stage'
     defaults:
       run:
         shell: bash
@@ -322,6 +330,11 @@ jobs:
         persist-credentials: false
     - name: Prepare source and toolchain
       uses: ./ci/scripts/healthcare/setup
+    - name: Prepare read-only common-test evidence
+      env:
+        GH_TOKEN: ${{ github.token }}
+      working-directory: ${{ github.workspace }}
+      run: python3 "$CI_ROOT/scripts/common_test_broker.py" --source-root "$SOURCE_ROOT" --source-repository "$SOURCE_REPOSITORY" --step "$COMMON_TEST_STEP" --directory "$RUNNER_TEMP/common-test-evidence"
     - name: Run complete validation stage
       run: 'bash "$CI_ROOT/scripts/healthcare/check" api-contract
 
@@ -330,13 +343,29 @@ jobs:
         git diff --cached --exit-code
 
         test -z "$(git ls-files --others --exclude-standard)"'
+    - name: Upload verified common-test measurements
+      if: success() && env.COMMON_TEST_ARTIFACT_NAME != ''
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: ${{ env.COMMON_TEST_ARTIFACT_NAME }}
+        path: ${{ runner.temp }}/common-test-measurements
+        if-no-files-found: error
+        retention-days: 1
   rust-scanner:
     name: Rust tests
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+      checks: read
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs:
     - python-quality
     - readability-preflight
+    env:
+      COMMON_TEST_EQUIVALENCE: 'true'
+      COMMON_TEST_STEP: 'Run complete validation stage'
     defaults:
       run:
         shell: bash
@@ -359,6 +388,11 @@ jobs:
         tools_directory="$RUNNER_TEMP/healthcare-rust-tools"
         python "$CI_ROOT/scripts/healthcare/install_rust_tools.py" "$tools_directory"
         printf '%s\n' "$tools_directory" >> "$GITHUB_PATH"
+    - name: Prepare read-only common-test evidence
+      env:
+        GH_TOKEN: ${{ github.token }}
+      working-directory: ${{ github.workspace }}
+      run: python3 "$CI_ROOT/scripts/common_test_broker.py" --source-root "$SOURCE_ROOT" --source-repository "$SOURCE_REPOSITORY" --step "$COMMON_TEST_STEP" --directory "$RUNNER_TEMP/common-test-evidence"
     - name: Run complete validation stage
       run: 'bash "$CI_ROOT/scripts/healthcare/check" rust
 
@@ -375,6 +409,14 @@ jobs:
         if-no-files-found: error
         retention-days: 1
       id: coverage-artifact
+    - name: Upload verified common-test measurements
+      if: success() && env.COMMON_TEST_ARTIFACT_NAME != ''
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: ${{ env.COMMON_TEST_ARTIFACT_NAME }}
+        path: ${{ runner.temp }}/common-test-measurements
+        if-no-files-found: error
+        retention-days: 1
     outputs:
       artifact_id: ${{ steps.coverage-artifact.outputs.artifact-id }}
   container-package:
@@ -452,6 +494,11 @@ jobs:
         test -z "$(git ls-files --others --exclude-standard)"'
   worker-queue-smoke:
     name: Worker queue tests
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+      checks: read
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs:
@@ -463,6 +510,9 @@ jobs:
         ports:
         - 6379:6379
         options: --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      COMMON_TEST_EQUIVALENCE: 'true'
+      COMMON_TEST_STEP: 'Run complete validation stage'
     defaults:
       run:
         shell: bash
@@ -477,6 +527,11 @@ jobs:
         persist-credentials: false
     - name: Prepare source and toolchain
       uses: ./ci/scripts/healthcare/setup
+    - name: Prepare read-only common-test evidence
+      env:
+        GH_TOKEN: ${{ github.token }}
+      working-directory: ${{ github.workspace }}
+      run: python3 "$CI_ROOT/scripts/common_test_broker.py" --source-root "$SOURCE_ROOT" --source-repository "$SOURCE_REPOSITORY" --step "$COMMON_TEST_STEP" --directory "$RUNNER_TEMP/common-test-evidence"
     - name: Run complete validation stage
       env:
         HLTHPRT_REDIS_ADDRESS: redis://127.0.0.1:6379
@@ -487,8 +542,21 @@ jobs:
         git diff --cached --exit-code
 
         test -z "$(git ls-files --others --exclude-standard)"'
+    - name: Upload verified common-test measurements
+      if: success() && env.COMMON_TEST_ARTIFACT_NAME != ''
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: ${{ env.COMMON_TEST_ARTIFACT_NAME }}
+        path: ${{ runner.temp }}/common-test-measurements
+        if-no-files-found: error
+        retention-days: 1
   address-canonical-db-tests:
     name: ${{ matrix.label }}
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+      checks: read
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.shard == 'cms-successor' && 30 || 20 }}
     needs:
@@ -506,6 +574,8 @@ jobs:
         options: --health-cmd "pg_isready -U postgres -d ptg2_v3_lifecycle_test_ci_runner" --health-interval 2s --health-timeout
           5s --health-retries 25
     env:
+      COMMON_TEST_EQUIVALENCE: 'true'
+      COMMON_TEST_STEP: 'Run complete validation stage'
       PYTEST_ADDOPTS: --cov-config=test-coverage.ini --cov=api --cov=db --cov=process --cov=public_evidence --cov=service
         --cov=main --cov-branch --cov-report= --cov-append
       HLTHPRT_DB_DRIVER: asyncpg
@@ -564,10 +634,16 @@ jobs:
         artifact-ids: ${{ needs.public-hygiene.outputs.rust_artifact_id || 'missing' }}
         digest-mismatch: error
         path: rust-debug-binaries
+    - name: Prepare read-only common-test evidence
+      env:
+        GH_TOKEN: ${{ github.token }}
+      working-directory: ${{ github.workspace }}
+      run: python3 "$CI_ROOT/scripts/common_test_broker.py" --source-root "$SOURCE_ROOT" --source-repository "$SOURCE_REPOSITORY" --step "$COMMON_TEST_STEP" --directory "$RUNNER_TEMP/common-test-evidence"
     - name: Run complete validation stage
       env:
         HLTHPRT_DB_HOST: 127.0.0.1
         CI_POSTGRES_SERVICE_ID: ${{ job.services.postgres.id }}
+        COMMON_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
         CI_RUST_BINARIES: ${{ github.workspace }}/rust-debug-binaries
       run: 'bash "$CI_ROOT/scripts/healthcare/check" postgres "$CI_SHARD"
 
@@ -595,6 +671,14 @@ jobs:
       run: '[[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
 
         printf ''%s=%s\n'' "$ARTIFACT_OUTPUT" "$ARTIFACT_ID" >> "$GITHUB_OUTPUT"'
+    - name: Upload verified common-test measurements
+      if: success() && env.COMMON_TEST_ARTIFACT_NAME != ''
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: ${{ env.COMMON_TEST_ARTIFACT_NAME }}
+        path: ${{ runner.temp }}/common-test-measurements
+        if-no-files-found: error
+        retention-days: 1
     outputs:
       artifact_core_services: ${{ steps.coverage-output.outputs.artifact_core_services }}
       artifact_core_services_2: ${{ steps.coverage-output.outputs.artifact_core_services_2 }}
