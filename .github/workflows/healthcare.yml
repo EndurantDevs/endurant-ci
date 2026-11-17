@@ -659,10 +659,7 @@ jobs:
       artifact_profile_publication: ${{ steps.coverage-output.outputs.artifact_profile_publication }}
       artifact_cms_successor: ${{ steps.coverage-output.outputs.artifact_cms_successor }}
     strategy:
-      # The hosted runner ceiling is 60 jobs and the 11 other jobs of this stage
-      # leave 48 slots. Rows are listed longest-first (dev run 41029194616) so
-      # the cap defers only the shortest lanes instead of arbitrary ones.
-      max-parallel: 48
+      # Keep database lanes listed longest-first when runner capacity queues work.
       fail-fast: false
       matrix:
         include:
