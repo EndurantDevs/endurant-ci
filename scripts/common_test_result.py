@@ -719,8 +719,11 @@ def same_tree(scope):
 
 
 def producer_events(measurement):
-    """Only a same-commit measurement may come from, or originate in, a merge-queue run."""
-    if measurement["inputs"].get("execution_profile") == SAME_COMMIT_PROFILE:
+    """Only enrolled same-commit or same-tree measurements may come from, or originate in, a merge-queue run."""
+    if measurement["inputs"].get("execution_profile") in {
+        SAME_COMMIT_PROFILE,
+        SAME_TREE_PROFILE,
+    }:
         return NATIVE_EVENTS | {"merge_group"}
     return NATIVE_EVENTS
 
@@ -1563,7 +1566,8 @@ def execute_isolated(
                 os.environ["GITHUB_REPOSITORY"],
                 arguments.step,
                 NATIVE_EVENTS | {"merge_group"}
-                if execution is None and same_commit(arguments.scope)
+                if execution is None
+                and (same_commit(arguments.scope) or same_tree(arguments.scope))
                 else NATIVE_EVENTS,
             )
         if arguments.source_authority is not None:
@@ -1586,8 +1590,9 @@ def execute_isolated(
             len(equivalent.encoded(current)) <= 2 * 1024 * 1024,
             "Resolved execution measurement exceeds its bounded envelope",
         )
-        # A merge-queue run only records: with or without a broker it consumes no history.
-        if "merge_group" not in (
+        # A merge-queue run consumes history only under the explicit same-tree profile.
+        # Same-commit and stock/content scopes still record without consuming on merge_group.
+        if same_tree(arguments.scope) or "merge_group" not in (
             os.environ.get("GITHUB_EVENT_NAME"),
             workflow.get("event"),
         ):

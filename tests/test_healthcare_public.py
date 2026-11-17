@@ -2962,8 +2962,8 @@ run_provider_directory_postgres postgresql://synthetic/test registry-19
             (source / "tests").mkdir(parents=True)
             for relative in available_paths:
                 (source / relative).touch()
-            for lane in ("directory-source", "registry-27", "registry-35", "registry-19", "directory-source-2",
-                         "registry-12", "registry-28", "all"):
+            for lane in ("directory-source", "registry-27", "registry-2", "registry-19", "directory-source-2",
+                         "registry-12", "registry-10", "all"):
                 call_log = Path(temporary) / lane
                 script = CHECK_FUNCTIONS + "\nrun_source_routes() {" + body + "}\n" + r'''
 log_call() {
@@ -2987,8 +2987,8 @@ run_source_routes postgresql://synthetic/test "$ROUTE_LANE"
                 self.assertEqual(result.returncode, 0, result.stderr)
                 calls_by_lane[lane] = [line.rstrip("\0").split("\0") for line in call_log.read_text().splitlines()]
         first, second = (calls_by_lane[lane] for lane in ("directory-source", "directory-source-2"))
-        admission, candidates, rooted_graph = (calls_by_lane[lane] for lane in ("registry-19", "registry-12", "registry-28"))
-        retirement = calls_by_lane["registry-27"] + calls_by_lane["registry-35"]
+        admission, candidates, rooted_graph = (calls_by_lane[lane] for lane in ("registry-19", "registry-12", "registry-10"))
+        retirement = calls_by_lane["registry-27"] + calls_by_lane["registry-2"]
         self.assertEqual((len(first), len(second), len(retirement)), (3, 4, 2))
         self.assertEqual([len(admission), len(candidates), len(rooted_graph)], [1, 1, 1])
         shards = first[:1] + retirement + first[1:] + admission + candidates + second[:2] + rooted_graph + second[2:]
@@ -4681,6 +4681,31 @@ RUNTIME_BASE_IMAGE=synthetic
                     labels = [args[index + 1] for index, value in enumerate(args) if value == "--label"]
                     self.assertEqual(labels, ["org.endurantdevs.public-ci.repository=" + repository,
                                               "org.endurantdevs.public-ci.run=123-2"] if export == "1" else [])
+                    if kind == "healthcare":
+                        cache_dir = Path(temporary) / "buildx-cache"
+                        for write in ("0", "1"):
+                            for seeded in (False, True):
+                                with self.subTest(kind=kind, export=export, cache_write=write, seeded=seeded):
+                                    shutil.rmtree(cache_dir, ignore_errors=True)
+                                    if seeded:
+                                        cache_dir.mkdir(parents=True)
+                                        (cache_dir / "index.json").write_text("{}")
+                                    cache_env = {**environment, "PUBLIC_CI_BUILDX_CACHE": "1",
+                                                 "PUBLIC_CI_BUILDX_CACHE_DIR": str(cache_dir),
+                                                 "PUBLIC_CI_BUILDX_CACHE_WRITE": write}
+                                    res = subprocess.run(["bash", "-euc", script], env=cache_env,
+                                                         capture_output=True, text=True)
+                                    self.assertEqual(res.returncode, 17, res.stderr)
+                                    c_args = output.read_bytes().decode().rstrip("\0").split("\0")
+                                    self.assertEqual(c_args[:2], ["buildx", "build"])
+                                    self.assertIn("--load", c_args)
+                                    self.assertEqual(f"--cache-from=type=local,src={cache_dir}" in c_args, seeded)
+                                    expected_dest = f"{cache_dir}.next.123-2"
+                                    self.assertEqual(
+                                        f"--cache-to=type=local,dest={expected_dest},mode=max" in c_args,
+                                        write == "1",
+                                    )
+                                    self.assertFalse(Path(expected_dest).exists())
 
     def test_matrix_artifact_outputs_are_unique_and_reject_missing_or_multiline_ids(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
@@ -6009,14 +6034,14 @@ exit "$status"
                        build_test_paths[:4], operator_test_paths[:4], operator_test_paths[4:],
                        build_test_paths[4:], (installed_test_path, acquisition_test_path), family_test_paths,
                        snapshot_test_paths, rejection_test_paths, bulk_test_paths[:3], bulk_test_paths[3:])
-        groups_by_lane = {"core-imports": test_groups[:2], "registry-46": test_groups[3:4],
+        groups_by_lane = {"core-imports": test_groups[:2], "registry-8": test_groups[3:4],
                           "core-imports-2": test_groups[4:5], "registry-11": test_groups[5:6],
                           "core-services": (), "registry-31": (capture_test_paths,),
-                          "core-snapshots": test_groups[6:7], "registry-41": test_groups[7:8], "registry-37": test_groups[8:9],
+                          "core-snapshots": test_groups[6:7], "registry-41": test_groups[7:8], "registry-9": test_groups[8:9],
                           "registry-4": test_groups[9:10], "core-snapshots-2": test_groups[10:],
                           "core-ptg": (), "all": test_groups, "legacy": test_groups}
         required_by_lane = {"core-imports": (), "core-imports-2": (), "core-services": (), "registry-31": required_test_paths[:1],
-                            "core-snapshots": (), "registry-37": family_test_paths, "core-snapshots-2": (), "core-ptg": (),
+                            "core-snapshots": (), "registry-9": family_test_paths, "core-snapshots-2": (), "core-ptg": (),
                             "all": required_test_paths}
         home_lanes = tuple(lane for lane in groups_by_lane if lane not in ("all", "legacy"))
         historical_tail_paths = (
@@ -6042,17 +6067,17 @@ exit "$status"
                  or any(path in paths for group in groups_by_lane[lane] for path in group)]
         cases += [(lane, test_paths, group[0], "")
                   for lane, groups in groups_by_lane.items() for group in groups]
-        cases += [(lane, test_paths, family_test_paths[1], "") for lane in ("registry-37", "all")]
+        cases += [(lane, test_paths, family_test_paths[1], "") for lane in ("registry-9", "all")]
         cases += [(lane, test_paths, build_test_paths[-1], "") for lane in ("core-snapshots", "all")]
-        cases += [(lane, test_paths, build_test_paths[3], "") for lane in ("registry-46", "all")]
+        cases += [(lane, test_paths, build_test_paths[3], "") for lane in ("registry-8", "all")]
         cases += [(lane, test_paths, acquisition_test_path, "") for lane in ("registry-41", "all")]
         cases += [(lane, tuple(path for path in required if path != missing), "", missing)
                   for lane, required in required_by_lane.items() for missing in required]
-        cases += [("registry-37", tuple(path for path in family_test_paths if path != missing)
+        cases += [("registry-9", tuple(path for path in family_test_paths if path != missing)
                    + build_test_paths[4:], "", missing) for missing in family_test_paths]
         cases += [(lane, (*required_by_lane.get(lane, ()), acquisition_test_path), "", missing)
                   for lane in ("registry-41", "all") for missing in acquisition_dependencies]
-        cases += [(lane, test_paths, "", "") for lane in ("core-imports", "registry-46", "core-imports-2", "registry-11", "core-services", "all", "legacy")]
+        cases += [(lane, test_paths, "", "") for lane in ("core-imports", "registry-8", "core-imports-2", "registry-11", "core-services", "all", "legacy")]
         cases += [("all", required_test_paths, "", "")]
         cases += [(lane, (*required_test_paths, *snapshot_test_paths), "", "") for lane in ("all", "legacy")]
         complete_routes_by_lane = {}
@@ -6182,7 +6207,7 @@ fi
                         expected_route_count = sum(2 if group == list(family_test_paths) else 1 for group in expected_groups)
                         self.assertEqual(len(routes), expected_route_count)
                         if not failure_path and all(path in present_paths for path in test_paths):
-                            complete_counts = {"core-snapshots": 1, "registry-41": 1, "registry-37": 2, "registry-4": 1, "core-snapshots-2": 3}
+                            complete_counts = {"core-snapshots": 1, "registry-41": 1, "registry-9": 2, "registry-4": 1, "core-snapshots-2": 3}
                             if lane in complete_counts:
                                 self.assertEqual(len(routes), complete_counts[lane])
                         databases = [route.split()[0] for route in routes]
@@ -6228,7 +6253,7 @@ fi
                                                               if "\t-m pytest -q " in call
                                                               and call.split("\t", 1)[1].split()[3] in historical_tail_paths]
         imports_2 = complete_routes_by_lane["core-imports-2"]
-        combined = (complete_routes_by_lane["core-imports"] + complete_routes_by_lane["registry-46"]
+        combined = (complete_routes_by_lane["core-imports"] + complete_routes_by_lane["registry-8"]
                     + imports_2[:1] + complete_routes_by_lane["registry-11"] + imports_2[1:])
         self.assertEqual(combined, complete_routes_by_lane["all"])
         self.assertEqual(combined, complete_routes_by_lane["legacy"])

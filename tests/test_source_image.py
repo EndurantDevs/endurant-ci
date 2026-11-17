@@ -1076,6 +1076,24 @@ class NativeArchiveCompatibility(unittest.TestCase):
                 repeated = directory / "restored.tar.gz"
                 repeated.write_bytes(gzip.compress(transfer.command("docker", "image", "save", restored)))
                 self.assertEqual(transfer.archive_identity(repeated, require_provenance=True)[0], config)
+                builder = "compat-container-" + uuid.uuid4().hex
+                transfer.command("docker", "buildx", "create", "--name", builder, "--driver", "docker-container")
+                try:
+                    container_tag = "endurant-ci-transfer:" + uuid.uuid4().hex
+                    owned.add(container_tag)
+                    transfer.command(
+                        "docker", "buildx", "build", "--builder", builder, "--platform", "linux/amd64",
+                        "--attest=type=provenance,mode=max,version=v0.2", "--load", "--tag", container_tag,
+                        str(directory),
+                    )
+                    c_captured = transfer.image_identity(container_tag)["Id"]
+                    owned.add(c_captured)
+                    c_archive = directory / "container-image.tar.gz"
+                    c_archive.write_bytes(gzip.compress(transfer.command("docker", "image", "save", c_captured)))
+                    _, c_identifiers = transfer.archive_identity(c_archive, require_provenance=True)
+                    owned.update(c_identifiers)
+                finally:
+                    subprocess.run(["docker", "buildx", "rm", "--force", builder], check=False)
         finally:
             failed = []
             for image in [tag, *sorted(owned - {tag})]:

@@ -194,6 +194,7 @@ class PublicWorkflowPermissions(unittest.TestCase):
             "worker-queue-smoke",
             "rust-scanner",
             "address-canonical-db-tests",
+            "fhir-catalog-integration",
             "measurement",
         }
         for identifier, job in workflow["jobs"].items():
@@ -276,6 +277,28 @@ class PublicWorkflowPermissions(unittest.TestCase):
         self.assertIn('>> "$GITHUB_PATH"', command)
         self.assertIn("for tool in psql pg_dump pg_restore; do", command)
         self.assertIn('"/usr/lib/postgresql/18/bin/$tool" --version', command)
+
+    def test_container_package_uses_pinned_buildx_local_cache_and_dev_write_gate(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/healthcare.yml").read_text())
+        steps = {step["name"]: step for step in workflow["jobs"]["container-package"]["steps"] if "name" in step}
+        restore = steps["Restore Docker Buildx layer cache"]
+        saver = steps["Save Docker Buildx layer cache"]
+        prepare = steps["Prepare Docker engine for attested export"]
+        buildx = steps["Set up Docker Buildx"]
+        stage = steps["Run complete validation stage"]
+        self.assertEqual(restore["uses"], "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9")
+        self.assertEqual(saver["uses"], "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9")
+        self.assertEqual(restore["with"]["path"], "${{ runner.temp }}/buildx-cache")
+        self.assertEqual(saver["with"]["path"], "${{ runner.temp }}/buildx-cache")
+        self.assertEqual(saver["if"], "success() && github.event_name == 'push' && github.ref == 'refs/heads/dev'")
+        self.assertEqual(prepare["if"], "github.event_name == 'push' && github.ref == 'refs/heads/dev'")
+        self.assertEqual(buildx["uses"], "docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e")
+        self.assertEqual(stage["env"]["PUBLIC_CI_BUILDX_CACHE"], "1")
+        self.assertEqual(stage["env"]["PUBLIC_CI_BUILDX_CACHE_DIR"], "${{ runner.temp }}/buildx-cache")
+        self.assertEqual(
+            stage["env"]["PUBLIC_CI_BUILDX_CACHE_WRITE"],
+            "${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && '1' || '0' }}",
+        )
 
 
 if __name__ == "__main__":

@@ -147,6 +147,9 @@ if "--output-file" in sys.argv:
             ("healthcare-postgres-core-services", "1"),
             ("healthcare-postgres-registry-0", "1"),
             ("same-tree-unit-0", "0"),
+            ("same-tree-healthcare-python-main-0", "0"),
+            ("same-tree-healthcare-rust-scanner", "0"),
+            ("same-tree-healthcare-postgres-fhir-catalog-integration", "0"),
             ("healthcare-python-main-6", str(len(labels))),
             ("healthcare-unit", str(len(labels))),
         ):
@@ -447,7 +450,7 @@ run_capacity
         self.assertIn("--base " + "e" * 40, phases[1])
         arguments = json.loads((self.root / "arguments.json").read_text())
         self.assertEqual(
-            arguments[arguments.index("--scope") + 1], "healthcare-capacity"
+            arguments[arguments.index("--scope") + 1], "same-tree-healthcare-capacity"
         )
         self.assertIn("tests/test_example.py", arguments)
 
@@ -475,6 +478,7 @@ run_capacity
                     "worker-queue-smoke",
                     "rust-scanner",
                     "address-canonical-db-tests",
+                    "fhir-catalog-integration",
                 },
             ),
             ("drug", {"validate"}),
@@ -498,11 +502,16 @@ run_capacity
                             )
                         )
                         self.assertIn(RENDERER.METADATA_ONLY, job["if"])
+                        expected_if = (
+                            "steps.catalog-capability.outputs.present == 'true' && success() && env.COMMON_TEST_ARTIFACT_NAME != ''"
+                            if identifier == "fhir-catalog-integration"
+                            else "success() && env.COMMON_TEST_ARTIFACT_NAME != ''"
+                        )
                         self.assertEqual(
                             uploads[0],
                             {
                                 "name": "Upload verified common-test measurements",
-                                "if": "success() && env.COMMON_TEST_ARTIFACT_NAME != ''",
+                                "if": expected_if,
                                 "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
                                 "with": {
                                     "name": "${{ env.COMMON_TEST_ARTIFACT_NAME }}",
@@ -512,10 +521,31 @@ run_capacity
                                 },
                             },
                         )
-                caller.write_text(rendered)
-                self.assertEqual(
-                    RENDERER.render_workflow(kind, "1" * 40, caller), rendered
+
+    def test_same_tree_healthcare_scopes_resolve_healthcare_recipe_and_tool_probes(
+        self,
+    ):
+        for scope, expected_tool in (
+            ("same-tree-healthcare-rust-scanner", "cargo"),
+            ("same-tree-healthcare-postgres-fhir-catalog-integration", "postgres"),
+        ):
+            with self.subTest(scope=scope):
+                result = self.shell(
+                    f"public_common_test_run {scope} - python -m pytest -q tests/test_example.py"
                 )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                arguments = json.loads((self.root / "arguments.json").read_text())
+                self.assertEqual(arguments[arguments.index("--scope") + 1], scope)
+                self.assertEqual(
+                    arguments[arguments.index("--recipe-file") + 1],
+                    ".github/workflows/healthcare.yml",
+                )
+                tools = {
+                    arguments[index + 1]
+                    for index, value in enumerate(arguments)
+                    if value == "--toolchain-command"
+                }
+                self.assertIn(expected_tool, tools)
 
 
 if __name__ == "__main__":

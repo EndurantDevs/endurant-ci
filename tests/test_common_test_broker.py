@@ -1047,6 +1047,145 @@ class CommonTestBrokerIntegrationTests(unittest.TestCase):
         self.assertFalse(record["measurement"]["executed"])
         self.assertEqual(record["origin"]["origin"]["producer"]["run_attempt"], 1)
 
+    def test_merge_queue_same_tree_scope_discovers_pr_history_and_skips_mismatched_trees(
+        self,
+    ):
+        self.arguments.scope = "same-tree-unit-0"
+        self.original_run["event"] = "pull_request"
+        self.current_run["event"] = "merge_group"
+        self.commit("Same-tree merge queue candidate", "--allow-empty")
+        queue_sha = self.git("rev-parse", "HEAD")
+        self.current_run["head_sha"] = queue_sha
+        self.current_job["head_sha"] = queue_sha
+        os.environ["GITHUB_SHA"] = queue_sha
+
+        reused_archive_io = io.BytesIO()
+        with (
+            zipfile.ZipFile(io.BytesIO(self.archive)) as src,
+            zipfile.ZipFile(reused_archive_io, "w") as dst,
+        ):
+            for entry in src.infolist():
+                payload = src.read(entry.filename)
+                if entry.filename.endswith("/measurement.json"):
+                    parsed = json.loads(payload)
+                    parsed["measurement"]["executed"] = False
+                    payload = common.equivalent.encoded(parsed)
+                dst.writestr(entry.filename, payload)
+        reused_bytes = reused_archive_io.getvalue()
+        wrong_tree_run = {
+            **self.original_run,
+            "id": 99,
+            "head_sha": "f" * 40,
+            "head_commit": {"id": "f" * 40, "tree_id": "0" * 40},
+        }
+        reused_runs = [
+            {
+                **self.original_run,
+                "id": 98 - offset,
+                "head_commit": {"id": self.original_sha, "tree_id": self.tree},
+            }
+            for offset in range(7)
+        ]
+        matching_run = {
+            **self.original_run,
+            "head_commit": {"id": self.original_sha, "tree_id": self.tree},
+        }
+        original_read = self.read
+        original_archive = self.archive
+
+        def read_with_noise(repository, path):
+            if path == "actions/workflows/ci.yml/runs?status=success&per_page=30":
+                self.api_calls.append((repository, path))
+                return {"workflow_runs": [wrong_tree_run, *reused_runs, matching_run]}
+            for run in reused_runs:
+                rid = run["id"]
+                if path == f"actions/runs/{rid}":
+                    return copy.deepcopy(run)
+                if path == f"actions/runs/{rid}/attempts/1/jobs?per_page=50":
+                    return {"jobs": [self.original_job], "total_count": 1}
+                if path == f"actions/runs/{rid}/artifacts?per_page=100":
+                    return {
+                        "artifacts": [
+                            {
+                                **self.artifact,
+                                "id": rid * 10,
+                                "name": f"common-tests-{rid}-1-30",
+                                "digest": "sha256:" + hashlib.sha256(reused_bytes).hexdigest(),
+                            }
+                        ]
+                    }
+            return original_read(repository, path)
+
+        self.broker_arguments.scope = ["same-tree-unit-0"]
+        with (
+            patch.object(common, "api", side_effect=read_with_noise),
+            patch.object(
+                common,
+                "download",
+                side_effect=lambda _repo, aid: reused_bytes if aid >= 900 else original_archive,
+            ),
+        ):
+            document = broker.prepare(self.broker_arguments)
+        self.arguments.evidence_directory = self.broker_arguments.directory
+        self.bind_evidence()
+        self.assertIn("50", document["archives"])
+        self.assertIn("980", document["archives"])
+        self.assertNotIn("970", document["archives"])
+        self.assertFalse(
+            any("/runs/99/" in path for _, path in self.api_calls),
+            "Mismatched head_commit.tree_id should skip artifact/job API reads",
+        )
+        # Re-record original with same-tree-unit-0 scope so fingerprints match.
+        (self.source / "count").unlink()
+        self.measurements = self.temporary / "same-tree-measurements"
+        self.arguments.measurements = self.measurements
+        self.arguments.evidence_directory = None
+        self.arguments.evidence_sha256 = None
+        with (
+            patch.dict(os.environ, {"GITHUB_SHA": self.original_sha, "GITHUB_RUN_ID": "20", "GITHUB_RUN_ATTEMPT": "1"}),
+            patch.object(common, "current_producer", return_value=(self.original_producer, self.original_run)),
+            redirect_stdout(io.StringIO()),
+        ):
+            self.git("checkout", "-q", self.original_sha)
+            self.assertEqual(
+                common.execute_isolated(
+                    self.arguments,
+                    read=lambda *_: {"id": 10},
+                    choose=lambda *_: (None, None),
+                ),
+                0,
+            )
+            self.git("checkout", "-q", queue_sha)
+        new_zip = io.BytesIO()
+        with zipfile.ZipFile(new_zip, "w") as dst:
+            for path in self.measurements.rglob("*"):
+                if path.is_file():
+                    dst.writestr(path.relative_to(self.measurements).as_posix(), path.read_bytes())
+        new_bytes = new_zip.getvalue()
+        self.artifact["digest"] = "sha256:" + hashlib.sha256(new_bytes).hexdigest()
+        (self.source / "count").unlink()
+        os.environ["GITHUB_RUN_ID"] = "21"
+        os.environ["GITHUB_RUN_ATTEMPT"] = "2"
+        os.environ["GITHUB_SHA"] = queue_sha
+        self.broker_arguments.directory = self.temporary / "same-tree-evidence"
+        with (
+            patch.object(common, "api", side_effect=read_with_noise),
+            patch.object(
+                common,
+                "download",
+                side_effect=lambda _repo, aid: reused_bytes if aid >= 900 else new_bytes,
+            ),
+        ):
+            broker.prepare(self.broker_arguments)
+        self.arguments.evidence_directory = self.broker_arguments.directory
+        self.bind_evidence()
+        self.key = hashlib.sha256(self.arguments.scope.encode()).hexdigest()
+        self.consume()
+        self.assertEqual((self.source / "count").read_text(), "1")
+        result = json.loads((self.measurements / self.key / "measurement.json").read_bytes())
+        self.assertFalse(result["measurement"]["executed"])
+        self.assertEqual(result["origin"]["origin"]["source"]["commit"], self.original_sha)
+
     def test_superseded_original_job_in_retried_run_is_skipped_by_broker(self):
         self.original_run["run_attempt"] = 2
         self.original_run_jobs = [
