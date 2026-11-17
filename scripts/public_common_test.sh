@@ -28,10 +28,11 @@ public_common_test_run() {
     return
   fi
   local engine_python="${COMMON_TEST_PYTHON_BIN:-${python_bin:-python}}"
+  local recipe_scope="${scope#same-tree-}"
   local -a arguments=(
     --source-root "$SOURCE_ROOT" --source-repository "$source_repository"
     --recipe-root "$CI_ROOT" --recipe-directory scripts
-    --recipe-file ".github/workflows/${scope%%-*}.yml"
+    --recipe-file ".github/workflows/${recipe_scope%%-*}.yml"
     --scope "$scope" --collection tests --step "$COMMON_TEST_STEP"
     --measurements "$RUNNER_TEMP/common-test-measurements"
     --toolchain-command bash '["bash","--version"]'
@@ -66,7 +67,7 @@ public_common_test_run() {
       arguments+=(--runtime-file "support/ptg2_scanner/target/debug/$binary")
     fi
   done
-  if [[ "$scope" == healthcare-rust-scanner ]]; then
+  if [[ "$scope" == healthcare-rust-scanner || "$scope" == same-tree-healthcare-rust-scanner ]]; then
     arguments+=(
       --toolchain-command cargo '["cargo","--version"]'
       --toolchain-command rustc '["rustc","--version"]'
@@ -74,7 +75,7 @@ public_common_test_run() {
       --toolchain-command cargo-audit '["cargo","audit","--version"]'
     )
   fi
-  if [[ "$scope" == *-postgres || "$scope" == healthcare-postgres-* ]]; then
+  if [[ "$scope" == *-postgres || "$scope" == healthcare-postgres-* || "$scope" == same-tree-healthcare-postgres-* ]]; then
     local probe
     probe=$("$engine_python" - <<'PY'
 import json

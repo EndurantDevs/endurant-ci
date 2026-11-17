@@ -296,10 +296,14 @@ class RenderWorkflowChecks(unittest.TestCase):
             # The cache save adds its own hit and staging conditions behind the capability gate.
             if step["name"] == "Save PostgreSQL client packages":
                 self.assertTrue(step["if"].startswith(gate + " && "), step["if"])
+            elif step["name"] == "Upload verified common-test measurements":
+                self.assertEqual(step["if"], f"{gate} && success() && env.COMMON_TEST_ARTIFACT_NAME != ''")
             else:
                 self.assertEqual(step["if"], gate)
-        self.assertIn('postgres "$CI_SHARD"', steps[-2]["run"])
-        self.assertEqual(steps[-1]["with"]["if-no-files-found"], "error")
+        self.assertIn('postgres "$CI_SHARD"', steps[-3]["run"])
+        self.assertEqual(steps[-3]["env"]["COMMON_TEST_POSTGRES_CONTAINER"], "${{ job.services.postgres.id }}")
+        self.assertEqual(steps[-2]["with"]["if-no-files-found"], "error")
+        self.assertEqual(steps[-1]["name"], "Upload verified common-test measurements")
         self.assertIn("fhir-catalog-integration", jobs["measurement"]["needs"])
         measurement = jobs["measurement"]["steps"]
         self.assertIn('all(. == "success")', measurement[0]["run"])

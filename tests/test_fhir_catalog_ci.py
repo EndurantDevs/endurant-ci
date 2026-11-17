@@ -272,6 +272,37 @@ run_postgres fhir-catalog-integration
         self.assertEqual([line for line in result.stdout.splitlines() if not line.startswith("CI_PHASE ")],
                          ["binaries", "service", "migrations", "integration"])
 
+    def test_connected_lane_reuses_common_test_report_and_binds_current_receipt(self):
+        git = self.binary / "git"
+        git.write_text("#!/bin/sh\ncase \"$*\" in *rev-parse*) printf '%s\\n' \"$SOURCE_SHA\";; esac\n")
+        git.chmod(0o755)
+        node = NODEID.split("::")[1]
+        xml_payload = (
+            f'<testsuites><testsuite tests="1">'
+            f'<testcase classname="tests.test_registry_fhir_catalog_end_to_end" name="{node}"/>'
+            f"</testsuite></testsuites>"
+        )
+        (self.root / "restored.xml").write_text(xml_payload)
+        script = """
+fhir_catalog_native_test_paths() { echo tests/test_registry_fhir_catalog_sync_postgres.py; }
+install_address_canon_wheel() { :; }
+public_common_test_run() {
+  printf '%s\\n' "$@" > "$SOURCE_ROOT/common-args"
+  cp "$SOURCE_ROOT/restored.xml" "$2"
+}
+run_fhir_catalog_integration_exec() { return 99; }
+run_fhir_catalog_integration
+"""
+        result = self.shell(script, COMMON_TEST_EQUIVALENCE="true")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        common_args = (self.root / "common-args").read_text().splitlines()
+        self.assertEqual(common_args[0], "same-tree-healthcare-postgres-fhir-catalog-integration")
+        self.assertEqual(common_args[1], str(self.root / "fhir-catalog-integration.xml"))
+        self.assertEqual(common_args[-1], "fhir-catalog-integration-exec")
+        receipt = json.loads((self.root / "fhir-catalog-integration.json").read_text())
+        self.assertEqual(receipt["head_sha"], "b" * 40)
+        self.assertEqual(receipt["nodeid"], NODEID)
+
 
 if __name__ == "__main__":
     unittest.main()

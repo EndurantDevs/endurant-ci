@@ -41,7 +41,8 @@ def prepare(arguments):
     repository = os.environ["GITHUB_REPOSITORY"]
     try:
         common.api = read
-        # A merge-queue run may only record a same-commit original; it consumes no history.
+        # A merge-queue run discovers history only when the caller declares a same-tree scope;
+        # other scopes keep full execution or same-commit recording without history.
         producer, run = common.current_producer(
             repository,
             "Prepare read-only common-test evidence",
@@ -99,10 +100,13 @@ def prepare(arguments):
         workflow = producer["workflow"].rsplit("/", 1)[1]
         query = f"actions/workflows/{workflow}/runs?status=success&per_page=30"
         scopes = getattr(arguments, "scope", [])
+        allow_merge_group_history = bool(scopes) and any(
+            common.same_tree(scope) for scope in scopes
+        )
         # Stock scopes cannot consume reuse evidence; keep their full execution.
         candidates = (
             []
-            if run.get("event") == "merge_group"
+            if (run.get("event") == "merge_group" and not allow_merge_group_history)
             or (
                 scopes
                 and not any(
@@ -115,6 +119,8 @@ def prepare(arguments):
             else read(repository, query)["workflow_runs"]
         )
         usable = []
+        executed_usable = 0
+        non_executed_usable = 0
         for candidate in candidates:
             if candidate["id"] == producer["run_id"]:
                 continue
@@ -122,6 +128,22 @@ def prepare(arguments):
                 item[0] == candidate["id"] for item in allowed
             ):
                 continue
+            if allowed is None:
+                candidate_repository = candidate.get("repository")
+                candidate_repository_id = (
+                    candidate_repository.get("id")
+                    if isinstance(candidate_repository, dict)
+                    else None
+                )
+                head_commit = candidate.get("head_commit")
+                if (
+                    (candidate_repository_id is None or candidate_repository_id == source_id)
+                    and isinstance(head_commit, dict)
+                    and head_commit.get("id") == candidate.get("head_sha")
+                    and isinstance(head_commit.get("tree_id"), str)
+                    and head_commit["tree_id"] != tree
+                ):
+                    continue
             try:
                 artifact_list = common.artifacts(repository, candidate["id"])
                 if not any(
@@ -198,6 +220,11 @@ def prepare(arguments):
                     ),
                     "Original measured source tree differs from the current source",
                 )
+                has_executed = any(
+                    item.get("executed") is True for item in measurements
+                )
+                if not has_executed and non_executed_usable >= 1:
+                    continue
                 original_job = read(repository, f"actions/jobs/{original_job['id']}")
                 check = re.fullmatch(
                     rf"https://api.github.com/repos/{re.escape(repository)}/check-runs/([1-9][0-9]*)",
@@ -228,7 +255,11 @@ def prepare(arguments):
                     "sha256": hashlib.sha256(data).hexdigest(),
                 }
                 usable.append(candidate)
-                if len(usable) == 3:
+                if has_executed:
+                    executed_usable += 1
+                else:
+                    non_executed_usable += 1
+                if executed_usable == 3:
                     break
             except (
                 AttributeError,

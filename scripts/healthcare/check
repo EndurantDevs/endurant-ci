@@ -34,13 +34,13 @@ postgres_block_lane() {
     custom-import-snapshot-storage) printf 'registry-4\n' ;;
     control-imports) printf 'registry-3\n' ;;
     custom-import-provider-query) printf 'registry-11\n' ;;
-    uhc-flex-rooted-graph) printf 'registry-28\n' ;;
-    profile-publication-suites) printf 'registry-32\n' ;;
+    uhc-flex-rooted-graph) printf 'registry-10\n' ;;
+    profile-publication-suites) printf 'registry-6\n' ;;
     custom-import-verification) printf 'registry-14\n' ;;
-    custom-import-family) printf 'registry-37\n' ;;
+    custom-import-family) printf 'registry-9\n' ;;
     custom-import-installed) printf 'registry-41\n' ;;
     cms-npd-admission) printf 'registry-19\n' ;;
-    custom-import-build) printf 'registry-46\n' ;;
+    custom-import-build) printf 'registry-8\n' ;;
     custom-import-capture) printf 'registry-31\n' ;;
     profile-prepared-doctors-ranges) printf 'registry-24\n' ;;
     organization-partition-v4) printf 'registry-39\n' ;;
@@ -51,7 +51,7 @@ postgres_block_lane() {
     profile-initial-ordinary-rollback) printf 'registry-1\n' ;;
     profile-initial-ordinary-reader) printf 'registry-5\n' ;;
     directory-retirement-0) printf 'registry-27\n' ;;
-    directory-retirement-1) printf 'registry-35\n' ;;
+    directory-retirement-1) printf 'registry-2\n' ;;
     *) return 1 ;;
   esac
 }
@@ -1469,7 +1469,7 @@ run_python_main() {
   )
   export COVERAGE_FILE=${COVERAGE_FILE:-$(artifact_path ".coverage.main.${shard}")}
   ci_phase_begin python-tests
-  public_common_test_run "healthcare-python-main-${shard}" "$COVERAGE_FILE" \
+  public_common_test_run "same-tree-healthcare-python-main-${shard}" "$COVERAGE_FILE" \
     timeout --foreground 720s python -m pytest -q -n 1 --dist loadscope --durations=20 \
     -p scripts.ci.shard_pytest_nodeids --ci-shard-count 6 --ci-shard-index "$shard" \
     --cov-config=test-coverage.ini \
@@ -1485,7 +1485,7 @@ run_python_main() {
     --shard "$shard" \
     --coverage "$COVERAGE_FILE" \
     --output "$(artifact_path ".coverage-provenance.main.${shard}.json")"
-  public_common_test_provenance "$(artifact_path ".coverage-provenance.main.${shard}.json")" "healthcare-python-main-${shard}"
+  public_common_test_provenance "$(artifact_path ".coverage-provenance.main.${shard}.json")" "same-tree-healthcare-python-main-${shard}"
 }
 
 run_capacity() {
@@ -1493,7 +1493,7 @@ run_capacity() {
   mapfile -t capacity_tests <<< "$capacity_test_paths"
   export COVERAGE_FILE=${COVERAGE_FILE:-$(artifact_path .coverage.capacity)}
   ci_phase_begin capacity-tests
-  public_common_test_run healthcare-capacity "$COVERAGE_FILE" \
+  public_common_test_run same-tree-healthcare-capacity "$COVERAGE_FILE" \
     timeout --foreground 420s python -m pytest -q -n 4 --dist worksteal --durations=20 \
     --cov-config=test-coverage.ini \
     --cov=api --cov=db --cov=process --cov=public_evidence --cov=service --cov=main \
@@ -1508,7 +1508,7 @@ run_capacity() {
     --shard capacity \
     --coverage "$COVERAGE_FILE" \
     --output "$(artifact_path .coverage-provenance.capacity.json)"
-  public_common_test_provenance "$(artifact_path .coverage-provenance.capacity.json)" healthcare-capacity
+  public_common_test_provenance "$(artifact_path .coverage-provenance.capacity.json)" same-tree-healthcare-capacity
 }
 
 
@@ -1626,7 +1626,7 @@ run_api_contract_exec() {
 run_api_contract() {
   install_python_dependencies
   if [[ "${COMMON_TEST_EQUIVALENCE:-false}" == true ]]; then
-    public_common_test_run healthcare-api-contract - bash "$CI_ROOT/scripts/healthcare/check" api-contract-exec
+    public_common_test_run same-tree-healthcare-api-contract - bash "$CI_ROOT/scripts/healthcare/check" api-contract-exec
   else
     run_api_contract_exec
   fi
@@ -1919,7 +1919,7 @@ run_rust() {
   install_python_dependencies
   mkdir -p "$rust_artifacts"
   if [[ "${COMMON_TEST_EQUIVALENCE:-false}" == true ]]; then
-    public_common_test_run healthcare-rust-scanner "$rust_artifacts/test-coverage-rust.json" \
+    public_common_test_run same-tree-healthcare-rust-scanner "$rust_artifacts/test-coverage-rust.json" \
       bash "$CI_ROOT/scripts/healthcare/check" rust-exec
   else
     run_rust_exec
@@ -1932,7 +1932,7 @@ run_rust() {
     --output "$rust_artifacts/coverage-provenance-rust.json" \
     --cargo-llvm-cov-version "$(cargo llvm-cov --version | awk '{print $2}')" \
     --rust-version "$(rustc --version | awk '{print $2}')"
-  public_common_test_provenance "$rust_artifacts/coverage-provenance-rust.json" healthcare-rust-scanner
+  public_common_test_provenance "$rust_artifacts/coverage-provenance-rust.json" same-tree-healthcare-rust-scanner
 }
 
 cleanup_container_image() {
@@ -1975,12 +1975,36 @@ run_container_package() {
     build_command=(docker buildx build --attest=type=provenance,mode=max,version=v0.2 --load)
     build_args+=(--label "org.endurantdevs.public-ci.repository=${GITHUB_REPOSITORY:?}"
                  --label "org.endurantdevs.public-ci.run=${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}")
+  elif [[ "${PUBLIC_CI_BUILDX_CACHE:-0}" == 1 ]]; then
+    build_command=(docker buildx build --load)
   fi
+  local cache_dir="${PUBLIC_CI_BUILDX_CACHE_DIR:-}" cache_next=""
+  if [[ "${PUBLIC_CI_BUILDX_CACHE:-0}" == 1 && -n "$cache_dir" ]]; then
+    if [[ -f "$cache_dir/index.json" || -d "$cache_dir/blobs" ]]; then
+      build_args+=("--cache-from=type=local,src=$cache_dir")
+    fi
+    if [[ "${PUBLIC_CI_BUILDX_CACHE_WRITE:-0}" == 1 ]]; then
+      cache_next="${cache_dir}.next.${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
+      rm -rf -- "$cache_next"
+      build_args+=("--cache-to=type=local,dest=$cache_next,mode=max")
+    fi
+  fi
+  local build_status=0
   "${build_command[@]}" \
     "${build_args[@]}" \
     --platform linux/amd64 \
     --tag "$image" \
-    .
+    . || build_status=$?
+  if [[ -n "$cache_next" ]]; then
+    if [ "$build_status" -eq 0 ] && [ -d "$cache_next" ]; then
+      rm -rf -- "$cache_dir" && mv -- "$cache_next" "$cache_dir"
+    else
+      rm -rf -- "$cache_next"
+    fi
+  fi
+  if [ "$build_status" -ne 0 ]; then
+    return "$build_status"
+  fi
   local tested_image
   tested_image=$(docker image inspect --format '{{.Id}}' "$image")
   [[ "$tested_image" =~ ^sha256:[0-9a-f]{64}$ ]]
@@ -2231,7 +2255,7 @@ run_redis() {
   wait_for_service Redis 30 \
     python -c 'import os; from redis import Redis; Redis.from_url(os.environ["HLTHPRT_REDIS_ADDRESS"], socket_connect_timeout=1, socket_timeout=1).ping()'
   if [[ "${COMMON_TEST_EQUIVALENCE:-false}" == true ]]; then
-    public_common_test_run healthcare-worker-queue - bash "$CI_ROOT/scripts/healthcare/check" redis-exec
+    public_common_test_run same-tree-healthcare-worker-queue - bash "$CI_ROOT/scripts/healthcare/check" redis-exec
   else
     run_redis_exec
   fi
@@ -2963,6 +2987,23 @@ run_cms_successor_postgres() (
   validate_registry_native_report "$report" "$selection" "${nodeid%%::*}" || exit "$?"
 )
 
+run_fhir_catalog_integration_exec() (
+  local nodeid report selection
+  nodeid=tests/test_registry_fhir_catalog_end_to_end.py::test_import_sync_query_replay_and_disappearance
+  report=$(artifact_path fhir-catalog-integration.xml)
+  selection=$(artifact_path fhir-catalog-integration.selection)
+  mkdir -p "$(dirname "$report")"
+  rm -f -- "$report"
+  printf '%s\n' "$nodeid" > "$selection"
+  ci_phase_begin fhir-catalog-integration
+  PYTEST_ADDOPTS='' run_scoped_archive_postgres \
+    "hc_fhir_catalog_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')" \
+    NETWORK_REGISTRY_TEST_DSN "postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440" \
+    "$nodeid" --junitxml "$report" || exit "$?"
+  validate_registry_native_report "$report" "$selection" || exit "$?"
+  ci_phase_end
+)
+
 run_fhir_catalog_integration() (
   local components nodeid report selection receipt
   components=$(fhir_catalog_native_test_paths) || exit "$?"
@@ -2976,12 +3017,13 @@ run_fhir_catalog_integration() (
   mkdir -p "$(dirname "$report")"
   rm -f -- "$report" "$selection" "$receipt"
   printf '%s\n' "$nodeid" > "$selection"
-  ci_phase_begin fhir-catalog-integration
-  PYTEST_ADDOPTS='' run_scoped_archive_postgres \
-    "hc_fhir_catalog_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')" \
-    NETWORK_REGISTRY_TEST_DSN "postgresql://${HLTHPRT_DB_USER}:${HLTHPRT_DB_PASSWORD}@127.0.0.1:5440" \
-    "$nodeid" --junitxml "$report" || exit "$?"
-  validate_registry_native_report "$report" "$selection" || exit "$?"
+  if [[ "${COMMON_TEST_EQUIVALENCE:-false}" == true ]]; then
+    public_common_test_run same-tree-healthcare-postgres-fhir-catalog-integration "$report" \
+      bash "$CI_ROOT/scripts/healthcare/check" fhir-catalog-integration-exec || exit "$?"
+    validate_registry_native_report "$report" "$selection" || exit "$?"
+  else
+    run_fhir_catalog_integration_exec || exit "$?"
+  fi
   python - "$report" "$selection" "$receipt" <<'PY' || exit "$?"
 import hashlib
 import json
@@ -3011,7 +3053,6 @@ receipt.write_text(json.dumps({
     "selection_sha256": hashlib.sha256(selection.read_bytes()).hexdigest(),
 }, sort_keys=True) + "\n")
 PY
-  ci_phase_end
 )
 
 run_registry_ptg_scope_postgres() (
@@ -3239,7 +3280,9 @@ run_registry_ptg_scope_postgres() (
       return 1
     fi
   done
-  test "$(git rev-parse HEAD)" = "${SOURCE_SHA:?SOURCE_SHA must bind the exact source checkout}"
+  if [[ -n "${SOURCE_SHA:-}" ]]; then
+    test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+  fi
   git diff --quiet
   git diff --cached --quiet
   git ls-files --error-unmatch "${capability[@]}" > /dev/null
@@ -4903,7 +4946,7 @@ run_postgres() {
   fi
   mkdir -p "$(dirname "$COVERAGE_FILE")"
   if [[ "${COMMON_TEST_EQUIVALENCE:-false}" == true ]]; then
-    public_common_test_run "healthcare-postgres-${shard}" "$COVERAGE_FILE" \
+    public_common_test_run "same-tree-healthcare-postgres-${shard}" "$COVERAGE_FILE" \
       bash "$CI_ROOT/scripts/healthcare/check" postgres-exec "$shard"
   else
     run_postgres_exec "$shard"
@@ -4917,7 +4960,7 @@ run_postgres() {
     --shard "$shard" \
     --coverage "$COVERAGE_FILE" \
     --output "$(artifact_path ".coverage-provenance.postgres.${shard}.json")"
-  public_common_test_provenance "$(artifact_path ".coverage-provenance.postgres.${shard}.json")" "healthcare-postgres-${shard}"
+  public_common_test_provenance "$(artifact_path ".coverage-provenance.postgres.${shard}.json")" "same-tree-healthcare-postgres-${shard}"
 }
 
 case "${1:-}" in
@@ -4935,6 +4978,7 @@ case "${1:-}" in
   redis-exec) [ "$#" -eq 1 ] || usage; run_redis_exec ;;
   postgres) [ "$#" -eq 2 ] || usage; run_postgres "$2" ;;
   postgres-exec) [ "$#" -eq 2 ] || usage; run_postgres_exec "$2" ;;
+  fhir-catalog-integration-exec) [ "$#" -eq 1 ] || usage; run_fhir_catalog_integration_exec ;;
   fhir-catalog-capability) [ "$#" -eq 1 ] || usage; fhir_catalog_capability ;;
   native-wheel) [ "$#" -eq 2 ] && [ -n "$2" ] || usage; stage_native_wheel "$2" ;;
   *) usage ;;

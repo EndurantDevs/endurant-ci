@@ -804,6 +804,127 @@ class CommonResultIntegrationTests(unittest.TestCase):
         self.assertFalse(names & set(common.SAME_TREE_HIDDEN))
         self.assertLessEqual({"BASE_SHA", "CI_SHARD"}, names)
 
+    def test_same_tree_scope_reuses_pr_original_in_merge_queue_and_originates_for_push(
+        self,
+    ):
+        self.same_tree_original()
+        head = self.merge_commit("Merge-queue candidate with identical tree")
+        queue_ref = "gh-readonly-queue/dev/pr-7-" + head
+        (self.root / "count").unlink()
+        producer, _run = self.current_producer.return_value
+        queue_run = {**self.run, "id": 21, "event": "merge_group", "head_sha": head}
+        self.current_producer.return_value = (
+            {**producer, "run_id": 21, "commit": head},
+            queue_run,
+        )
+        with patch.dict(
+            os.environ,
+            {
+                **self.base,
+                "GITHUB_EVENT_NAME": "merge_group",
+                "GITHUB_REF": "refs/heads/" + queue_ref,
+                "GITHUB_REF_NAME": queue_ref,
+                "GITHUB_SHA": head,
+                "SOURCE_SHA": head,
+                "PR_NUMBER": "0",
+            },
+        ):
+            self.assertEqual(common.execute(self.arguments, read=self.read), 0)
+        self.assertEqual((self.root / "count").read_text(), "1")
+        receipt = json.loads(
+            next(self.directory.glob("*/measurement.json")).read_text()
+        )
+        self.assertFalse(receipt["measurement"]["executed"])
+        self.assertEqual(receipt["origin"]["origin"]["producer"]["run_id"], 20)
+        self.assertEqual(receipt["origin"]["origin"]["source"]["commit"], self.source_sha)
+
+        # If merge_group runs fresh on a changed base/tree, push reuses the merge_group original.
+        (self.root / "count").unlink()
+        new_base = "e" * 40
+        queue_producer = {**producer, "run_id": 21, "commit": head}
+        self.current_producer.return_value = (queue_producer, queue_run)
+        with patch.dict(
+            os.environ,
+            {
+                "BASE_SHA": new_base,
+                "GITHUB_EVENT_NAME": "merge_group",
+                "GITHUB_REF": "refs/heads/" + queue_ref,
+                "GITHUB_REF_NAME": queue_ref,
+                "GITHUB_SHA": head,
+                "SOURCE_SHA": head,
+                "PR_NUMBER": "0",
+            },
+        ):
+            self.assertEqual(common.execute(self.arguments, read=self.read), 0)
+        self.assertEqual((self.root / "count").read_text(), "1")
+        fresh_zip = io.BytesIO()
+        with zipfile.ZipFile(fresh_zip, "w") as archive:
+            for path in self.directory.rglob("*"):
+                if path.is_file():
+                    archive.writestr(path.relative_to(self.directory).as_posix(), path.read_bytes())
+        self.archive = fresh_zip.getvalue()
+        fresh_doc = json.loads(next(self.directory.glob("*/measurement.json")).read_text())
+        self.assertTrue(fresh_doc["measurement"]["executed"])
+        self.assertEqual(
+            common.producer_events(fresh_doc["measurement"]),
+            common.NATIVE_EVENTS | {"merge_group"},
+        )
+        (self.root / "count").unlink()
+        original_read = self.read
+
+        def read_queue_history(repository, path):
+            if path == "actions/workflows/ci.yml/runs?status=success&per_page=30":
+                return {"workflow_runs": [queue_run]}
+            if path == "actions/runs/21/artifacts?per_page=100":
+                return {
+                    "artifacts": [
+                        {
+                            "id": 50,
+                            "name": "common-tests-21-1-30",
+                            "expired": False,
+                            "digest": "sha256:" + hashlib.sha256(self.archive).hexdigest(),
+                            "created_at": self.now,
+                            "workflow_run": {"id": 21, "head_sha": head},
+                        }
+                    ]
+                }
+            if path == "actions/runs/21":
+                return queue_run
+            if path == "actions/runs/21/attempts/1/jobs?per_page=50":
+                return {"jobs": [{**self.job, "run_id": 21, "head_sha": head}], "total_count": 1}
+            if path == "actions/jobs/30":
+                return {**self.job, "run_id": 21, "head_sha": head}
+            if path == "check-runs/31":
+                return {**self.check, "head_sha": head, "details_url": "https://github.com/example/project/actions/runs/21/job/30"}
+            if path == "git/commits/" + head:
+                return {"sha": head, "tree": {"sha": self.tree}}
+            return original_read(repository, path)
+
+        self.current_producer.return_value = (
+            {**producer, "run_id": 22, "commit": head},
+            {**self.run, "id": 22, "event": "push", "head_sha": head},
+        )
+        with (
+            patch.object(common, "api", side_effect=read_queue_history),
+            patch.dict(
+                os.environ,
+                {
+                    "BASE_SHA": new_base,
+                    "GITHUB_EVENT_NAME": "push",
+                    "GITHUB_REF": "refs/heads/dev",
+                    "GITHUB_REF_NAME": "dev",
+                    "GITHUB_SHA": head,
+                    "SOURCE_SHA": head,
+                    "PR_NUMBER": "0",
+                },
+            ),
+        ):
+            self.assertEqual(common.execute(self.arguments, read=read_queue_history), 0)
+        self.assertEqual((self.root / "count").read_text(), "1")
+        reused = json.loads(next(self.directory.glob("*/measurement.json")).read_text())
+        self.assertFalse(reused["measurement"]["executed"])
+        self.assertEqual(reused["origin"]["origin"]["producer"]["run_id"], 21)
+
     def test_merge_queue_runs_stay_outside_every_other_profile(self):
         # A stock scope records nothing, on any event.
         with patch.dict(os.environ, {"GITHUB_EVENT_NAME": "merge_group"}):

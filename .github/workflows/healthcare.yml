@@ -167,7 +167,7 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       working-directory: ${{ github.workspace }}
-      run: python3 "$CI_ROOT/scripts/common_test_broker.py" --source-root "$SOURCE_ROOT" --source-repository "$SOURCE_REPOSITORY" --step "$COMMON_TEST_STEP" --directory "$RUNNER_TEMP/common-test-evidence"
+      run: python3 "$CI_ROOT/scripts/common_test_broker.py" --source-root "$SOURCE_ROOT" --source-repository "$SOURCE_REPOSITORY" --step "$COMMON_TEST_STEP" --scope "same-tree-healthcare-python-main-${{ matrix.shard }}" --directory "$RUNNER_TEMP/common-test-evidence"
     - name: Run complete validation stage
       env:
         CI_RUST_BINARIES: ${{ github.workspace }}/rust-debug-binaries
@@ -271,7 +271,7 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       working-directory: ${{ github.workspace }}
-      run: python3 "$CI_ROOT/scripts/common_test_broker.py" --source-root "$SOURCE_ROOT" --source-repository "$SOURCE_REPOSITORY" --step "$COMMON_TEST_STEP" --directory "$RUNNER_TEMP/common-test-evidence"
+      run: python3 "$CI_ROOT/scripts/common_test_broker.py" --source-root "$SOURCE_ROOT" --source-repository "$SOURCE_REPOSITORY" --step "$COMMON_TEST_STEP" --scope same-tree-healthcare-capacity --directory "$RUNNER_TEMP/common-test-evidence"
     - name: Run complete validation stage
       run: 'bash "$CI_ROOT/scripts/healthcare/check" capacity
 
@@ -334,7 +334,7 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       working-directory: ${{ github.workspace }}
-      run: python3 "$CI_ROOT/scripts/common_test_broker.py" --source-root "$SOURCE_ROOT" --source-repository "$SOURCE_REPOSITORY" --step "$COMMON_TEST_STEP" --directory "$RUNNER_TEMP/common-test-evidence"
+      run: python3 "$CI_ROOT/scripts/common_test_broker.py" --source-root "$SOURCE_ROOT" --source-repository "$SOURCE_REPOSITORY" --step "$COMMON_TEST_STEP" --scope same-tree-healthcare-api-contract --directory "$RUNNER_TEMP/common-test-evidence"
     - name: Run complete validation stage
       run: 'bash "$CI_ROOT/scripts/healthcare/check" api-contract
 
@@ -392,7 +392,7 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       working-directory: ${{ github.workspace }}
-      run: python3 "$CI_ROOT/scripts/common_test_broker.py" --source-root "$SOURCE_ROOT" --source-repository "$SOURCE_REPOSITORY" --step "$COMMON_TEST_STEP" --directory "$RUNNER_TEMP/common-test-evidence"
+      run: python3 "$CI_ROOT/scripts/common_test_broker.py" --source-root "$SOURCE_ROOT" --source-repository "$SOURCE_REPOSITORY" --step "$COMMON_TEST_STEP" --scope same-tree-healthcare-rust-scanner --directory "$RUNNER_TEMP/common-test-evidence"
     - name: Run complete validation stage
       run: 'bash "$CI_ROOT/scripts/healthcare/check" rust
 
@@ -440,9 +440,24 @@ jobs:
         persist-credentials: false
     - name: Prepare source and toolchain
       uses: ./ci/scripts/healthcare/setup
+    - name: Restore Docker Buildx layer cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      with:
+        path: ${{ runner.temp }}/buildx-cache
+        key: healthcare-buildx-v1-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          healthcare-buildx-v1-
+    - name: Prepare Docker engine for attested export
+      if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+      run: python3 "$CI_ROOT/scripts/source_image.py" prepare-engine
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
     - name: Run complete validation stage
       env:
         PUBLIC_CI_EXPORT_IMAGE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && '1' || '0' }}
+        PUBLIC_CI_BUILDX_CACHE: '1'
+        PUBLIC_CI_BUILDX_CACHE_DIR: ${{ runner.temp }}/buildx-cache
+        PUBLIC_CI_BUILDX_CACHE_WRITE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && '1' || '0' }}
         GH_TOKEN: ${{ github.token }}
       run: 'bash "$CI_ROOT/scripts/healthcare/check" container-package
 
@@ -451,6 +466,12 @@ jobs:
         git diff --cached --exit-code
 
         test -z "$(git ls-files --others --exclude-standard)"'
+    - name: Save Docker Buildx layer cache
+      if: success() && github.event_name == 'push' && github.ref == 'refs/heads/dev'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      with:
+        path: ${{ runner.temp }}/buildx-cache
+        key: healthcare-buildx-v1-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
     - name: Upload tested DEV image
       id: image-artifact
       if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
@@ -531,7 +552,7 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       working-directory: ${{ github.workspace }}
-      run: python3 "$CI_ROOT/scripts/common_test_broker.py" --source-root "$SOURCE_ROOT" --source-repository "$SOURCE_REPOSITORY" --step "$COMMON_TEST_STEP" --directory "$RUNNER_TEMP/common-test-evidence"
+      run: python3 "$CI_ROOT/scripts/common_test_broker.py" --source-root "$SOURCE_ROOT" --source-repository "$SOURCE_REPOSITORY" --step "$COMMON_TEST_STEP" --scope same-tree-healthcare-worker-queue --directory "$RUNNER_TEMP/common-test-evidence"
     - name: Run complete validation stage
       env:
         HLTHPRT_REDIS_ADDRESS: redis://127.0.0.1:6379
@@ -638,7 +659,7 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       working-directory: ${{ github.workspace }}
-      run: python3 "$CI_ROOT/scripts/common_test_broker.py" --source-root "$SOURCE_ROOT" --source-repository "$SOURCE_REPOSITORY" --step "$COMMON_TEST_STEP" --directory "$RUNNER_TEMP/common-test-evidence"
+      run: python3 "$CI_ROOT/scripts/common_test_broker.py" --source-root "$SOURCE_ROOT" --source-repository "$SOURCE_REPOSITORY" --step "$COMMON_TEST_STEP" --scope "same-tree-healthcare-postgres-${{ matrix.shard }}" --directory "$RUNNER_TEMP/common-test-evidence"
     - name: Run complete validation stage
       env:
         HLTHPRT_DB_HOST: 127.0.0.1
@@ -935,6 +956,11 @@ jobs:
           output: artifact_core_snapshots
   fhir-catalog-integration:
     name: FHIR catalog integration
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+      checks: read
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs:
@@ -952,6 +978,8 @@ jobs:
         options: --health-cmd "pg_isready -U postgres -d ptg2_v3_lifecycle_test_ci_runner" --health-interval 2s --health-timeout
           5s --health-retries 25
     env:
+      COMMON_TEST_EQUIVALENCE: 'true'
+      COMMON_TEST_STEP: 'Run complete validation stage'
       PYTEST_ADDOPTS: ''
       HLTHPRT_DB_DRIVER: asyncpg
       HLTHPRT_DB_PORT: '5432'
@@ -1014,10 +1042,17 @@ jobs:
         digest-mismatch: error
         path: rust-debug-binaries
       if: steps.catalog-capability.outputs.present == 'true'
+    - name: Prepare read-only common-test evidence
+      env:
+        GH_TOKEN: ${{ github.token }}
+      working-directory: ${{ github.workspace }}
+      run: python3 "$CI_ROOT/scripts/common_test_broker.py" --source-root "$SOURCE_ROOT" --source-repository "$SOURCE_REPOSITORY" --step "$COMMON_TEST_STEP" --scope same-tree-healthcare-postgres-fhir-catalog-integration --directory "$RUNNER_TEMP/common-test-evidence"
+      if: steps.catalog-capability.outputs.present == 'true'
     - name: Run complete validation stage
       env:
         HLTHPRT_DB_HOST: 127.0.0.1
         CI_POSTGRES_SERVICE_ID: ${{ job.services.postgres.id }}
+        COMMON_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
         CI_RUST_BINARIES: ${{ github.workspace }}/rust-debug-binaries
       run: 'bash "$CI_ROOT/scripts/healthcare/check" postgres "$CI_SHARD"
 
@@ -1039,6 +1074,14 @@ jobs:
         retention-days: 1
         if-no-files-found: error
       if: steps.catalog-capability.outputs.present == 'true'
+    - name: Upload verified common-test measurements
+      if: steps.catalog-capability.outputs.present == 'true' && success() && env.COMMON_TEST_ARTIFACT_NAME != ''
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: ${{ env.COMMON_TEST_ARTIFACT_NAME }}
+        path: ${{ runner.temp }}/common-test-measurements
+        if-no-files-found: error
+        retention-days: 1
   measurement:
     name: Coverage results
     permissions:
