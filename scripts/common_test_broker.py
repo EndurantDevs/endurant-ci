@@ -7,10 +7,13 @@ import http.client
 import io
 import json
 import os
+import random
 import re
+import ssl
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import zipfile
 from datetime import datetime, timezone
@@ -22,6 +25,46 @@ sys.dont_write_bytecode = True
 
 import common_test_result as common
 
+BROKER_DEADLINE_SECONDS = 120
+
+
+def _is_transient_error(error):
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in (500, 502, 503, 504)
+    if isinstance(error, urllib.error.URLError):
+        return not isinstance(error.reason, ssl.SSLCertVerificationError)
+    return isinstance(error, (TimeoutError, http.client.HTTPException, ConnectionError))
+
+
+def _enforce_deadline(deadline, directory):
+    if time.monotonic() >= deadline:
+        for partial in directory.glob("*.zip"):
+            partial.unlink(missing_ok=True)
+        raise TimeoutError("Broker preparation deadline exceeded")
+
+
+def _with_transient_retry(call, *args, deadline=None):
+    """Retry transient GitHub REST and artifact download failures."""
+    for attempt in range(3):
+        try:
+            return call(*args)
+        except (
+            urllib.error.HTTPError,
+            urllib.error.URLError,
+            TimeoutError,
+            http.client.HTTPException,
+            ConnectionError,
+        ) as error:
+            if not _is_transient_error(error):
+                raise
+            delay = 0.25 * (attempt + 1) + random.uniform(0, 0.25)
+            if deadline is not None and time.monotonic() + delay > deadline:
+                raise
+            if isinstance(error, urllib.error.HTTPError):
+                error.close()
+        time.sleep(delay)
+    return call(*args)
+
 
 def prepare(arguments):
     directory = arguments.directory.resolve()
@@ -29,18 +72,27 @@ def prepare(arguments):
         not directory.exists(), "Evidence broker destination must be fresh"
     )
     directory.mkdir(mode=0o700, parents=True)
+    deadline = time.monotonic() + BROKER_DEADLINE_SECONDS
     responses, archives = {}, {}
     real_api, real_download = common.api, common.download
 
     def read(repository, path):
         key = repository + "/" + path
         if key not in responses:
-            responses[key] = real_api(repository, path)
+            responses[key] = _with_transient_retry(
+                real_api, repository, path, deadline=deadline
+            )
         return responses[key]
+
+    def download(repository, identifier):
+        return _with_transient_retry(
+            real_download, repository, identifier, deadline=deadline
+        )
 
     repository = os.environ["GITHUB_REPOSITORY"]
     try:
         common.api = read
+        common.download = download
         # A merge-queue run discovers history only when the caller declares a same-tree scope;
         # other scopes keep full execution or same-commit recording without history.
         producer, run = common.current_producer(
@@ -122,6 +174,7 @@ def prepare(arguments):
         executed_usable = 0
         non_executed_usable = 0
         for candidate in candidates:
+            _enforce_deadline(deadline, directory)
             if candidate["id"] == producer["run_id"]:
                 continue
             if allowed is not None and not any(
@@ -190,7 +243,7 @@ def prepare(arguments):
                     len(artifacts) == 1, "Original complete job measurement is absent"
                 )
                 artifact = artifacts[0]
-                data = real_download(repository, artifact["id"])
+                data = download(repository, artifact["id"])
                 common.equivalent.require(
                     artifact.get("digest")
                     == "sha256:" + hashlib.sha256(data).hexdigest(),
@@ -272,6 +325,7 @@ def prepare(arguments):
                 zipfile.BadZipFile,
             ):
                 continue
+        _enforce_deadline(deadline, directory)
         responses[repository + "/" + query] = {"workflow_runs": usable}
         document = {
             "schema": "common-test-broker-v1",
@@ -294,6 +348,7 @@ def prepare(arguments):
         return document
     finally:
         common.api = real_api
+        common.download = real_download
 
 
 if __name__ == "__main__":
