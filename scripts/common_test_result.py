@@ -20,7 +20,7 @@ import urllib.request
 import zipfile
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
-from http.client import HTTPException
+from http.client import HTTPException, IncompleteRead
 from pathlib import Path
 
 import tomllib
@@ -327,10 +327,29 @@ def coverage_paths(path, *, original=None, destination=None):
             connection.execute("VACUUM")
 
 
+def _read_bounded_response(response, limit, message):
+    data = response.read(limit + 1)
+    equivalent.require(len(data) <= limit, message)
+    headers = getattr(response, "headers", None)
+    header = headers.get("Content-Length") if headers is not None else None
+    encoding = headers.get("Content-Encoding") if headers is not None else None
+    if (
+        isinstance(header, str)
+        and not isinstance(encoding, str)
+        and re.fullmatch(r"[0-9]{1,20}", header.strip())
+    ):
+        expected = int(header.strip())
+        if len(data) < expected:
+            raise IncompleteRead(data, expected - len(data))
+    return data
+
+
 def json_request(request):
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            data = response.read(16 * 1024 * 1024 + 1)
+            data = _read_bounded_response(
+                response, 16 * 1024 * 1024, "API response exceeds its limit"
+            )
     except urllib.error.HTTPError as error:
         metadata = []
         for name in (
@@ -346,7 +365,6 @@ def json_request(request):
         if metadata:
             error.add_note("HTTP response numeric metadata: " + ", ".join(metadata))
         raise
-    equivalent.require(len(data) <= 16 * 1024 * 1024, "API response exceeds its limit")
     return json.loads(data)
 
 
@@ -442,8 +460,9 @@ def download(repository, identifier):
         equivalent.require(
             response.url.startswith("https://"), "Artifact redirect is not HTTPS"
         )
-        data = response.read(MAX_BYTES + 1)
-    equivalent.require(len(data) <= MAX_BYTES, "Measurement archive exceeds its limit")
+        data = _read_bounded_response(
+            response, MAX_BYTES, "Measurement archive exceeds its limit"
+        )
     return data
 
 

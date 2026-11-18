@@ -1606,6 +1606,54 @@ class PublicPackageReadsTests(unittest.TestCase):
             common.public_package_api("example/project", "git/trees/" + "a" * 40)
         common._PUBLIC_METADATA.clear()
 
+    def test_truncated_content_length_raises_incomplete_read_for_api_and_download(self):
+        class StubResponse:
+            def __init__(self, body, headers):
+                self._body = body
+                self.headers = headers
+                self.url = "https://objects.example.invalid/archive.zip"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def read(self, _limit):
+                return self._body
+
+        with (
+            patch.object(
+                common.urllib.request,
+                "urlopen",
+                return_value=StubResponse(b'{"id": 1', {"Content-Length": "20"}),
+            ),
+            self.assertRaises(IncompleteRead),
+        ):
+            common.json_request(None)
+        with (
+            patch.object(
+                common.urllib.request,
+                "urlopen",
+                return_value=StubResponse(
+                    b'{"id": 1}', {"Content-Length": "20", "Content-Encoding": "gzip"}
+                ),
+            ),
+        ):
+            self.assertEqual(common.json_request(None), {"id": 1})
+        opener = StubResponse(b"partial", {"Content-Length": "10"})
+
+        class StubOpener:
+            def open(self, _request, timeout=30):
+                return opener
+
+        with (
+            patch.dict(os.environ, {"GH_TOKEN": "synthetic-token"}),
+            patch.object(common.urllib.request, "build_opener", return_value=StubOpener()),
+            self.assertRaises(IncompleteRead),
+        ):
+            common.download("example/project", 50)
+
 
 if __name__ == "__main__":
     unittest.main()

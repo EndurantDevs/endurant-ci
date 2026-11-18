@@ -8,6 +8,7 @@ import json
 import os
 import runpy
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -970,10 +971,14 @@ class CommonTestBrokerIntegrationTests(unittest.TestCase):
                     self.temporary / f"unavailable-{index}"
                 )
                 with (
+                    patch.object(broker.time, "sleep") as slept,
                     patch.object(common, "api", side_effect=self.read),
-                    patch.object(common, "download", side_effect=error),
+                    patch.object(common, "download", side_effect=error) as download,
                 ):
                     document = broker.prepare(self.broker_arguments)
+                transient = isinstance(error, http.client.IncompleteRead)
+                self.assertEqual(download.call_count, 4 if transient else 1)
+                self.assertEqual(slept.call_count, 3 if transient else 0)
                 self.assertEqual(document["archives"], {})
                 self.assertEqual(
                     document["responses"][
@@ -1294,6 +1299,45 @@ class CommonTestBrokerIntegrationTests(unittest.TestCase):
             raised.exception.close()
         self.assertEqual(calls, 1)
         slept.assert_not_called()
+
+    def test_broker_does_not_retry_tls_certificate_errors_and_retries_incomplete_read(self):
+        cert_calls = 0
+
+        def bad_cert():
+            nonlocal cert_calls
+            cert_calls += 1
+            raise urllib.error.URLError(ssl.SSLCertVerificationError("certificate verify failed"))
+
+        with patch.object(broker.time, "sleep") as slept:
+            with self.assertRaises(urllib.error.URLError):
+                broker._with_transient_retry(bad_cert)
+        self.assertEqual(cert_calls, 1)
+        slept.assert_not_called()
+
+        read_calls = 0
+
+        def flaky_incomplete():
+            nonlocal read_calls
+            read_calls += 1
+            if read_calls == 1:
+                raise http.client.IncompleteRead(b"part", 4)
+            return b"complete"
+
+        with patch.object(broker.time, "sleep") as slept:
+            self.assertEqual(broker._with_transient_retry(flaky_incomplete), b"complete")
+        self.assertEqual(read_calls, 2)
+        self.assertEqual(slept.call_count, 1)
+
+    def test_broker_aborts_without_evidence_when_deadline_expires(self):
+        with (
+            patch.object(broker, "BROKER_DEADLINE_SECONDS", 0),
+            patch.object(common, "api", side_effect=self.read),
+            patch.object(common, "download", return_value=self.archive),
+            self.assertRaisesRegex(TimeoutError, "deadline exceeded"),
+        ):
+            broker.prepare(self.broker_arguments)
+        self.assertFalse(list(self.broker_arguments.directory.glob("*.zip")))
+        self.assertFalse((self.broker_arguments.directory / "evidence.json").exists())
 
 
 if __name__ == "__main__":

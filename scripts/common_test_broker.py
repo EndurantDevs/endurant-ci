@@ -9,6 +9,7 @@ import json
 import os
 import random
 import re
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -24,25 +25,45 @@ sys.dont_write_bytecode = True
 
 import common_test_result as common
 
+BROKER_DEADLINE_SECONDS = 120
 
-def _with_transient_retry(call, *args):
+
+def _is_transient_error(error):
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in (500, 502, 503, 504)
+    if isinstance(error, urllib.error.URLError):
+        return not isinstance(error.reason, ssl.SSLCertVerificationError)
+    return isinstance(error, (TimeoutError, http.client.HTTPException, ConnectionError))
+
+
+def _enforce_deadline(deadline, directory):
+    if time.monotonic() >= deadline:
+        for partial in directory.glob("*.zip"):
+            partial.unlink(missing_ok=True)
+        raise TimeoutError("Broker preparation deadline exceeded")
+
+
+def _with_transient_retry(call, *args, deadline=None):
     """Retry transient GitHub REST and artifact download failures."""
-    for attempt in range(4):
+    for attempt in range(3):
         try:
             return call(*args)
-        except urllib.error.HTTPError as error:
-            if error.code not in (500, 502, 503, 504) or attempt == 3:
-                raise
-            error.close()
         except (
+            urllib.error.HTTPError,
             urllib.error.URLError,
             TimeoutError,
             http.client.HTTPException,
             ConnectionError,
-        ):
-            if attempt == 3:
+        ) as error:
+            if not _is_transient_error(error):
                 raise
-        time.sleep(0.25 * (attempt + 1) + random.uniform(0, 0.25))
+            delay = 0.25 * (attempt + 1) + random.uniform(0, 0.25)
+            if deadline is not None and time.monotonic() + delay > deadline:
+                raise
+            if isinstance(error, urllib.error.HTTPError):
+                error.close()
+        time.sleep(delay)
+    return call(*args)
 
 
 def prepare(arguments):
@@ -51,17 +72,22 @@ def prepare(arguments):
         not directory.exists(), "Evidence broker destination must be fresh"
     )
     directory.mkdir(mode=0o700, parents=True)
+    deadline = time.monotonic() + BROKER_DEADLINE_SECONDS
     responses, archives = {}, {}
     real_api, real_download = common.api, common.download
 
     def read(repository, path):
         key = repository + "/" + path
         if key not in responses:
-            responses[key] = _with_transient_retry(real_api, repository, path)
+            responses[key] = _with_transient_retry(
+                real_api, repository, path, deadline=deadline
+            )
         return responses[key]
 
     def download(repository, identifier):
-        return _with_transient_retry(real_download, repository, identifier)
+        return _with_transient_retry(
+            real_download, repository, identifier, deadline=deadline
+        )
 
     repository = os.environ["GITHUB_REPOSITORY"]
     try:
@@ -148,6 +174,7 @@ def prepare(arguments):
         executed_usable = 0
         non_executed_usable = 0
         for candidate in candidates:
+            _enforce_deadline(deadline, directory)
             if candidate["id"] == producer["run_id"]:
                 continue
             if allowed is not None and not any(
@@ -298,6 +325,7 @@ def prepare(arguments):
                 zipfile.BadZipFile,
             ):
                 continue
+        _enforce_deadline(deadline, directory)
         responses[repository + "/" + query] = {"workflow_runs": usable}
         document = {
             "schema": "common-test-broker-v1",
