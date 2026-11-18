@@ -292,7 +292,16 @@ class PublicWorkflowPermissions(unittest.TestCase):
         self.assertEqual(saver["with"]["path"], "${{ runner.temp }}/buildx-cache")
         self.assertEqual(saver["if"], "success() && github.event_name == 'push' && github.ref == 'refs/heads/dev'")
         self.assertEqual(prepare["if"], "github.event_name == 'push' && github.ref == 'refs/heads/dev'")
-        self.assertEqual(buildx["uses"], "docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e")
+        self.assertNotIn("uses", buildx)
+        self.assertIn(
+            "docker buildx create --name public-ci-buildx --driver docker-container --bootstrap --use",
+            buildx["run"],
+        )
+        for job in workflow["jobs"].values():
+            for step in job.get("steps", []):
+                uses = step.get("uses")
+                if uses:
+                    self.assertTrue(uses.startswith(("actions/", "./")), uses)
         self.assertEqual(stage["env"]["PUBLIC_CI_BUILDX_CACHE"], "1")
         self.assertEqual(stage["env"]["PUBLIC_CI_BUILDX_CACHE_DIR"], "${{ runner.temp }}/buildx-cache")
         self.assertEqual(

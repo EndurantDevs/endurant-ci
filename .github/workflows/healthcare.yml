@@ -451,7 +451,9 @@ jobs:
       if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
       run: python3 "$CI_ROOT/scripts/source_image.py" prepare-engine
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+      run: |-
+        docker buildx rm --force public-ci-buildx >/dev/null 2>&1 || true
+        docker buildx create --name public-ci-buildx --driver docker-container --bootstrap --use
     - name: Run complete validation stage
       env:
         PUBLIC_CI_EXPORT_IMAGE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && '1' || '0' }}
