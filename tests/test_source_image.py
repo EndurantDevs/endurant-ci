@@ -488,13 +488,17 @@ class TransferChecks(unittest.TestCase):
                     patch.object(transfer, "context", return_value=(IDENTITY, {"event": "push"})) as context, \
                     patch.object(transfer, "command", side_effect=command), \
                     patch.object(transfer, "image_identity", return_value={"Id": ROOT_DIGEST, "Config": {"Labels": LABELS}}), \
-                    patch.object(transfer.subprocess, "Popen") as save:
+                    patch.object(transfer.subprocess, "Popen") as save, \
+                    patch.object(transfer.gzip, "GzipFile", wraps=transfer.gzip.GzipFile) as gzip_file:
                 process = save.return_value.__enter__.return_value
                 process.stdout = io.BytesIO(gzip.decompress(attested_archive()))
                 process.wait.return_value = 0
                 transfer.export_image(ROOT_DIGEST)
                 context.assert_called_once_with(producer=True)
                 save.assert_called_once_with(["docker", "image", "save", ROOT_DIGEST], stdout=subprocess.PIPE)
+                write_calls = [call for call in gzip_file.call_args_list if call.kwargs.get("mode") == "wb"]
+                self.assertEqual(len(write_calls), 1)
+                self.assertEqual(write_calls[0].kwargs["compresslevel"], 1)
             directory = Path(temporary) / "drug-public-image-staging-123-2"
             self.assertEqual(transfer.archive_identity(directory / "image.tar.gz", require_provenance=True),
                              (CONFIG, {CONFIG, ROOT_DIGEST}))

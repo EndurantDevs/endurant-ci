@@ -313,7 +313,7 @@ def verify(
                 for item in selected
             ]
         else:
-            with ThreadPoolExecutor(max_workers=min(8, len(selected))) as pool:
+            with ThreadPoolExecutor(max_workers=min(16, len(selected))) as pool:
                 results = list(
                     pool.map(
                         lambda item: _verify_selected_artifact(

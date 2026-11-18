@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 import zipfile
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
@@ -1203,6 +1204,96 @@ class CommonTestBrokerIntegrationTests(unittest.TestCase):
         (self.source / "count").write_text("1")
         self.consume()
         self.assert_stock()
+
+    def test_broker_retries_transient_api_and_download_errors_without_dropping_reuse(self):
+        runs_calls, jobs_calls, artifacts_calls, dl_calls = 0, 0, 0, 0
+
+        def flaky_read(repository, path):
+            nonlocal runs_calls, jobs_calls, artifacts_calls
+            if path == "actions/workflows/ci.yml/runs?status=success&per_page=30":
+                runs_calls += 1
+                if runs_calls == 1:
+                    raise urllib.error.HTTPError(
+                        f"https://api.github.com/repos/{repository}/{path}",
+                        502,
+                        "Bad Gateway",
+                        None,
+                        io.BytesIO(),
+                    )
+            if path == "actions/runs/20/attempts/1/jobs?per_page=50":
+                jobs_calls += 1
+                if jobs_calls == 1:
+                    raise urllib.error.HTTPError(
+                        f"https://api.github.com/repos/{repository}/{path}",
+                        502,
+                        "Bad Gateway",
+                        None,
+                        io.BytesIO(),
+                    )
+            if path == "actions/runs/20/artifacts?per_page=100":
+                artifacts_calls += 1
+                if artifacts_calls == 1:
+                    raise ConnectionResetError("connection reset by peer")
+            return self.read(repository, path)
+
+        def flaky_download(_repository, _identifier):
+            nonlocal dl_calls
+            dl_calls += 1
+            if dl_calls == 1:
+                raise urllib.error.HTTPError(
+                    "https://api.github.com/repos/example/project/actions/artifacts/50/zip",
+                    503,
+                    "Service Unavailable",
+                    None,
+                    io.BytesIO(),
+                )
+            if dl_calls == 2:
+                raise urllib.error.URLError("temporary failure in name resolution")
+            return self.archive
+
+        with (
+            patch.object(broker.time, "sleep") as slept,
+            patch.object(common, "api", side_effect=flaky_read),
+            patch.object(common, "download", side_effect=flaky_download),
+        ):
+            document = broker.prepare(self.broker_arguments)
+        self.assertEqual(runs_calls, 2)
+        self.assertEqual(jobs_calls, 2)
+        self.assertEqual(artifacts_calls, 2)
+        self.assertEqual(dl_calls, 3)
+        self.assertEqual(slept.call_count, 5)
+        self.assertIn(str(self.artifact["id"]), document["archives"])
+        self.arguments.evidence_directory = self.broker_arguments.directory
+        self.bind_evidence()
+        (self.source / "count").write_text("1")
+        self.consume()
+        key = hashlib.sha256(self.arguments.scope.encode()).hexdigest()
+        result = json.loads((self.measurements / key / "measurement.json").read_bytes())
+        self.assertFalse(result["measurement"]["executed"])
+
+    def test_broker_does_not_retry_non_transient_http_errors(self):
+        calls = 0
+
+        def not_found():
+            nonlocal calls
+            calls += 1
+            raise urllib.error.HTTPError(
+                "https://api.github.com/repos/example/project/actions/runs/20/jobs",
+                404,
+                "Not Found",
+                None,
+                io.BytesIO(),
+            )
+
+        with patch.object(broker.time, "sleep") as slept:
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                broker._with_transient_retry(not_found)
+        try:
+            self.assertEqual(raised.exception.code, 404)
+        finally:
+            raised.exception.close()
+        self.assertEqual(calls, 1)
+        slept.assert_not_called()
 
 
 if __name__ == "__main__":

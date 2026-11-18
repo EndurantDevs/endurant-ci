@@ -7,10 +7,12 @@ import http.client
 import io
 import json
 import os
+import random
 import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import zipfile
 from datetime import datetime, timezone
@@ -21,6 +23,26 @@ sys.pycache_prefix = _HELPER_CACHE.name
 sys.dont_write_bytecode = True
 
 import common_test_result as common
+
+
+def _with_transient_retry(call, *args):
+    """Retry transient GitHub REST and artifact download failures."""
+    for attempt in range(4):
+        try:
+            return call(*args)
+        except urllib.error.HTTPError as error:
+            if error.code not in (500, 502, 503, 504) or attempt == 3:
+                raise
+            error.close()
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            http.client.HTTPException,
+            ConnectionError,
+        ):
+            if attempt == 3:
+                raise
+        time.sleep(0.25 * (attempt + 1) + random.uniform(0, 0.25))
 
 
 def prepare(arguments):
@@ -35,12 +57,16 @@ def prepare(arguments):
     def read(repository, path):
         key = repository + "/" + path
         if key not in responses:
-            responses[key] = real_api(repository, path)
+            responses[key] = _with_transient_retry(real_api, repository, path)
         return responses[key]
+
+    def download(repository, identifier):
+        return _with_transient_retry(real_download, repository, identifier)
 
     repository = os.environ["GITHUB_REPOSITORY"]
     try:
         common.api = read
+        common.download = download
         # A merge-queue run discovers history only when the caller declares a same-tree scope;
         # other scopes keep full execution or same-commit recording without history.
         producer, run = common.current_producer(
@@ -190,7 +216,7 @@ def prepare(arguments):
                     len(artifacts) == 1, "Original complete job measurement is absent"
                 )
                 artifact = artifacts[0]
-                data = real_download(repository, artifact["id"])
+                data = download(repository, artifact["id"])
                 common.equivalent.require(
                     artifact.get("digest")
                     == "sha256:" + hashlib.sha256(data).hexdigest(),
@@ -294,6 +320,7 @@ def prepare(arguments):
         return document
     finally:
         common.api = real_api
+        common.download = real_download
 
 
 if __name__ == "__main__":

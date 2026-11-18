@@ -318,7 +318,9 @@ def export_image(image):
     destination = Path(os.environ["RUNNER_TEMP"]) / staging_name(identity)
     destination.mkdir(mode=0o700)  # Fresh per-job path; never reuse an earlier export.
     archive = destination / "image.tar.gz"
-    with archive.open("xb") as output, gzip.GzipFile(fileobj=output, mode="wb", mtime=0) as compressed:
+    with archive.open("xb") as output, gzip.GzipFile(
+        fileobj=output, mode="wb", compresslevel=1, mtime=0
+    ) as compressed:
         with subprocess.Popen(["docker", "image", "save", image], stdout=subprocess.PIPE) as save:
             shutil.copyfileobj(save.stdout, compressed)
             if save.wait() != 0:

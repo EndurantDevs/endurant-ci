@@ -1097,7 +1097,6 @@ jobs:
     - capacity-evidence
     - api-contract
     - rust-scanner
-    - container-package
     - security
     - worker-queue-smoke
     - address-canonical-db-tests
