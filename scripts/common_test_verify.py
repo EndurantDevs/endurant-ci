@@ -98,17 +98,22 @@ _RUN_CHILD_RE = re.compile(
 
 def _with_transient_retry(call, *args):
     """Retry idempotent read-only GitHub API and artifact downloads on transient 5xx/network errors."""
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             return call(*args)
         except urllib.error.HTTPError as error:
-            if error.code not in (500, 502, 503, 504) or attempt == 2:
+            if error.code not in (500, 502, 503, 504):
                 raise
             error.close()
-        except (urllib.error.URLError, TimeoutError, http.client.HTTPException):
-            if attempt == 2:
-                raise
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            http.client.HTTPException,
+            ConnectionError,
+        ):
+            pass
         time.sleep(0.5 * (attempt + 1))
+    return call(*args)
 
 
 def _memoized_api_reader(original_api, current_run_id):
@@ -248,19 +253,6 @@ def verify(
     producer_attempts=None,
     coverage_references=None,
 ):
-    if producer_attempts is None:
-        producer_attempts = selected_producers(run, repository)
-    engine.equivalent.require(
-        isinstance(producer_attempts, dict)
-        and all(
-            type(job) is int
-            and job > 0
-            and type(attempt) is int
-            and 0 < attempt <= run["run_attempt"]
-            for job, attempt in producer_attempts.items()
-        ),
-        "Selected native producer identities are invalid",
-    )
     selected, attempt_runs, producers = [], {run["run_attempt"]: run}, set()
     original_api = engine.api
     original_download = engine.download
@@ -270,6 +262,19 @@ def verify(
         original_download, target_repository, identifier
     )
     try:
+        if producer_attempts is None:
+            producer_attempts = selected_producers(run, repository)
+        engine.equivalent.require(
+            isinstance(producer_attempts, dict)
+            and all(
+                type(job) is int
+                and job > 0
+                and type(attempt) is int
+                and 0 < attempt <= run["run_attempt"]
+                for job, attempt in producer_attempts.items()
+            ),
+            "Selected native producer identities are invalid",
+        )
         for artifact in engine.artifacts(repository, run["id"]):
             match = re.fullmatch(
                 rf"common-tests-{run['id']}-([1-9][0-9]*)-([1-9][0-9]*)",

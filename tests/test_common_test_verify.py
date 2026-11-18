@@ -866,19 +866,19 @@ class RetainedAttemptVerificationTests(unittest.TestCase):
 
         key_path = f"git/trees/{'a' * 40}?recursive=1"
         results = []
+
+        def worker():
+            try:
+                results.append(memoized(REPOSITORY, key_path))
+            except Exception as error:
+                results.append(error)
+
+        first = threading.Thread(target=worker)
+        second = threading.Thread(target=worker)
         with patch.object(verify.threading, "Event", SignalingEvent):
             memoized, _ = verify._memoized_api_reader(fake_api, current_run_id=21)
-
-            def worker():
-                try:
-                    results.append(memoized(REPOSITORY, key_path))
-                except Exception as error:
-                    results.append(error)
-
-            first = threading.Thread(target=worker)
             first.start()
             self.assertTrue(owner_started.wait(timeout=5))
-            second = threading.Thread(target=worker)
             second.start()
             self.assertTrue(waiter_waiting.wait(timeout=5))
             release_owner.set()
@@ -890,7 +890,7 @@ class RetainedAttemptVerificationTests(unittest.TestCase):
         self.assertEqual(memoized(REPOSITORY, key_path)["sha"], "a" * 40)
         self.assertEqual(calls, 2)
 
-    def test_verify_retries_transient_http_502_errors(self):
+    def test_verify_retries_transient_http_502_and_connection_reset_errors(self):
         api_calls, dl_calls = 0, 0
 
         def flaky_api(repository, path):
@@ -919,6 +919,8 @@ class RetainedAttemptVerificationTests(unittest.TestCase):
                         None,
                         io.BytesIO(),
                     )
+                if dl_calls == 2:
+                    raise ConnectionResetError("connection reset by peer")
             return self.download(repository, identifier)
 
         with (
@@ -934,8 +936,8 @@ class RetainedAttemptVerificationTests(unittest.TestCase):
             )
         self.assertEqual(references[0]["artifact_id"], 50)
         self.assertEqual(api_calls, 2)
-        self.assertEqual(dl_calls, 2)
-        self.assertEqual(slept.call_count, 2)
+        self.assertEqual(dl_calls, 3)
+        self.assertEqual(slept.call_count, 3)
 
 
 if __name__ == "__main__":
