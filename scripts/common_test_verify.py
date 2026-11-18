@@ -357,24 +357,24 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args()
     repository = os.environ["GITHUB_REPOSITORY"]
-    run = engine.api(repository, "actions/runs/" + os.environ["GITHUB_RUN_ID"])
+    run = _with_transient_retry(
+        engine.api, repository, "actions/runs/" + os.environ["GITHUB_RUN_ID"]
+    )
     engine.equivalent.require(
         run.get("run_attempt") == int(os.environ["GITHUB_RUN_ATTEMPT"])
         and arguments.source_repository == repository,
         "Current verifier source/attempt changed",
     )
-    source = engine.api(
-        arguments.source_repository, "git/commits/" + arguments.source_sha
+    source = _with_transient_retry(
+        engine.api, arguments.source_repository, "git/commits/" + arguments.source_sha
     )
-    identity = engine.api(arguments.source_repository, "")
+    identity = _with_transient_retry(engine.api, arguments.source_repository, "")
     expected = {
         "repository_id": identity["id"],
         "commit": arguments.source_sha,
         "tree": source["tree"]["sha"],
     }
-    references = verify(
-        run, repository, expected, producer_attempts=selected_producers(run, repository)
-    )
+    references = verify(run, repository, expected)
     arguments.output.write_text(
         json.dumps(
             {

@@ -5,7 +5,9 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import sys
+import tempfile
 import threading
 import unittest
 import urllib.error
@@ -938,6 +940,62 @@ class RetainedAttemptVerificationTests(unittest.TestCase):
         self.assertEqual(api_calls, 2)
         self.assertEqual(dl_calls, 3)
         self.assertEqual(slept.call_count, 3)
+
+    def test_main_retries_transient_http_502_during_producer_selection(self):
+        jobs_calls = 0
+
+        def cli_api(repository, path):
+            nonlocal jobs_calls
+            if path == "":
+                return {"id": 10}
+            if path == "actions/runs/21":
+                return {**self.latest, "status": "completed", "conclusion": "success"}
+            if path == "actions/runs/21/jobs?filter=all&per_page=50&page=1":
+                jobs_calls += 1
+                if jobs_calls == 1:
+                    raise urllib.error.HTTPError(
+                        f"https://api.github.com/repos/{repository}/{path}",
+                        502,
+                        "Bad Gateway",
+                        None,
+                        io.BytesIO(),
+                    )
+            return self.read(repository, path)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "provenance.json"
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "GITHUB_REPOSITORY": REPOSITORY,
+                        "GITHUB_RUN_ID": "21",
+                        "GITHUB_RUN_ATTEMPT": "2",
+                    },
+                ),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "common_test_verify.py",
+                        "--source-repository",
+                        REPOSITORY,
+                        "--source-sha",
+                        self.current_sha,
+                        "--output",
+                        str(output),
+                    ],
+                ),
+                patch.object(verify.time, "sleep") as slept,
+                patch.object(common, "api", side_effect=cli_api),
+                patch.object(common, "download", side_effect=self.download),
+            ):
+                verify.main()
+            payload = json.loads(output.read_text())
+        self.assertEqual(payload["schema"], "common-test-current-verification-v1")
+        self.assertEqual(payload["origins"][0]["artifact_id"], 50)
+        self.assertEqual(jobs_calls, 2)
+        self.assertEqual(slept.call_count, 1)
 
 
 if __name__ == "__main__":
