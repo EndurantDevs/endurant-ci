@@ -72,7 +72,6 @@ public_common_test_run() {
       --toolchain-command cargo '["cargo","--version"]'
       --toolchain-command rustc '["rustc","--version"]'
       --toolchain-command cargo-llvm-cov '["cargo","llvm-cov","--version"]'
-      --toolchain-command cargo-audit '["cargo","audit","--version"]'
     )
   fi
   if [[ "$scope" == *-postgres || "$scope" == healthcare-postgres-* || "$scope" == same-tree-healthcare-postgres-* ]]; then

@@ -1883,10 +1883,6 @@ run_rust_exec() {
     --remap-path-prefix --json \
     --output-path "$rust_artifacts/test-coverage-rust.json"
   ci_phase_end
-  ci_phase_begin rust-audit
-  test "$(cargo audit --version)" = "cargo-audit-audit 0.22.2"
-  (cd support/ptg2_scanner && cargo audit)
-  ci_phase_end
   ci_phase_begin rust-release-build
   cargo build --release --bins --manifest-path support/ptg2_scanner/Cargo.toml
   ci_phase_end
@@ -1924,6 +1920,10 @@ run_rust() {
   else
     run_rust_exec
   fi
+  ci_phase_begin rust-audit
+  test "$(cargo audit --version)" = "cargo-audit-audit 0.22.2"
+  (cd support/ptg2_scanner && cargo audit)
+  ci_phase_end
   require_base_sha
   timeout --foreground 420s python scripts/coverage_forecast.py write-report-provenance \
     --base "$COVERAGE_BASE_SHA" \
