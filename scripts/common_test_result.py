@@ -791,6 +791,9 @@ def current_producer(repository, step, events=NATIVE_EVENTS):
     }, run
 
 
+SHARED_HOSTED_RUNNER_IMAGES = frozenset({"ubuntu24", "ubuntu26"})
+
+
 def runner_identity(environment):
     image = environment.get("COMMON_TEST_RUNNER_IMAGE", "")
     if not image:
@@ -798,7 +801,12 @@ def runner_identity(environment):
             environment.get("ImageOS") and environment.get("ImageVersion"),
             "Runner does not expose an immutable image identity",
         )
-        image = environment["ImageOS"] + ":" + environment["ImageVersion"]
+        image_os = environment["ImageOS"]
+        image = (
+            image_os
+            if image_os in SHARED_HOSTED_RUNNER_IMAGES
+            else image_os + ":" + environment["ImageVersion"]
+        )
     else:
         equivalent.require(
             re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", image),
