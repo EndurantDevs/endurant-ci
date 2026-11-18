@@ -9,7 +9,9 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 _HELPER_CACHE = tempfile.TemporaryDirectory(prefix="common-test-helper-cache-")
@@ -71,6 +73,145 @@ def current_source_matches(actual, expected, run, repository):
     return True
 
 
+_LIVE_RUN_FIELDS = (
+    "id",
+    "run_attempt",
+    "head_sha",
+    "status",
+    "conclusion",
+    "created_at",
+    "repository",
+    "event",
+    "workflow_id",
+    "path",
+    "check_suite_id",
+)
+
+
+def _memoized_api_reader(original_api):
+    """Deduplicate immutable Git objects and workflow run reads within one verify pass."""
+    lock = threading.Lock()
+    entries = {}
+    run_snapshots = {}
+
+    def cache_bucket(path):
+        if path.startswith(("git/commits/", "git/trees/")):
+            return "immutable"
+        if re.fullmatch(r"actions/runs/[1-9][0-9]*", path):
+            return "run"
+        return None
+
+    def read(repository, path):
+        bucket = cache_bucket(path)
+        if bucket is None:
+            return original_api(repository, path)
+        key = (repository, path)
+        with lock:
+            entry = entries.get(key)
+            if entry is None:
+                entry = [threading.Event(), None, None]
+                entries[key] = entry
+                owner = True
+            else:
+                owner = False
+        if not owner:
+            entry[0].wait()
+            if entry[2] is not None:
+                raise entry[2]
+            return entry[1]
+        try:
+            value = original_api(repository, path)
+        except BaseException as error:
+            with lock:
+                if entries.get(key) is entry:
+                    del entries[key]
+            entry[2] = error
+            entry[0].set()
+            raise
+        if bucket == "run":
+            with lock:
+                run_snapshots[key] = value
+        entry[1] = value
+        entry[0].set()
+        return value
+
+    def verify_live_runs():
+        for (repository, path), cached in list(run_snapshots.items()):
+            fresh = original_api(repository, path)
+            engine.equivalent.require(
+                isinstance(fresh, dict)
+                and isinstance(cached, dict)
+                and all(fresh.get(field) == cached.get(field) for field in _LIVE_RUN_FIELDS),
+                "Original common-test workflow run changed during verification",
+            )
+
+    return read, verify_live_runs
+
+
+def _verify_selected_artifact(
+    item, run, repository, expected_source, authorize_source
+):
+    artifact, attempt, job_id, producer_run = item
+    data = engine.download(repository, artifact["id"])
+    digest = hashlib.sha256(data).hexdigest()
+    engine.equivalent.require(
+        artifact.get("digest") == "sha256:" + digest,
+        "Current common-test immutable archive digest changed",
+    )
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        names = archive.namelist()
+        engine.equivalent.require(
+            len(names) == len(set(names)) and len(names) <= 1000,
+            "Current common-test archive is ambiguous or oversized",
+        )
+        documents = {}
+        for entry in archive.infolist():
+            if re.fullmatch(r"[0-9a-f]{64}/measurement\.json", entry.filename):
+                engine.equivalent.require(
+                    entry.file_size <= 4 * 1024 * 1024,
+                    "Current common-test measurement is oversized",
+                )
+                raw = archive.read(entry)
+                documents[entry.filename.split("/")[0]] = json.loads(raw), raw
+    engine.equivalent.require(
+        documents, "Current common-test archive has no complete scope"
+    )
+    artifact_references, artifact_coverage = [], []
+    for key, (document, raw_document) in documents.items():
+        measurement = document["measurement"]
+        engine.equivalent.require(
+            current_source_matches(
+                measurement["source"], expected_source, run, repository
+            )
+            and measurement["producer"]["run_id"] == run["id"]
+            and measurement["producer"]["run_attempt"] == attempt
+            and measurement["producer"]["job_id"] == job_id
+            and measurement["producer"]["commit"] == run["head_sha"]
+            and key == hashlib.sha256(measurement["scope"]["name"].encode()).hexdigest(),
+            "Current common-test scope/source/attempt is inconsistent or duplicated",
+        )
+        engine.archive_document(
+            data, key, [output["path"] for output in document["outputs"]]
+        )
+        reference = engine.refresh_document(
+            document,
+            artifact,
+            digest,
+            producer_run,
+            repository,
+            authorize_source=authorize_source,
+        )
+        if reference is not None:
+            artifact_references.append(reference)
+        if any(
+            Path(output["path"]).name.startswith(".coverage")
+            or Path(output["path"]).name == "test-coverage-rust.json"
+            for output in document["outputs"]
+        ):
+            artifact_coverage.append(coverage_reference(document, raw_document))
+    return tuple(documents), artifact_references, artifact_coverage
+
+
 def verify(
     run,
     repository,
@@ -93,7 +234,7 @@ def verify(
         ),
         "Selected native producer identities are invalid",
     )
-    references, scopes, producers, coverage = [], set(), set(), []
+    selected, attempt_runs, producers = [], {run["run_attempt"]: run}, set()
     for artifact in engine.artifacts(repository, run["id"]):
         match = re.fullmatch(
             rf"common-tests-{run['id']}-([1-9][0-9]*)-([1-9][0-9]*)",
@@ -112,76 +253,52 @@ def verify(
         engine.equivalent.require(
             attempt <= run["run_attempt"], "Current producer is from a future attempt"
         )
-        producer_run = (
-            run
-            if attempt == run["run_attempt"]
-            else engine.api(repository, f"actions/runs/{run['id']}/attempts/{attempt}")
-        )
-        engine.equivalent.require(
-            producer_run.get("id") == run["id"]
-            and producer_run.get("run_attempt") == attempt
-            and producer_run.get("head_sha") == run["head_sha"],
-            "Selected retained producer attempt changed",
-        )
-        data = engine.download(repository, artifact["id"])
-        digest = hashlib.sha256(data).hexdigest()
-        engine.equivalent.require(
-            artifact.get("digest") == "sha256:" + digest,
-            "Current common-test immutable archive digest changed",
-        )
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            names = archive.namelist()
-            engine.equivalent.require(
-                len(names) == len(set(names)) and len(names) <= 1000,
-                "Current common-test archive is ambiguous or oversized",
+        if attempt not in attempt_runs:
+            producer_run = engine.api(
+                repository, f"actions/runs/{run['id']}/attempts/{attempt}"
             )
-            documents = {}
-            for entry in archive.infolist():
-                if re.fullmatch(r"[0-9a-f]{64}/measurement\.json", entry.filename):
-                    engine.equivalent.require(
-                        entry.file_size <= 4 * 1024 * 1024,
-                        "Current common-test measurement is oversized",
-                    )
-                    raw = archive.read(entry)
-                    documents[entry.filename.split("/")[0]] = json.loads(raw), raw
-        engine.equivalent.require(
-            documents, "Current common-test archive has no complete scope"
-        )
-        for key, (document, raw_document) in documents.items():
-            measurement = document["measurement"]
             engine.equivalent.require(
-                current_source_matches(
-                    measurement["source"], expected_source, run, repository
+                producer_run.get("id") == run["id"]
+                and producer_run.get("run_attempt") == attempt
+                and producer_run.get("head_sha") == run["head_sha"],
+                "Selected retained producer attempt changed",
+            )
+            attempt_runs[attempt] = producer_run
+        selected.append((artifact, attempt, job_id, attempt_runs[attempt]))
+    references, scopes, coverage = [], set(), []
+    original_api = engine.api
+    memoized_api, verify_live_runs = _memoized_api_reader(original_api)
+    engine.api = memoized_api
+    try:
+        if len(selected) <= 1:
+            results = [
+                _verify_selected_artifact(
+                    item, run, repository, expected_source, authorize_source
                 )
-                and measurement["producer"]["run_id"] == run["id"]
-                and measurement["producer"]["run_attempt"] == attempt
-                and measurement["producer"]["job_id"] == job_id
-                and measurement["producer"]["commit"] == run["head_sha"]
-                and key
-                == hashlib.sha256(measurement["scope"]["name"].encode()).hexdigest()
-                and key not in scopes,
+                for item in selected
+            ]
+        else:
+            with ThreadPoolExecutor(max_workers=min(8, len(selected))) as pool:
+                results = list(
+                    pool.map(
+                        lambda item: _verify_selected_artifact(
+                            item, run, repository, expected_source, authorize_source
+                        ),
+                        selected,
+                    )
+                )
+        verify_live_runs()
+    finally:
+        engine.api = original_api
+    for keys, artifact_references, artifact_coverage in results:
+        for key in keys:
+            engine.equivalent.require(
+                key not in scopes,
                 "Current common-test scope/source/attempt is inconsistent or duplicated",
             )
             scopes.add(key)
-            engine.archive_document(
-                data, key, [item["path"] for item in document["outputs"]]
-            )
-            reference = engine.refresh_document(
-                document,
-                artifact,
-                digest,
-                producer_run,
-                repository,
-                authorize_source=authorize_source,
-            )
-            if reference is not None:
-                references.append(reference)
-            if any(
-                Path(item["path"]).name.startswith(".coverage")
-                or Path(item["path"]).name == "test-coverage-rust.json"
-                for item in document["outputs"]
-            ):
-                coverage.append(coverage_reference(document, raw_document))
+        references.extend(artifact_references)
+        coverage.extend(artifact_coverage)
     engine.equivalent.require(
         producers == set(producer_attempts),
         "A selected successful common-test upload has no immutable artifact",
