@@ -4668,7 +4668,14 @@ else:
                     script = body + r'''
 git() { printf '%s\n' "$SOURCE_SHA"; }
 grep() { return 0; }
-docker() { printf '%s\0' "$@" > "$BUILD_ARGS"; return 17; }
+docker() {
+  if [ "${1:-}" = buildx ] && { [ "${2:-}" = create ] || [ "${2:-}" = rm ]; }; then
+    printf '%s\0' "$@" >> "$BUILD_ARGS.lifecycle"
+    return 0
+  fi
+  printf '%s\0' "$@" > "$BUILD_ARGS"
+  return 17
+}
 python3() { return 0; }
 cleanup_container_image() { exit "$1"; }
 runtime_tag=test-local:synthetic
@@ -4687,6 +4694,8 @@ RUNTIME_BASE_IMAGE=synthetic
                             for seeded in (False, True):
                                 with self.subTest(kind=kind, export=export, cache_write=write, seeded=seeded):
                                     shutil.rmtree(cache_dir, ignore_errors=True)
+                                    lifecycle = Path(f"{output}.lifecycle")
+                                    lifecycle.unlink(missing_ok=True)
                                     if seeded:
                                         cache_dir.mkdir(parents=True)
                                         (cache_dir / "index.json").write_text("{}")
@@ -4699,6 +4708,14 @@ RUNTIME_BASE_IMAGE=synthetic
                                     c_args = output.read_bytes().decode().rstrip("\0").split("\0")
                                     self.assertEqual(c_args[:2], ["buildx", "build"])
                                     self.assertIn("--load", c_args)
+                                    builder_index = c_args.index("--builder")
+                                    self.assertEqual(c_args[builder_index + 1], "healthporta-buildx-123-2")
+                                    lifecycle_calls = lifecycle.read_bytes().decode().rstrip("\0").split("\0")
+                                    self.assertEqual(lifecycle_calls, [
+                                        "buildx", "create", "--name", "healthporta-buildx-123-2",
+                                        "--driver", "docker-container", "--bootstrap",
+                                        "buildx", "rm", "--force", "healthporta-buildx-123-2",
+                                    ])
                                     self.assertEqual(f"--cache-from=type=local,src={cache_dir}" in c_args, seeded)
                                     expected_dest = f"{cache_dir}.next.123-2"
                                     self.assertEqual(

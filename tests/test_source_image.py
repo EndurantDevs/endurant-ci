@@ -1077,21 +1077,33 @@ class NativeArchiveCompatibility(unittest.TestCase):
                 repeated.write_bytes(gzip.compress(transfer.command("docker", "image", "save", restored)))
                 self.assertEqual(transfer.archive_identity(repeated, require_provenance=True)[0], config)
                 builder = "compat-container-" + uuid.uuid4().hex
-                transfer.command("docker", "buildx", "create", "--name", builder, "--driver", "docker-container")
+                cache_dir = directory / "buildx-local-cache"
+                transfer.command("docker", "buildx", "create", "--name", builder, "--driver", "docker-container",
+                                 "--bootstrap")
                 try:
                     container_tag = "endurant-ci-transfer:" + uuid.uuid4().hex
                     owned.add(container_tag)
                     transfer.command(
                         "docker", "buildx", "build", "--builder", builder, "--platform", "linux/amd64",
+                        "--cache-to", f"type=local,dest={cache_dir},mode=max",
                         "--attest=type=provenance,mode=max,version=v0.2", "--load", "--tag", container_tag,
                         str(directory),
                     )
+                    self.assertTrue((cache_dir / "index.json").is_file() or (cache_dir / "blobs").is_dir())
                     c_captured = transfer.image_identity(container_tag)["Id"]
                     owned.add(c_captured)
                     c_archive = directory / "container-image.tar.gz"
                     c_archive.write_bytes(gzip.compress(transfer.command("docker", "image", "save", c_captured)))
                     _, c_identifiers = transfer.archive_identity(c_archive, require_provenance=True)
                     owned.update(c_identifiers)
+                    cached_tag = "endurant-ci-transfer:" + uuid.uuid4().hex
+                    owned.add(cached_tag)
+                    transfer.command(
+                        "docker", "buildx", "build", "--builder", builder, "--platform", "linux/amd64",
+                        "--cache-from", f"type=local,src={cache_dir}", "--load", "--tag", cached_tag,
+                        str(directory),
+                    )
+                    owned.add(transfer.image_identity(cached_tag)["Id"])
                 finally:
                     subprocess.run(["docker", "buildx", "rm", "--force", builder], check=False)
         finally:

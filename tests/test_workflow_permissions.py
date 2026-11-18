@@ -284,21 +284,30 @@ class PublicWorkflowPermissions(unittest.TestCase):
         restore = steps["Restore Docker Buildx layer cache"]
         saver = steps["Save Docker Buildx layer cache"]
         prepare = steps["Prepare Docker engine for attested export"]
-        buildx = steps["Set up Docker Buildx"]
         stage = steps["Run complete validation stage"]
+        self.assertNotIn("Set up Docker Buildx", steps)
         self.assertEqual(restore["uses"], "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9")
         self.assertEqual(saver["uses"], "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9")
         self.assertEqual(restore["with"]["path"], "${{ runner.temp }}/buildx-cache")
         self.assertEqual(saver["with"]["path"], "${{ runner.temp }}/buildx-cache")
         self.assertEqual(saver["if"], "success() && github.event_name == 'push' && github.ref == 'refs/heads/dev'")
         self.assertEqual(prepare["if"], "github.event_name == 'push' && github.ref == 'refs/heads/dev'")
-        self.assertEqual(buildx["uses"], "docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e")
         self.assertEqual(stage["env"]["PUBLIC_CI_BUILDX_CACHE"], "1")
         self.assertEqual(stage["env"]["PUBLIC_CI_BUILDX_CACHE_DIR"], "${{ runner.temp }}/buildx-cache")
         self.assertEqual(
             stage["env"]["PUBLIC_CI_BUILDX_CACHE_WRITE"],
             "${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && '1' || '0' }}",
         )
+        for name in ("healthcare.yml", "drug.yml"):
+            rendered = yaml.safe_load((ROOT / ".github/workflows" / name).read_text())
+            for job in rendered["jobs"].values():
+                for step in job.get("steps", []):
+                    uses = step.get("uses")
+                    if uses is not None:
+                        self.assertTrue(
+                            uses.startswith(("actions/", "./")),
+                            f"{name} uses non-GitHub-owned action {uses!r}, blocked by selected-actions policy",
+                        )
 
 
 if __name__ == "__main__":

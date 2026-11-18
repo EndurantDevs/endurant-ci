@@ -1978,15 +1978,20 @@ run_container_package() {
   elif [[ "${PUBLIC_CI_BUILDX_CACHE:-0}" == 1 ]]; then
     build_command=(docker buildx build --load)
   fi
-  local cache_dir="${PUBLIC_CI_BUILDX_CACHE_DIR:-}" cache_next=""
-  if [[ "${PUBLIC_CI_BUILDX_CACHE:-0}" == 1 && -n "$cache_dir" ]]; then
-    if [[ -f "$cache_dir/index.json" || -d "$cache_dir/blobs" ]]; then
-      build_args+=("--cache-from=type=local,src=$cache_dir")
-    fi
-    if [[ "${PUBLIC_CI_BUILDX_CACHE_WRITE:-0}" == 1 ]]; then
-      cache_next="${cache_dir}.next.${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
-      rm -rf -- "$cache_next"
-      build_args+=("--cache-to=type=local,dest=$cache_next,mode=max")
+  local cache_dir="${PUBLIC_CI_BUILDX_CACHE_DIR:-}" cache_next="" cache_builder=""
+  if [[ "${PUBLIC_CI_BUILDX_CACHE:-0}" == 1 ]]; then
+    cache_builder="healthporta-buildx-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}"
+    docker buildx create --name "$cache_builder" --driver docker-container --bootstrap >/dev/null
+    build_args+=(--builder "$cache_builder")
+    if [[ -n "$cache_dir" ]]; then
+      if [[ -f "$cache_dir/index.json" || -d "$cache_dir/blobs" ]]; then
+        build_args+=("--cache-from=type=local,src=$cache_dir")
+      fi
+      if [[ "${PUBLIC_CI_BUILDX_CACHE_WRITE:-0}" == 1 ]]; then
+        cache_next="${cache_dir}.next.${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
+        rm -rf -- "$cache_next"
+        build_args+=("--cache-to=type=local,dest=$cache_next,mode=max")
+      fi
     fi
   fi
   local build_status=0
@@ -1995,6 +2000,9 @@ run_container_package() {
     --platform linux/amd64 \
     --tag "$image" \
     . || build_status=$?
+  if [[ -n "$cache_builder" ]]; then
+    docker buildx rm --force "$cache_builder" >/dev/null 2>&1 || true
+  fi
   if [[ -n "$cache_next" ]]; then
     if [ "$build_status" -eq 0 ] && [ -d "$cache_next" ]; then
       rm -rf -- "$cache_dir" && mv -- "$cache_next" "$cache_dir"
