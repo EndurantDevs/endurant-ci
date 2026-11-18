@@ -6,7 +6,9 @@ import importlib.util
 import io
 import json
 import sys
+import threading
 import unittest
+import urllib.error
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -782,6 +784,25 @@ class RetainedAttemptVerificationTests(unittest.TestCase):
         self.assertEqual(self.reads.count(f"git/commits/{self.current_sha}"), 1)
         self.assertEqual(self.reads.count("actions/runs/20"), 2)
 
+        fixture.run["run_attempt"] = 2
+        self.reads.clear()
+        with (
+            patch.object(common, "api", side_effect=read_both),
+            patch.object(common, "download", side_effect=download_both),
+        ):
+            retried = verify.verify(
+                self.latest,
+                REPOSITORY,
+                self.document["measurement"]["source"],
+                producer_attempts={32: 1, 34: 1},
+            )
+        self.assertEqual([item["artifact_id"] for item in retried], [50, 52])
+        self.assertEqual(
+            self.reads.count("actions/runs/20/jobs?filter=all&per_page=50&page=1"),
+            1,
+        )
+        self.assertEqual(self.reads.count("actions/runs/20"), 2)
+
     def test_verify_rejects_workflow_run_superseded_mid_verification(self):
         run_calls = 0
 
@@ -822,6 +843,99 @@ class RetainedAttemptVerificationTests(unittest.TestCase):
                     producer_attempts={32: 1},
                 )
             self.assertIs(verify.engine.api, mocked)
+
+    def test_memoized_api_reader_propagates_failure_and_evicts_failed_entry(self):
+        owner_started = threading.Event()
+        waiter_waiting = threading.Event()
+        release_owner = threading.Event()
+        calls = 0
+
+        class SignalingEvent(threading.Event):
+            def wait(self, timeout=None):
+                waiter_waiting.set()
+                return super().wait(timeout=timeout)
+
+        def fake_api(_repository, _path):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                owner_started.set()
+                self.assertTrue(release_owner.wait(timeout=5))
+                raise RuntimeError("transient owner failure")
+            return {"sha": "a" * 40, "tree": [], "truncated": False}
+
+        key_path = f"git/trees/{'a' * 40}?recursive=1"
+        results = []
+        with patch.object(verify.threading, "Event", SignalingEvent):
+            memoized, _ = verify._memoized_api_reader(fake_api, current_run_id=21)
+
+            def worker():
+                try:
+                    results.append(memoized(REPOSITORY, key_path))
+                except Exception as error:
+                    results.append(error)
+
+            first = threading.Thread(target=worker)
+            first.start()
+            self.assertTrue(owner_started.wait(timeout=5))
+            second = threading.Thread(target=worker)
+            second.start()
+            self.assertTrue(waiter_waiting.wait(timeout=5))
+            release_owner.set()
+            first.join(timeout=5)
+            second.join(timeout=5)
+        self.assertEqual(calls, 1)
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(isinstance(item, RuntimeError) for item in results))
+        self.assertEqual(memoized(REPOSITORY, key_path)["sha"], "a" * 40)
+        self.assertEqual(calls, 2)
+
+    def test_verify_retries_transient_http_502_errors(self):
+        api_calls, dl_calls = 0, 0
+
+        def flaky_api(repository, path):
+            nonlocal api_calls
+            if path == "actions/jobs/30":
+                api_calls += 1
+                if api_calls == 1:
+                    raise urllib.error.HTTPError(
+                        f"https://api.github.com/repos/{repository}/{path}",
+                        502,
+                        "Bad Gateway",
+                        None,
+                        io.BytesIO(),
+                    )
+            return self.read(repository, path)
+
+        def flaky_download(repository, identifier):
+            nonlocal dl_calls
+            if identifier == 50:
+                dl_calls += 1
+                if dl_calls == 1:
+                    raise urllib.error.HTTPError(
+                        f"https://api.github.com/repos/{repository}/actions/artifacts/{identifier}/zip",
+                        502,
+                        "Bad Gateway",
+                        None,
+                        io.BytesIO(),
+                    )
+            return self.download(repository, identifier)
+
+        with (
+            patch.object(verify.time, "sleep") as slept,
+            patch.object(common, "api", side_effect=flaky_api),
+            patch.object(common, "download", side_effect=flaky_download),
+        ):
+            references = verify.verify(
+                self.latest,
+                REPOSITORY,
+                self.document["measurement"]["source"],
+                producer_attempts={32: 1},
+            )
+        self.assertEqual(references[0]["artifact_id"], 50)
+        self.assertEqual(api_calls, 2)
+        self.assertEqual(dl_calls, 2)
+        self.assertEqual(slept.call_count, 2)
 
 
 if __name__ == "__main__":
