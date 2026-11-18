@@ -1245,6 +1245,22 @@ class CommonResultIntegrationTests(unittest.TestCase):
         self.assertTrue(receipt["measurement"]["executed"])
         self.assertIsNone(receipt["origin"])
 
+    def test_shared_ubuntu_hosted_runner_versions_reuse_across_patch_builds_and_separate_releases(self):
+        with patch.dict(
+            os.environ,
+            {"RUNNER_OS": "Linux", "RUNNER_ARCH": "X64", "ImageOS": "ubuntu26", "ImageVersion": "20261111.196.1"},
+        ):
+            self.original_execution()
+            with patch.dict(os.environ, {"ImageVersion": "20261116.202.1"}):
+                self.assertEqual(common.execute_isolated(self.arguments, read=self.read), 0)
+            self.assertEqual((self.root / "count").read_text(), "1")
+            with patch.dict(os.environ, {"ImageOS": "ubuntu24", "ImageVersion": "20261116.202.1"}):
+                self.assertEqual(common.execute_isolated(self.arguments, read=self.read), 0)
+            self.assertEqual((self.root / "count").read_text(), "2")
+            with patch.dict(os.environ, {"ImageVersion": ""}):
+                self.assertEqual(common.execute_isolated(self.arguments, read=self.read), 0)
+            self.assertEqual((self.root / "count").read_text(), "3")
+
     def test_full_command_ignores_preexisting_valid_changed_source_bytecode(self):
         module = self.root / "example_cache.py"
         original = "VALUE = 'source'\n"
