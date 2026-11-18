@@ -4856,8 +4856,9 @@ RUNTIME_BASE_IMAGE=synthetic
     def test_rust_phase_failures_stop_later_work_and_keep_environment_cleanup(self):
         phases = ("rust-lint", "rust-coverage", "rust-wheel-coverage-prepare",
                   "rust-wheel-build", "rust-wheel-install", "rust-wheel-tests", "rust-coverage-report",
-                  "rust-audit", "rust-release-build",
-                  "rust-wheel-build", "rust-wheel-install", "rust-native-tests", "rust-wheel-tests")
+                  "rust-release-build",
+                  "rust-wheel-build", "rust-wheel-install", "rust-native-tests", "rust-wheel-tests",
+                  "rust-audit")
         phase_recorder = (ROOT / "scripts/phase_timing.sh").read_text().split("\nci_phase_end()", 1)[0]
         phase_recorder = phase_recorder.replace("ci_phase_begin()", "recorded_phase_begin()")
         for failure_index in range(len(phases) + 1):
@@ -4913,6 +4914,44 @@ run_rust
                     expected = expected[:failure_index] + [(phases[failure_index], "17")]
                 self.assertEqual(ends, expected, result.stdout)
                 self.assertEqual(list(runner.iterdir()), [])
+
+    def test_common_test_rust_equivalence_keeps_live_audit_outside_reused_exec(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            (source / "support/ptg2_scanner").mkdir(parents=True)
+            calls = source / "calls"
+            environment = {
+                **os.environ,
+                "SOURCE_ROOT": str(source),
+                "CI_ROOT": str(ROOT),
+                "RUNNER_TEMP": str(source),
+                "CALL_LOG": str(calls),
+                "COMMON_TEST_EQUIVALENCE": "true",
+                "COVERAGE_BASE_SHA": "a" * 40,
+            }
+            script = CHECK_FUNCTIONS + r'''
+install_python_dependencies() { :; }
+public_common_test_run() { printf 'reuse\t%s\n' "$*" >> "$CALL_LOG"; touch "$2"; }
+public_common_test_provenance() { printf 'provenance\t%s\n' "$*" >> "$CALL_LOG"; }
+cargo() {
+  case "$*" in
+    'audit --version') echo 'cargo-audit-audit 0.22.2'; return ;;
+    'llvm-cov --version') echo 'cargo-llvm-cov 0.8.7'; return ;;
+  esac
+  printf 'cargo\t%s\t%s\n' "$*" "$PWD" >> "$CALL_LOG"
+}
+rustc() { echo 'rustc 1.98.1'; }
+timeout() { shift 2; "$@"; }
+python() { printf 'python\t%s\n' "$*" >> "$CALL_LOG"; touch "${!#}"; }
+run_rust
+'''
+            result = bash_script(input=script, env=environment, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            lines = calls.read_text().splitlines()
+            self.assertIn(f"cargo\taudit\t{source / 'support/ptg2_scanner'}", lines)
+            reuse_line = next(line for line in lines if line.startswith("reuse\t"))
+            self.assertIn("same-tree-healthcare-rust-scanner", reuse_line)
+            self.assertNotIn("cargo-audit", (ROOT / "scripts/public_common_test.sh").read_text())
 
     def test_native_wheel_coverage_is_collected_before_report_without_instrumenting_release(self):
         with tempfile.TemporaryDirectory() as temporary:
