@@ -636,6 +636,193 @@ class RetainedAttemptVerificationTests(unittest.TestCase):
                     coverage_references=[],
                 )
 
+    def test_verify_deduplicates_immutable_git_and_run_lookups_across_concurrent_artifacts(
+        self,
+    ):
+        fixture = self.fixture
+        for name in ("count", "report.json", ".coverage"):
+            path = fixture.root / name
+            if path.exists():
+                path.unlink()
+        original_dir = fixture.directory
+        second_dir = original_dir.parent / "measurements-second"
+        second_dir.mkdir()
+        fixture.directory = second_dir
+        fixture.arguments.measurements = second_dir
+        fixture.arguments.scope = "unit/second"
+        second_original_producer = {**fixture.producer, "job_id": 35}
+        fixture.current_producer.return_value = (second_original_producer, fixture.run)
+        self.assertEqual(common.execute_isolated(fixture.arguments, read=fixture.read), 0)
+        original_archive_2 = self.archive()
+        second_original_job = {
+            **copy.deepcopy(fixture.job),
+            "id": 35,
+            "name": "Complete unit tests second",
+            "check_run_url": "https://api.github.com/repos/example/project/check-runs/36",
+        }
+        second_original_check = {
+            **copy.deepcopy(fixture.check),
+            "id": 36,
+            "name": "Complete unit tests second",
+            "details_url": "https://github.com/example/project/actions/runs/20/job/35",
+        }
+        second_original_artifact = {
+            "id": 52,
+            "name": common.artifact_name(second_original_producer),
+            "expired": False,
+            "digest": "sha256:" + hashlib.sha256(original_archive_2).hexdigest(),
+            "created_at": fixture.now,
+            "workflow_run": {"id": 20, "head_sha": self.current_sha},
+        }
+        second_current_producer = {
+            **second_original_producer,
+            "commit": self.current_sha,
+            "run_id": 21,
+            "job_id": 34,
+        }
+        second_current_job = {
+            **copy.deepcopy(self.current_job),
+            "id": 34,
+            "name": "Complete unit tests second",
+            "check_run_url": "https://api.github.com/repos/example/project/check-runs/37",
+        }
+        second_current_check = {
+            **copy.deepcopy(self.current_check),
+            "id": 37,
+            "name": "Complete unit tests second",
+            "details_url": "https://github.com/example/project/actions/runs/21/job/34",
+        }
+        for path in second_dir.iterdir():
+            if path.is_dir():
+                import shutil
+
+                shutil.rmtree(path)
+        for name in ("count", "report.json", ".coverage"):
+            path = fixture.root / name
+            if path.exists():
+                path.unlink()
+
+        def select_second(repository, path):
+            if path == "actions/runs/20/jobs?filter=all&per_page=50&page=1":
+                return {"jobs": [second_original_job], "total_count": 1}
+            if path == "actions/runs/20/artifacts?per_page=100":
+                return {"artifacts": [second_original_artifact]}
+            if path == "actions/jobs/35":
+                return second_original_job
+            if path == "check-runs/36":
+                return second_original_check
+            return fixture.read(repository, path)
+
+        fixture.current_producer.return_value = (second_current_producer, self.retained)
+        with (
+            patch.object(common, "download", return_value=original_archive_2),
+            patch.object(common, "api", side_effect=select_second),
+        ):
+            self.assertEqual(
+                common.execute_isolated(fixture.arguments, read=select_second), 0
+            )
+        second_current_archive = self.archive()
+        second_current_artifact = {
+            "id": 53,
+            "name": common.artifact_name(second_current_producer),
+            "expired": False,
+            "digest": "sha256:" + hashlib.sha256(second_current_archive).hexdigest(),
+            "created_at": fixture.now,
+            "workflow_run": {"id": 21, "head_sha": self.current_sha},
+        }
+        self.artifacts.append(second_current_artifact)
+
+        def read_both(repository, path):
+            extra = {
+                "actions/artifacts/52": second_original_artifact,
+                "actions/jobs/34": second_current_job,
+                "actions/jobs/35": second_original_job,
+                "check-runs/36": second_original_check,
+                "check-runs/37": second_current_check,
+                "actions/runs/20/jobs?filter=all&per_page=50&page=1": {
+                    "jobs": [fixture.job, second_original_job],
+                    "total_count": 2,
+                },
+                "actions/runs/20/artifacts?per_page=100": {
+                    "artifacts": [
+                        fixture.read(repository, "actions/runs/20/artifacts?per_page=100")[
+                            "artifacts"
+                        ][0],
+                        second_original_artifact,
+                    ]
+                },
+            }
+            if path in extra:
+                self.reads.append(path)
+                return extra[path]
+            return self.read(repository, path)
+
+        def download_both(repository, identifier):
+            if identifier == 52:
+                return original_archive_2
+            if identifier == 53:
+                return second_current_archive
+            return self.download(repository, identifier)
+
+        with (
+            patch.object(common, "api", side_effect=read_both),
+            patch.object(common, "download", side_effect=download_both),
+        ):
+            references = verify.verify(
+                self.latest,
+                REPOSITORY,
+                self.document["measurement"]["source"],
+                producer_attempts={32: 1, 34: 1},
+            )
+        self.assertEqual([item["artifact_id"] for item in references], [50, 52])
+        self.assertEqual(
+            self.reads.count(f"git/trees/{fixture.tree}?recursive=1"),
+            1,
+        )
+        self.assertEqual(self.reads.count(f"git/commits/{self.current_sha}"), 1)
+        self.assertEqual(self.reads.count("actions/runs/20"), 2)
+
+    def test_verify_rejects_workflow_run_superseded_mid_verification(self):
+        run_calls = 0
+
+        def mutated_run(repository, path):
+            nonlocal run_calls
+            if path == "actions/runs/20":
+                self.reads.append(path)
+                run_calls += 1
+                if run_calls == 1:
+                    return self.fixture.run
+                return {**self.fixture.run, "run_attempt": 2, "conclusion": "failure"}
+            return self.read(repository, path)
+
+        with patch.object(common, "api", side_effect=mutated_run) as mocked:
+            with self.assertRaisesRegex(
+                ValueError, "Original common-test workflow run changed"
+            ):
+                verify.verify(
+                    self.latest,
+                    REPOSITORY,
+                    self.document["measurement"]["source"],
+                    producer_attempts={32: 1},
+                )
+            self.assertIs(verify.engine.api, mocked)
+
+    def test_verify_restores_engine_api_when_immutable_lookup_fails(self):
+        def broken_tree(repository, path):
+            if path.startswith("git/trees/"):
+                raise RuntimeError("transient network failure")
+            return self.read(repository, path)
+
+        with patch.object(common, "api", side_effect=broken_tree) as mocked:
+            with self.assertRaisesRegex(RuntimeError, "transient network failure"):
+                verify.verify(
+                    self.latest,
+                    REPOSITORY,
+                    self.document["measurement"]["source"],
+                    producer_attempts={32: 1},
+                )
+            self.assertIs(verify.engine.api, mocked)
+
 
 if __name__ == "__main__":
     unittest.main()
