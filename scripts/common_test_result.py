@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -351,6 +352,7 @@ def json_request(request):
 
 
 _PUBLIC_METADATA = {}
+_PUBLIC_METADATA_LOCK = threading.Lock()
 
 
 def public_package_api(repository, path):
@@ -360,22 +362,24 @@ def public_package_api(repository, path):
         repository == "EndurantDevs/endurant-ci",
         "Anonymous package fallback is not admitted",
     )
-    if repository not in _PUBLIC_METADATA:
-        metadata = json_request(
-            urllib.request.Request(
-                f"https://api.github.com/repos/{repository}",
-                headers={
-                    "Accept": "application/vnd.github+json",
-                    "X-GitHub-Api-Version": "2022-11-28",
-                },
+    with _PUBLIC_METADATA_LOCK:
+        metadata = _PUBLIC_METADATA.get(repository)
+        if metadata is None:
+            metadata = json_request(
+                urllib.request.Request(
+                    f"https://api.github.com/repos/{repository}",
+                    headers={
+                        "Accept": "application/vnd.github+json",
+                        "X-GitHub-Api-Version": "2022-11-28",
+                    },
+                )
             )
-        )
-        equivalent.require(
-            metadata.get("full_name") == repository
-            and metadata.get("private") is False,
-            "Shared package is not the admitted public repository",
-        )
-        _PUBLIC_METADATA[repository] = metadata
+            equivalent.require(
+                metadata.get("full_name") == repository
+                and metadata.get("private") is False,
+                "Shared package is not the admitted public repository",
+            )
+            _PUBLIC_METADATA[repository] = metadata
     if not path:
         return _PUBLIC_METADATA[repository]
     return json_request(

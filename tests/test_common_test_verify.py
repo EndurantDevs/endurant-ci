@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import sys
+import threading
 import unittest
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -602,7 +603,12 @@ class RetainedAttemptVerificationTests(unittest.TestCase):
         self.current_check["head_sha"] = self.current_sha
         self.current_artifact["workflow_run"]["head_sha"] = self.current_sha
         fixture.current_producer.return_value = (
-            {**fixture.producer, "commit": self.current_sha, "run_id": 21, "job_id": 32},
+            {
+                **fixture.producer,
+                "commit": self.current_sha,
+                "run_id": 21,
+                "job_id": 32,
+            },
             self.retained,
         )
         self.assertEqual(
@@ -635,6 +641,217 @@ class RetainedAttemptVerificationTests(unittest.TestCase):
                     producer_attempts={32: 1},
                     coverage_references=[],
                 )
+
+    def _concurrent_fixtures(self, count=4):
+        orig_key = next(
+            info.filename.split("/")[0]
+            for info in zipfile.ZipFile(io.BytesIO(self.original_archive)).infolist()
+            if info.filename.endswith("/measurement.json")
+        )
+        with zipfile.ZipFile(io.BytesIO(self.original_archive)) as orig_zip_in:
+            orig_doc = json.loads(orig_zip_in.read(f"{orig_key}/measurement.json"))
+            orig_payloads = [
+                orig_zip_in.read(f"{orig_key}/data/{data_idx}")
+                for data_idx in range(len(orig_doc["outputs"]))
+            ]
+        curr_key = hashlib.sha256(
+            self.document["measurement"]["scope"]["name"].encode()
+        ).hexdigest()
+        with zipfile.ZipFile(io.BytesIO(self.current_archive)) as curr_zip_in:
+            curr_payloads = [
+                curr_zip_in.read(f"{curr_key}/data/{data_idx}")
+                for data_idx in range(len(self.document["outputs"]))
+            ]
+
+        artifacts, producer_attempts, coverage_refs = [], {}, []
+        archives, api_entries = {}, {}
+        for index in range(count):
+            scope = {**self.document["measurement"]["scope"], "name": f"scope-{index}"}
+            key = hashlib.sha256(scope["name"].encode()).hexdigest()
+            orig_job_id, orig_check_id, orig_art_id = (
+                230 + index,
+                240 + index,
+                250 + index,
+            )
+            curr_job_id, curr_check_id, curr_art_id = (
+                132 + index,
+                133 + index,
+                151 + index,
+            )
+
+            orig_meas = common.equivalent.measurement(
+                orig_doc["measurement"]["source"],
+                orig_doc["measurement"]["inputs"],
+                scope,
+                {**orig_doc["measurement"]["producer"], "job_id": orig_job_id},
+                executed=True,
+            )
+            orig_doc_i = {
+                "measurement": orig_meas,
+                "outputs": orig_doc["outputs"],
+                "origin": None,
+            }
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as zf:
+                zf.writestr(f"{key}/measurement.json", json.dumps(orig_doc_i))
+                for data_idx, payload in enumerate(orig_payloads):
+                    zf.writestr(f"{key}/data/{data_idx}", payload)
+            orig_zip = buf.getvalue()
+            orig_job = {
+                **copy.deepcopy(self.fixture.job),
+                "id": orig_job_id,
+                "name": f"Complete test {index}",
+                "check_run_url": f"https://api.github.com/repos/{REPOSITORY}/check-runs/{orig_check_id}",
+            }
+            orig_check = {
+                **copy.deepcopy(self.fixture.check),
+                "id": orig_check_id,
+                "name": f"Complete test {index}",
+                "details_url": f"https://github.com/{REPOSITORY}/actions/runs/20/job/{orig_job_id}",
+            }
+            orig_artifact = {
+                "id": orig_art_id,
+                "name": common.artifact_name(orig_meas["producer"]),
+                "expired": False,
+                "digest": "sha256:" + hashlib.sha256(orig_zip).hexdigest(),
+                "created_at": self.fixture.now,
+                "workflow_run": {"id": 20, "head_sha": self.fixture.run["head_sha"]},
+            }
+
+            curr_meas = common.equivalent.measurement(
+                self.document["measurement"]["source"],
+                self.document["measurement"]["inputs"],
+                scope,
+                {**self.document["measurement"]["producer"], "job_id": curr_job_id},
+                executed=False,
+            )
+            proof = common.equivalent.verify(
+                curr_meas,
+                orig_meas,
+                self.fixture.run,
+                orig_job,
+                orig_check,
+                orig_artifact,
+                archive_sha256=hashlib.sha256(orig_zip).hexdigest(),
+                producer_recipe_verified=True,
+                allowed_events=common.producer_events(orig_meas),
+                artifact_name=orig_artifact["name"],
+                upload_step=common.UPLOAD_STEP,
+            )
+            curr_doc_i = {
+                "measurement": curr_meas,
+                "outputs": self.document["outputs"],
+                "origin": proof,
+            }
+            raw_curr = json.dumps(curr_doc_i).encode()
+            cbuf = io.BytesIO()
+            with zipfile.ZipFile(cbuf, "w") as zf:
+                zf.writestr(f"{key}/measurement.json", raw_curr)
+                for data_idx, payload in enumerate(curr_payloads):
+                    zf.writestr(f"{key}/data/{data_idx}", payload)
+            curr_zip = cbuf.getvalue()
+            curr_job = {
+                **copy.deepcopy(self.current_job),
+                "id": curr_job_id,
+                "name": f"Complete test {index}",
+                "check_run_url": f"https://api.github.com/repos/{REPOSITORY}/check-runs/{curr_check_id}",
+            }
+            curr_check = {
+                **copy.deepcopy(self.current_check),
+                "id": curr_check_id,
+                "name": f"Complete test {index}",
+                "details_url": f"https://github.com/{REPOSITORY}/actions/runs/21/job/{curr_job_id}",
+            }
+            curr_artifact = {
+                "id": curr_art_id,
+                "name": common.artifact_name(curr_meas["producer"]),
+                "expired": False,
+                "digest": "sha256:" + hashlib.sha256(curr_zip).hexdigest(),
+                "created_at": self.fixture.now,
+                "workflow_run": {"id": 21, "head_sha": self.current_sha},
+            }
+
+            artifacts.append(curr_artifact)
+            producer_attempts[curr_job_id] = 1
+            coverage_refs.append(verify.coverage_reference(curr_doc_i, raw_curr))
+            archives[orig_art_id] = orig_zip
+            archives[curr_art_id] = curr_zip
+            api_entries[f"actions/jobs/{orig_job_id}"] = orig_job
+            api_entries[f"check-runs/{orig_check_id}"] = orig_check
+            api_entries[f"actions/artifacts/{orig_art_id}"] = orig_artifact
+            api_entries[f"actions/jobs/{curr_job_id}"] = curr_job
+            api_entries[f"check-runs/{curr_check_id}"] = curr_check
+
+        api_entries["actions/runs/21/artifacts?per_page=100"] = {"artifacts": artifacts}
+        return artifacts, producer_attempts, coverage_refs, archives, api_entries
+
+    def test_concurrent_artifacts_deduplicate_immutable_git_reads_and_preserve_order(
+        self,
+    ):
+        _artifacts, producer_attempts, coverage_refs, archives, api_entries = (
+            self._concurrent_fixtures(count=4)
+        )
+        count_lock = threading.Lock()
+        counts = {}
+
+        def multi_api(repository, path):
+            with count_lock:
+                counts[path] = counts.get(path, 0) + 1
+            if path in api_entries:
+                return api_entries[path]
+            return self.read(repository, path)
+
+        def multi_download(repository, identifier):
+            self.assertEqual(repository, REPOSITORY)
+            return archives[identifier]
+
+        with (
+            patch.object(common, "api", side_effect=multi_api) as patched_api,
+            patch.object(common, "download", side_effect=multi_download),
+        ):
+            references = verify.verify(
+                self.latest,
+                REPOSITORY,
+                self.document["measurement"]["source"],
+                producer_attempts=producer_attempts,
+                coverage_references=coverage_refs,
+            )
+            self.assertIs(common.api, patched_api)
+        self.assertEqual(
+            [ref["artifact_id"] for ref in references], [250, 251, 252, 253]
+        )
+        self.assertEqual(counts[f"git/trees/{self.fixture.tree}?recursive=1"], 1)
+        self.assertEqual(counts[f"git/commits/{self.fixture.source_sha}"], 1)
+        self.assertEqual(counts[f"git/commits/{self.current_sha}"], 1)
+        self.assertEqual(counts["actions/runs/20"], 8)
+
+    def test_concurrent_artifact_failure_propagates_and_restores_api(self):
+        artifacts, producer_attempts, coverage_refs, archives, api_entries = (
+            self._concurrent_fixtures(count=4)
+        )
+        artifacts[2]["digest"] = "sha256:" + "0" * 64
+
+        def multi_api(repository, path):
+            if path in api_entries:
+                return api_entries[path]
+            return self.read(repository, path)
+
+        def multi_download(repository, identifier):
+            return archives[identifier]
+
+        with (
+            patch.object(common, "api", side_effect=multi_api) as patched_api,
+            patch.object(common, "download", side_effect=multi_download),
+        ):
+            with self.assertRaisesRegex(ValueError, "immutable archive digest changed"):
+                verify.verify(
+                    self.latest,
+                    REPOSITORY,
+                    self.document["measurement"]["source"],
+                    producer_attempts=producer_attempts,
+                    coverage_references=coverage_refs,
+                )
+            self.assertIs(common.api, patched_api)
 
 
 if __name__ == "__main__":

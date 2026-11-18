@@ -2,6 +2,7 @@
 """Recheck immutable common-test origins from a separate trusted final job."""
 
 import argparse
+import copy
 import hashlib
 import io
 import json
@@ -9,7 +10,9 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 _HELPER_CACHE = tempfile.TemporaryDirectory(prefix="common-test-helper-cache-")
@@ -19,6 +22,8 @@ sys.dont_write_bytecode = True
 import common_test_result as engine
 
 EXECUTION_FIELDS = engine.EXECUTION_FIELDS
+IMMUTABLE_API_PREFIXES = ("git/commits/", "git/trees/")
+VERIFY_WORKERS = 8
 
 
 def original_execution(records):
@@ -94,28 +99,46 @@ def verify(
         "Selected native producer identities are invalid",
     )
     references, scopes, producers, coverage = [], set(), set(), []
-    for artifact in engine.artifacts(repository, run["id"]):
-        match = re.fullmatch(
-            rf"common-tests-{run['id']}-([1-9][0-9]*)-([1-9][0-9]*)",
-            artifact.get("name", ""),
-        )
-        if match is None:
-            continue
-        attempt, job_id = map(int, match.groups())
-        if producer_attempts.get(job_id) != attempt:
-            continue
-        engine.equivalent.require(
-            job_id not in producers,
-            "Selected producer has duplicate immutable common artifacts",
-        )
-        producers.add(job_id)
+    real_api = engine.api
+    cache_lock = threading.Lock()
+    immutable_responses, inflight = {}, {}
+
+    def cached_api(target_repository, path):
+        if path != "" and not path.startswith(IMMUTABLE_API_PREFIXES):
+            return real_api(target_repository, path)
+        cache_key = (target_repository, path)
+        while True:
+            with cache_lock:
+                if cache_key in immutable_responses:
+                    return copy.deepcopy(immutable_responses[cache_key])
+                event = inflight.get(cache_key)
+                if event is None:
+                    event = threading.Event()
+                    inflight[cache_key] = event
+                    break
+            event.wait()
+        try:
+            value = real_api(target_repository, path)
+        except BaseException:
+            with cache_lock:
+                inflight.pop(cache_key, None)
+            event.set()
+            raise
+        with cache_lock:
+            immutable_responses[cache_key] = value
+            inflight.pop(cache_key, None)
+        event.set()
+        return copy.deepcopy(value)
+
+    def verify_artifact(item):
+        artifact, attempt, job_id = item
         engine.equivalent.require(
             attempt <= run["run_attempt"], "Current producer is from a future attempt"
         )
         producer_run = (
             run
             if attempt == run["run_attempt"]
-            else engine.api(repository, f"actions/runs/{run['id']}/attempts/{attempt}")
+            else cached_api(repository, f"actions/runs/{run['id']}/attempts/{attempt}")
         )
         engine.equivalent.require(
             producer_run.get("id") == run["id"]
@@ -147,6 +170,7 @@ def verify(
         engine.equivalent.require(
             documents, "Current common-test archive has no complete scope"
         )
+        verified = []
         for key, (document, raw_document) in documents.items():
             measurement = document["measurement"]
             engine.equivalent.require(
@@ -158,13 +182,11 @@ def verify(
                 and measurement["producer"]["job_id"] == job_id
                 and measurement["producer"]["commit"] == run["head_sha"]
                 and key
-                == hashlib.sha256(measurement["scope"]["name"].encode()).hexdigest()
-                and key not in scopes,
+                == hashlib.sha256(measurement["scope"]["name"].encode()).hexdigest(),
                 "Current common-test scope/source/attempt is inconsistent or duplicated",
             )
-            scopes.add(key)
             engine.archive_document(
-                data, key, [item["path"] for item in document["outputs"]]
+                data, key, [entry["path"] for entry in document["outputs"]]
             )
             reference = engine.refresh_document(
                 document,
@@ -174,18 +196,63 @@ def verify(
                 repository,
                 authorize_source=authorize_source,
             )
-            if reference is not None:
-                references.append(reference)
-            if any(
-                Path(item["path"]).name.startswith(".coverage")
-                or Path(item["path"]).name == "test-coverage-rust.json"
-                for item in document["outputs"]
-            ):
-                coverage.append(coverage_reference(document, raw_document))
-    engine.equivalent.require(
-        producers == set(producer_attempts),
-        "A selected successful common-test upload has no immutable artifact",
-    )
+            cov_ref = (
+                coverage_reference(document, raw_document)
+                if any(
+                    Path(entry["path"]).name.startswith(".coverage")
+                    or Path(entry["path"]).name == "test-coverage-rust.json"
+                    for entry in document["outputs"]
+                )
+                else None
+            )
+            verified.append((key, reference, cov_ref))
+        return verified
+
+    engine.api = cached_api
+    try:
+        pending = []
+        for artifact in engine.artifacts(repository, run["id"]):
+            match = re.fullmatch(
+                rf"common-tests-{run['id']}-([1-9][0-9]*)-([1-9][0-9]*)",
+                artifact.get("name", ""),
+            )
+            if match is None:
+                continue
+            attempt, job_id = map(int, match.groups())
+            if producer_attempts.get(job_id) != attempt:
+                continue
+            engine.equivalent.require(
+                job_id not in producers,
+                "Selected producer has duplicate immutable common artifacts",
+            )
+            producers.add(job_id)
+            pending.append((artifact, attempt, job_id))
+        engine.equivalent.require(
+            producers == set(producer_attempts),
+            "A selected successful common-test upload has no immutable artifact",
+        )
+        if len(pending) > 1:
+            with ThreadPoolExecutor(
+                max_workers=min(VERIFY_WORKERS, len(pending))
+            ) as pool:
+                batch_results = list(pool.map(verify_artifact, pending))
+        elif len(pending) == 1:
+            batch_results = [verify_artifact(pending[0])]
+        else:
+            batch_results = []
+        for items in batch_results:
+            for key, reference, cov_ref in items:
+                engine.equivalent.require(
+                    key not in scopes,
+                    "Current common-test scope/source/attempt is inconsistent or duplicated",
+                )
+                scopes.add(key)
+                if reference is not None:
+                    references.append(reference)
+                if cov_ref is not None:
+                    coverage.append(cov_ref)
+    finally:
+        engine.api = real_api
     if coverage_references is not None:
         engine.equivalent.require(
             isinstance(coverage_references, list)
