@@ -73,6 +73,7 @@ class RenderWorkflowChecks(unittest.TestCase):
             for name in ("smoke", "measurement", "container-package", "python-tests", "address-canonical-db-tests"):
                 self.assertNotIn("merge_group", jobs[name]["if"])
             self.assertNotIn("container-package", jobs["measurement"]["needs"])
+            self.assertIn("container-package", jobs["source-validation"]["needs"])
             drug = yaml.safe_load(RENDERER.render_workflow("drug", "1" * 40, caller))
             self.assertNotIn("merge_group", drug["on"])
 
