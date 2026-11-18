@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -10,6 +11,8 @@ import re
 import sys
 import tempfile
 import threading
+import time
+import urllib.error
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -88,23 +91,52 @@ _LIVE_RUN_FIELDS = (
 )
 
 
-def _memoized_api_reader(original_api):
-    """Deduplicate immutable Git objects and workflow run reads within one verify pass."""
+_RUN_CHILD_RE = re.compile(
+    r"^actions/runs/([1-9][0-9]*)/(?:jobs(?:\?.*)?|artifacts(?:\?.*)?|attempts/[1-9][0-9]*)$"
+)
+
+
+def _with_transient_retry(call, *args):
+    """Retry idempotent read-only GitHub API and artifact downloads on transient 5xx/network errors."""
+    for attempt in range(2):
+        try:
+            return call(*args)
+        except urllib.error.HTTPError as error:
+            if error.code not in (500, 502, 503, 504):
+                raise
+            error.close()
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            http.client.HTTPException,
+            ConnectionError,
+        ):
+            pass
+        time.sleep(0.5 * (attempt + 1))
+    return call(*args)
+
+
+def _memoized_api_reader(original_api, current_run_id):
+    """Deduplicate immutable Git and original workflow-run reads within one verify pass."""
     lock = threading.Lock()
     entries = {}
     run_snapshots = {}
+    current_prefix = str(current_run_id)
 
     def cache_bucket(path):
         if path.startswith(("git/commits/", "git/trees/")):
             return "immutable"
         if re.fullmatch(r"actions/runs/[1-9][0-9]*", path):
             return "run"
+        match = _RUN_CHILD_RE.match(path)
+        if match is not None and match.group(1) != current_prefix:
+            return "run_child"
         return None
 
     def read(repository, path):
         bucket = cache_bucket(path)
         if bucket is None:
-            return original_api(repository, path)
+            return _with_transient_retry(original_api, repository, path)
         key = (repository, path)
         with lock:
             entry = entries.get(key)
@@ -120,7 +152,7 @@ def _memoized_api_reader(original_api):
                 raise entry[2]
             return entry[1]
         try:
-            value = original_api(repository, path)
+            value = _with_transient_retry(original_api, repository, path)
         except BaseException as error:
             with lock:
                 if entries.get(key) is entry:
@@ -137,7 +169,7 @@ def _memoized_api_reader(original_api):
 
     def verify_live_runs():
         for (repository, path), cached in list(run_snapshots.items()):
-            fresh = original_api(repository, path)
+            fresh = _with_transient_retry(original_api, repository, path)
             engine.equivalent.require(
                 isinstance(fresh, dict)
                 and isinstance(cached, dict)
@@ -221,55 +253,58 @@ def verify(
     producer_attempts=None,
     coverage_references=None,
 ):
-    if producer_attempts is None:
-        producer_attempts = selected_producers(run, repository)
-    engine.equivalent.require(
-        isinstance(producer_attempts, dict)
-        and all(
-            type(job) is int
-            and job > 0
-            and type(attempt) is int
-            and 0 < attempt <= run["run_attempt"]
-            for job, attempt in producer_attempts.items()
-        ),
-        "Selected native producer identities are invalid",
-    )
     selected, attempt_runs, producers = [], {run["run_attempt"]: run}, set()
-    for artifact in engine.artifacts(repository, run["id"]):
-        match = re.fullmatch(
-            rf"common-tests-{run['id']}-([1-9][0-9]*)-([1-9][0-9]*)",
-            artifact.get("name", ""),
-        )
-        if match is None:
-            continue
-        attempt, job_id = map(int, match.groups())
-        if producer_attempts.get(job_id) != attempt:
-            continue
-        engine.equivalent.require(
-            job_id not in producers,
-            "Selected producer has duplicate immutable common artifacts",
-        )
-        producers.add(job_id)
-        engine.equivalent.require(
-            attempt <= run["run_attempt"], "Current producer is from a future attempt"
-        )
-        if attempt not in attempt_runs:
-            producer_run = engine.api(
-                repository, f"actions/runs/{run['id']}/attempts/{attempt}"
-            )
-            engine.equivalent.require(
-                producer_run.get("id") == run["id"]
-                and producer_run.get("run_attempt") == attempt
-                and producer_run.get("head_sha") == run["head_sha"],
-                "Selected retained producer attempt changed",
-            )
-            attempt_runs[attempt] = producer_run
-        selected.append((artifact, attempt, job_id, attempt_runs[attempt]))
-    references, scopes, coverage = [], set(), []
     original_api = engine.api
-    memoized_api, verify_live_runs = _memoized_api_reader(original_api)
+    original_download = engine.download
+    memoized_api, verify_live_runs = _memoized_api_reader(original_api, run["id"])
     engine.api = memoized_api
+    engine.download = lambda target_repository, identifier: _with_transient_retry(
+        original_download, target_repository, identifier
+    )
     try:
+        if producer_attempts is None:
+            producer_attempts = selected_producers(run, repository)
+        engine.equivalent.require(
+            isinstance(producer_attempts, dict)
+            and all(
+                type(job) is int
+                and job > 0
+                and type(attempt) is int
+                and 0 < attempt <= run["run_attempt"]
+                for job, attempt in producer_attempts.items()
+            ),
+            "Selected native producer identities are invalid",
+        )
+        for artifact in engine.artifacts(repository, run["id"]):
+            match = re.fullmatch(
+                rf"common-tests-{run['id']}-([1-9][0-9]*)-([1-9][0-9]*)",
+                artifact.get("name", ""),
+            )
+            if match is None:
+                continue
+            attempt, job_id = map(int, match.groups())
+            if producer_attempts.get(job_id) != attempt:
+                continue
+            engine.equivalent.require(
+                job_id not in producers,
+                "Selected producer has duplicate immutable common artifacts",
+            )
+            producers.add(job_id)
+            engine.equivalent.require(
+                attempt <= run["run_attempt"], "Current producer is from a future attempt"
+            )
+            if attempt not in attempt_runs:
+                producer_run = engine.api(
+                    repository, f"actions/runs/{run['id']}/attempts/{attempt}"
+                )
+                engine.equivalent.require(
+                    producer_run.get("id") == run["id"]
+                    and producer_run.get("run_attempt") == attempt
+                    and producer_run.get("head_sha") == run["head_sha"],
+                    "Selected retained producer attempt changed",
+                )
+                attempt_runs[attempt] = producer_run
+            selected.append((artifact, attempt, job_id, attempt_runs[attempt]))
         if len(selected) <= 1:
             results = [
                 _verify_selected_artifact(
@@ -290,6 +325,8 @@ def verify(
         verify_live_runs()
     finally:
         engine.api = original_api
+        engine.download = original_download
+    references, scopes, coverage = [], set(), []
     for keys, artifact_references, artifact_coverage in results:
         for key in keys:
             engine.equivalent.require(
@@ -320,24 +357,24 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args()
     repository = os.environ["GITHUB_REPOSITORY"]
-    run = engine.api(repository, "actions/runs/" + os.environ["GITHUB_RUN_ID"])
+    run = _with_transient_retry(
+        engine.api, repository, "actions/runs/" + os.environ["GITHUB_RUN_ID"]
+    )
     engine.equivalent.require(
         run.get("run_attempt") == int(os.environ["GITHUB_RUN_ATTEMPT"])
         and arguments.source_repository == repository,
         "Current verifier source/attempt changed",
     )
-    source = engine.api(
-        arguments.source_repository, "git/commits/" + arguments.source_sha
+    source = _with_transient_retry(
+        engine.api, arguments.source_repository, "git/commits/" + arguments.source_sha
     )
-    identity = engine.api(arguments.source_repository, "")
+    identity = _with_transient_retry(engine.api, arguments.source_repository, "")
     expected = {
         "repository_id": identity["id"],
         "commit": arguments.source_sha,
         "tree": source["tree"]["sha"],
     }
-    references = verify(
-        run, repository, expected, producer_attempts=selected_producers(run, repository)
-    )
+    references = verify(run, repository, expected)
     arguments.output.write_text(
         json.dumps(
             {
