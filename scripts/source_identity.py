@@ -4,6 +4,8 @@
 import json
 import os
 import re
+import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -11,6 +13,12 @@ from pathlib import Path
 
 REPOSITORIES = {"EndurantDevs/drug-api", "EndurantDevs/healthcare-mrf-api"}
 SHA = re.compile(r"[0-9a-f]{40}\Z")
+HEALTHCARE = "EndurantDevs/healthcare-mrf-api"
+REVIEWED_FIELDS = {
+    "source_sha": "REVIEWED_SOURCE_SHA",
+    "base_sha": "REVIEWED_BASE_SHA",
+    "source_tree": "REVIEWED_SOURCE_TREE",
+}
 
 
 class JobInventoryPending(ValueError):
@@ -207,15 +215,68 @@ def resolve_identity(repository, event_name, payload, github_sha, github_ref):
     }
 
 
+def exact_sha(value):
+    return isinstance(value, str) and bool(SHA.fullmatch(value) and set(value) != {"0"})
+
+
+def reviewed_source(environ):
+    """Resolve a separate source tuple for the protected read-only producer."""
+    identity = {field: environ.get(variable, "") for field, variable in REVIEWED_FIELDS.items()}
+    if not any(identity.values()):
+        return None
+    if (environ.get("GITHUB_REPOSITORY") != HEALTHCARE
+            or environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+            or environ.get("GITHUB_REF") != "refs/heads/dev"
+            or environ.get("GITHUB_REF_PROTECTED") != "true"
+            or not all(exact_sha(value) for value in identity.values())):
+        raise ValueError("reviewed source requires an exact tuple and a protected Healthcare dispatch")
+    return {"repository": HEALTHCARE, **identity, "source_branch": "reviewed", "pr_number": "0", "pr_title": ""}
+
+
+def reviewed_producer(environ):
+    """Describe the caller run separately from its checked-out source."""
+    if reviewed_source(environ) is None:
+        raise ValueError("reviewed producer requires an explicit source tuple")
+    head, workflow_sha = environ.get("GITHUB_SHA", ""), environ.get("GITHUB_WORKFLOW_SHA", "")
+    workflow = environ.get("GITHUB_WORKFLOW_REF", "")
+    run_id, attempt = environ.get("GITHUB_RUN_ID", ""), environ.get("GITHUB_RUN_ATTEMPT", "")
+    if (not all(exact_sha(value) for value in (head, workflow_sha))
+            or not re.fullmatch(rf"{re.escape(HEALTHCARE)}/\.github/workflows/[a-zA-Z0-9_.-]+\.ya?ml@refs/heads/dev",
+                                workflow)
+            or not all(re.fullmatch(r"[1-9][0-9]*", value) for value in (run_id, attempt))):
+        raise ValueError("reviewed producer requires exact caller workflow and run coordinates")
+    return {"repository": HEALTHCARE, "head_sha": head, "workflow_sha": workflow_sha,
+            "workflow_ref": workflow, "run_id": run_id, "run_attempt": int(attempt)}
+
+
+def verify_reviewed_checkout(path, identity):
+    facts = subprocess.check_output(
+        ["git", "-C", str(path), "rev-parse", "HEAD", "HEAD^{tree}", "HEAD^@"], text=True,
+    ).splitlines()
+    if facts != [identity["source_sha"], identity["source_tree"], identity["base_sha"]]:
+        raise ValueError("reviewed checkout differs from its exact commit, tree or sole parent")
+
+
 def main():
     revision = os.environ["CI_REVISION"]
-    if not SHA.fullmatch(revision) or set(revision) == {"0"}:
+    if not exact_sha(revision):
         raise ValueError("shared CI revision must be an exact nonzero commit SHA")
-    identity = resolve_identity(
-        os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_EVENT_NAME"],
-        json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text()),
-        os.environ["GITHUB_SHA"], os.environ["GITHUB_REF"],
-    )
+    identity = reviewed_source(os.environ)
+    if sys.argv[1:] == ["verify-reviewed-checkout"]:
+        if identity is None:
+            raise ValueError("reviewed checkout requires an explicit source tuple")
+        verify_reviewed_checkout(Path(os.environ["SOURCE_ROOT"]), identity)
+        return
+    if sys.argv[1:]:
+        raise ValueError("unexpected source identity arguments")
+    if identity is None:
+        identity = resolve_identity(
+            os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_EVENT_NAME"],
+            json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text()),
+            os.environ["GITHUB_SHA"], os.environ["GITHUB_REF"],
+        )
+    else:
+        identity["producer"] = reviewed_producer(os.environ)
     (Path(os.environ["RUNNER_TEMP"]) / "source-identity.json").write_text(
         json.dumps(identity, sort_keys=True) + "\n"
     )
@@ -223,8 +284,8 @@ def main():
              "source_branch": "SOURCE_BRANCH", "pr_number": "PR_NUMBER", "pr_title": "SOURCE_PR_TITLE"}
     for output_path in (os.environ["GITHUB_ENV"], os.environ["GITHUB_OUTPUT"]):
         with Path(output_path).open("a") as handle:
-            for name, value in identity.items():
-                handle.write(f"{names[name]}={value}\n")
+            for name, variable in names.items():
+                handle.write(f"{variable}={identity[name]}\n")
 
 
 if __name__ == "__main__":

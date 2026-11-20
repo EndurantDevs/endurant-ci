@@ -138,6 +138,8 @@ def _verify_original_provenance(paths, identity, hashes, specification):
         if (not isinstance(value, dict) or value.get("head_sha") != identity["source_sha"]
                 or value.get("base_sha") != identity["base_sha"]):
             raise ValueError("coverage provenance differs from the public source tuple")
+        if "producer" in identity and "common_test_execution" in value:
+            raise ValueError("reviewed measurement requires freshly executed coverage")
         hash_field = "coverage_sha256" if report.startswith(".coverage.") else "report_sha256"
         if value.get(hash_field) != hashes[report]:
             raise ValueError("coverage provenance digest differs")
@@ -157,6 +159,8 @@ def _postgres_cohort(paths, identity, hashes):
         if (not isinstance(value, dict) or set(value) not in (fields, fields | {"common_test_execution"})
                 or ("common_test_execution" in value and not isinstance(value["common_test_execution"], dict))):
             raise ValueError("PostgreSQL cohort provenance fields differ")
+        if "producer" in identity and "common_test_execution" in value:
+            raise ValueError("reviewed measurement requires freshly executed coverage")
         candidate = {name: value.get(name) for name in
                      ("head_sha", "base_sha", "baseline_sha256", "coverage_version")}
         if (candidate["head_sha"] != identity["source_sha"]
@@ -238,11 +242,16 @@ def publish(staging, output, identity, run_id, run_attempt, revision):
     if not re.fullmatch(r"[1-9][0-9]*", str(run_id)) or not re.fullmatch(r"[1-9][0-9]*", str(run_attempt)):
         raise ValueError("measurement requires one exact run and consumer attempt")
     run_attempt = int(run_attempt)
+    reviewed = "producer" in identity
+    if reviewed and (identity["producer"]["run_id"], identity["producer"]["run_attempt"]) != (str(run_id), run_attempt):
+        raise ValueError("reviewed measurement producer differs from its exact run and attempt")
+    minimum_attempt = run_attempt if reviewed else 1
     expected = producer_files()
     producers = {}
     for directory in staging.iterdir():
         match = re.fullmatch(rf"(.+)-{re.escape(str(run_id))}-([1-9][0-9]*)", directory.name)
-        if not match or match[1] not in expected or not 1 <= int(match[2]) <= run_attempt or match[1] in producers:
+        if (not match or match[1] not in expected or not minimum_attempt <= int(match[2]) <= run_attempt
+                or match[1] in producers):
             raise ValueError("missing, duplicate, or unexpected staging artifact")
         producers[match[1]] = (directory, int(match[2]))
     if set(producers) != set(expected):
@@ -269,7 +278,8 @@ def publish(staging, output, identity, run_id, run_attempt, revision):
         json.dumps(_postgres_cohort(paths, identity, input_hashes), sort_keys=True) + "\n")
     hashes = validate_files(output, identity)
     total = sum(path.stat().st_size for path in output.iterdir())
-    measurement = {"schema": "public-source-measurement-v2", **identity,
+    schema = "reviewed-source-measurement-v1" if reviewed else "public-source-measurement-v2"
+    measurement = {"schema": schema, **identity,
                    "run_id": str(run_id), "run_attempt": run_attempt,
                    "producer_attempts": {name: producers[name][1] for name in sorted(producers)},
                    "ci_revision": revision, "sha256": hashes}

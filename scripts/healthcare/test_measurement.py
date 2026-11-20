@@ -72,6 +72,44 @@ def coverage_semantics(path):
 
 
 class MeasurementChecks(unittest.TestCase):
+    def test_reviewed_measurement_requires_fresh_matching_attempt_and_pins_detached_source(self):
+        producer = {
+            "repository": IDENTITY["repository"], "run_id": "123", "run_attempt": 2,
+            "head_sha": "d" * 40, "workflow_sha": "d" * 40,
+            "workflow_ref": IDENTITY["repository"] + "/.github/workflows/reviewed-source.yml@refs/heads/dev",
+        }
+        identity = {**IDENTITY, "source_branch": "reviewed", "source_tree": "e" * 40, "producer": producer}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staging, _ = populated_staging(root)
+            with self.assertRaisesRegex(ValueError, "producer differs"):
+                MEASUREMENT.publish(staging, root / "wrong-run", identity, "124", 2, "c" * 40)
+            with self.assertRaisesRegex(ValueError, "staging artifact"):
+                MEASUREMENT.publish(staging, root / "old-attempt", identity, "123", 2, "c" * 40)
+            for path in staging.glob("*/.coverage-provenance.*.json"):
+                provenance = json.loads(path.read_bytes())
+                del provenance["common_test_execution"]
+                path.write_text(json.dumps(provenance))
+            for directory in list(staging.iterdir()):
+                directory.rename(directory.with_name(directory.name.rsplit("-", 2)[0] + "-123-2"))
+            name = ".coverage-provenance.postgres.core-services.json"
+            sidecar = staging / "mrf-python-coverage-postgres-core-services-123-2" / name
+            original = sidecar.read_bytes()
+            reused = {**json.loads(original), "common_test_execution": {"origin": "previous run"}}
+            sidecar.write_text(json.dumps(reused))
+            with self.assertRaisesRegex(ValueError, "freshly executed"):
+                MEASUREMENT.publish(staging, root / "reused", identity, "123", 2, "c" * 40)
+            sidecar.write_bytes(original)
+            output = root / "reviewed"
+            MEASUREMENT.publish(staging, output, identity, "123", 2, "c" * 40)
+            result = json.loads((output / "measurement.json").read_text())
+            self.assertEqual(result["schema"], "reviewed-source-measurement-v1")
+            self.assertEqual(result["source_sha"], IDENTITY["source_sha"])
+            self.assertEqual(result["base_sha"], IDENTITY["base_sha"])
+            self.assertEqual(result["source_tree"], identity["source_tree"])
+            self.assertEqual(result["producer"], producer)
+            self.assertEqual(set(result["producer_attempts"].values()), {2})
+
     def test_sqlite_rejects_executable_schema_paths_and_tracers(self):
         changes = (
             "CREATE VIEW extra AS SELECT 1", "CREATE TABLE extra(value)",

@@ -44,7 +44,8 @@ runs:
       fetch-depth: 0
       persist-credentials: false
   - name: Verify checkout identity
-    run: 'test "$SOURCE_REPOSITORY" = EndurantDevs/healthcare-mrf-api
+    run: |
+      test "$SOURCE_REPOSITORY" = EndurantDevs/healthcare-mrf-api
 
       test "$(git -C "$CI_ROOT" rev-parse HEAD)" = "$CI_REVISION"
 
@@ -52,7 +53,11 @@ runs:
 
       git merge-base --is-ancestor "$BASE_SHA" HEAD
 
-      printf ''COVERAGE_BASE_SHA=%s\n'' "$BASE_SHA" >> "$GITHUB_ENV"'
+      if [[ -n "${REVIEWED_SOURCE_SHA:-}" ]]; then
+        python3 "$CI_ROOT/scripts/source_identity.py" verify-reviewed-checkout
+      fi
+
+      printf 'COVERAGE_BASE_SHA=%s\n' "$BASE_SHA" >> "$GITHUB_ENV"
     shell: bash
     working-directory: source
   - name: Prepare measurement directory

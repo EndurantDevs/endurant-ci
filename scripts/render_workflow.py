@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 METADATA_ONLY = ("github.event_name == 'pull_request' && github.event.action == 'edited' "
                  "&& !github.event.changes.title && !github.event.changes.base")
 GUARD = f"!({METADATA_ONLY}) && ("
+REVIEWED_IMAGE_INPUTS = ("source_run_id", "source_run_attempt", "image_artifact_id",
+                         "measurement_artifact_id", "native_artifact_id")
 
 
 def cleanup_dispatch_step():
@@ -85,6 +87,28 @@ def publication_job(kind, revision, producer_job, measurement_job, validation_jo
     }
 
 
+def ordinary_healthcare_workflow(canonical):
+    """Keep dispatch-only inputs out of the flat push and pull request workflow."""
+    for key in ("REVIEWED_SOURCE_SHA", "REVIEWED_BASE_SHA", "REVIEWED_SOURCE_TREE"):
+        canonical["env"].pop(key)
+    normal_run = "env.REVIEWED_SOURCE_SHA == ''"
+    reviewed_or = "env.REVIEWED_SOURCE_SHA != '' || "
+    for job in canonical["jobs"].values():
+        if "COMMON_TEST_EQUIVALENCE" in job.get("env", {}):
+            job["env"]["COMMON_TEST_EQUIVALENCE"] = "true"
+        for step in job["steps"]:
+            condition = step.get("if", "")
+            if condition == normal_run:
+                del step["if"]
+            elif condition.endswith(f" && {normal_run}") or condition.startswith(reviewed_or):
+                step["if"] = condition.removesuffix(f" && {normal_run}").removeprefix(reviewed_or)
+            if "PUBLIC_CI_EXPORT_IMAGE" in step.get("env", {}):
+                step["env"]["GH_TOKEN"] = "${{ github.token }}"
+                step["env"]["PUBLIC_CI_EXPORT_IMAGE"] = (
+                    "${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && '1' || '0' }}")
+    return canonical
+
+
 def render_workflow(kind, revision, caller):
     if kind not in {"healthcare", "drug"} or not re.fullmatch(r"[0-9a-f]{40}", revision) or set(revision) == {"0"}:
         raise ValueError("an approved workflow kind and exact nonzero package revision are required")
@@ -93,6 +117,8 @@ def render_workflow(kind, revision, caller):
     if kind == "healthcare":
         workflow["on"]["merge_group"] = {"types": ["checks_requested"], "branches": ["dev"]}
     canonical = yaml.safe_load((ROOT / ".github/workflows" / f"{kind}.yml").read_text())
+    if kind == "healthcare":
+        canonical = ordinary_healthcare_workflow(canonical)
     canonical = json.loads(json.dumps(canonical).replace("${{ inputs.ci_revision }}", revision))
     workflow["permissions"] = canonical["permissions"]
     if canonical.get("env"):
@@ -331,6 +357,56 @@ def render_image_recovery(kind, revision):
     return "# Generated from the pinned retained image publisher.\n" + yaml.safe_dump(workflow, sort_keys=False, width=120)
 
 
+def render_reviewed_image_publisher(revision, app_id, validation_blob):
+    if (not re.fullmatch(r"[0-9a-f]{40}", revision) or set(revision) == {"0"}
+            or not re.fullmatch(r"[0-9a-f]{40}", validation_blob) or set(validation_blob) == {"0"}
+            or type(app_id) is not int or app_id <= 0):
+        raise ValueError("reviewed image publication requires exact package, validation workflow and App identity")
+    job = publication_job("healthcare", revision, "container-package", "measurement", "source-validation")
+    del job["needs"]
+    job["permissions"]["checks"] = "read"
+    job["if"] = ("github.repository == 'EndurantDevs/healthcare-mrf-api' "
+                 "&& github.ref == 'refs/heads/dev' && github.ref_protected")
+    for name in REVIEWED_IMAGE_INPUTS:
+        job["env"][name.upper()] = "${{ inputs." + name + " }}"
+    job["env"]["REVIEWED_IMAGE_APPROVAL_APP_ID"] = str(app_id)
+    job["env"]["REVIEWED_VALIDATION_WORKFLOW_BLOB"] = validation_blob
+    job["steps"][1:1] = [
+        {"name": "Install pinned uv", "run": "bash ci/scripts/install_uv"},
+        {"name": "Install uv-managed Python", "run": "bash ci/scripts/setup_python"},
+        {"name": "Install locked publisher dependencies",
+         "run": "uv --no-config pip install --require-hashes --only-binary=:all: -r ci/scripts/requirements-python-quality.lock"},
+    ]
+    for step in job["steps"]:
+        if step.get("run", "").startswith("python3 ci/scripts/source_image.py "):
+            step["run"] = step["run"].replace("source_image.py", "publish_reviewed_image.py")
+        if step.get("name") == "Authenticate DEV image input":
+            step["name"] = "Authenticate reviewed image input"
+        if step.get("name") == "Download validated image archive":
+            step["with"].update({"run-id": "${{ inputs.source_run_id }}", "github-token": "${{ github.token }}"})
+        if step.get("name") in {"Upload DEV image publication intent", "Upload DEV image receipt"}:
+            step["with"]["name"] = step["with"]["name"].replace("public-image-", "public-image-reviewed-", 1)
+    index, download = next((index, step) for index, step in enumerate(job["steps"])
+                           if step["name"] == "Download validated image archive")
+    job["steps"].insert(index + 1, {
+        **download, "name": "Download validated coverage measurement",
+        "with": {**download["with"], "artifact-ids": "${{ steps.image.outputs.measurement_artifact_id }}",
+                 "path": "${{ runner.temp }}/reviewed-measurement-download"},
+    })
+    workflow = {
+        "name": "Reviewed source image publication",
+        "run-name": "Reviewed source image ${{ inputs.source_run_id }}-${{ inputs.source_run_attempt }}",
+        "on": {"workflow_dispatch": {"inputs": {
+            name: {"required": True, "type": "string"} for name in REVIEWED_IMAGE_INPUTS
+        }}},
+        "permissions": {"contents": "read", "actions": "read", "checks": "read"},
+        "concurrency": {"group": "reviewed-source-image-${{ inputs.source_run_id }}-${{ inputs.source_run_attempt }}",
+                        "cancel-in-progress": False},
+        "jobs": {"dev-image-publication": job},
+    }
+    return "# Generated from the pinned reviewed image publisher.\n" + yaml.safe_dump(workflow, sort_keys=False, width=120)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("kind", choices=("healthcare", "drug"))
@@ -338,12 +414,21 @@ if __name__ == "__main__":
     parser.add_argument("caller", type=Path)
     parser.add_argument("--image-recovery", action="store_true",
                         help="write only the trusted sibling publish-retained-image.yml workflow")
+    parser.add_argument("--reviewed-image-app-id", type=int,
+                        help="write only the trusted sibling publish-reviewed-source.yml workflow")
+    parser.add_argument("--reviewed-validation-workflow-blob",
+                        help="exact Git blob of the protected reviewed validation workflow")
     parser.add_argument("--metadata-recovery", action="store_true",
                         help="write only the trusted sibling metadata-recovery.yml workflow")
     parser.add_argument("--preserve-stage-contracts", action="store_true",
                         help="keep existing database and release stages when updating common test proof")
     args = parser.parse_args()
-    if args.image_recovery:
+    if args.reviewed_image_app_id is not None or args.reviewed_validation_workflow_blob is not None:
+        if args.kind != "healthcare" or args.reviewed_image_app_id is None or args.reviewed_validation_workflow_blob is None:
+            parser.error("Healthcare reviewed image publication requires the approval App ID and validation workflow blob")
+        args.caller.with_name("publish-reviewed-source.yml").write_text(
+            render_reviewed_image_publisher(args.revision, args.reviewed_image_app_id, args.reviewed_validation_workflow_blob))
+    elif args.image_recovery:
         args.caller.with_name("publish-retained-image.yml").write_text(render_image_recovery(args.kind, args.revision))
     elif args.metadata_recovery:
         args.caller.with_name("metadata-recovery.yml").write_text(render_metadata_recovery(args.kind, args.revision))
