@@ -714,6 +714,7 @@ GRAPH_FRAGMENT_WHEEL_TESTS = (
     "tests/test_custom_import_graph_serial_metadata.py",
 )
 CATALOG_OBSERVATION_WHEEL_TEST = "tests/test_registry_fhir_catalog_observation_native.py"
+PROVIDER_DIRECTORY_ROWS_WHEEL_TEST = "tests/test_provider_directory_rows_native.py"
 SOURCE_BOUNDS_SIGNATURE_FIXTURE = '''
 import inspect
 original_signature = inspect.signature
@@ -4958,6 +4959,7 @@ run_rust
             source = Path(temporary)
             (source / "tests").mkdir()
             (source / CATALOG_OBSERVATION_WHEEL_TEST).touch()
+            (source / PROVIDER_DIRECTORY_ROWS_WHEEL_TEST).touch()
             binary = source / "support/ptg2_scanner/target/release/ptg2_scanner"
             binary.parent.mkdir(parents=True)
             binary.write_text('#!/bin/sh\nif [ "$1" = --canon-version ]; then\n'
@@ -5030,10 +5032,13 @@ run_rust
                       if call[0] == "python" and CATALOG_OBSERVATION_WHEEL_TEST in call[1]]
             probes = [(index, call) for index, call in enumerate(calls) if call[0] == "native-probe"]
             self.assertEqual(len(tested), 2)
-            self.assertEqual([call[1] for _, call in probes], ["catalog-observation"] * 2)
+            self.assertEqual([call[1] for _, call in probes], ["catalog-observation", "provider-directory-rows"] * 2)
+            self.assertTrue(all(shlex.split(calls[index][1]).count(PROVIDER_DIRECTORY_ROWS_WHEEL_TEST) == 1
+                                for index in tested))
             self.assertEqual(calls[tested[0]][2], coverage_target + "/profiles-%p-%m.profraw")
             self.assertEqual(calls[tested[1]][2], "")
-            self.assertTrue(all(probe[0] < test for probe, test in zip(probes, tested, strict=True)))
+            self.assertTrue(all(probes[2 * i][0] < probes[2 * i + 1][0] < test
+                                for i, test in enumerate(tested)))
             provenance = next(index for index, call in enumerate(calls)
                               if call[0] == "python" and "write-report-provenance" in call[1])
             native_tests = next(index for index, call in enumerate(calls)
@@ -5214,9 +5219,13 @@ run_wheel_tests() {
         source_export = "custom_import_source_columns_v1"
         fragment_export = "custom_import_graph_document_fragments_v1"
         observation_export = "encode_catalog_observation_page"
+        rows_export = "prepare_provider_directory_rows_v1"
+        row_lines_export = "prepare_provider_directory_row_lines_v1"
         compiled_source = f"compiled_fixture.{source_export} = {source_export} = compiled_function\n"
         compiled_fragments = f"compiled_fixture.{fragment_export} = {fragment_export} = compiled_function\n"
         compiled_observation = f"compiled_fixture.{observation_export} = {observation_export} = compiled_function\n"
+        compiled_rows = f"compiled_fixture.{rows_export} = {rows_export} = compiled_function\n"
+        compiled_row_lines = f"compiled_fixture.{row_lines_export} = {row_lines_export} = compiled_function\n"
         valid_source = compiled_source + SOURCE_BOUNDS_SIGNATURE_FIXTURE
         no_import = "raise AssertionError('unexpected extension import')\n"
         cases = [
@@ -5225,6 +5234,9 @@ run_wheel_tests() {
             (GRAPH_FRAGMENT_WHEEL_TESTS[:1], compiled_fragments, True, ""),
             (GRAPH_FRAGMENT_WHEEL_TESTS[1:], no_import, True, ""),
             ((CATALOG_OBSERVATION_WHEEL_TEST,), compiled_observation, True, ""),
+            ((PROVIDER_DIRECTORY_ROWS_WHEEL_TEST,), compiled_rows + compiled_row_lines, True, ""),
+            ((PROVIDER_DIRECTORY_ROWS_WHEEL_TEST,), compiled_rows, False, "Native registry extension is incomplete"),
+            ((PROVIDER_DIRECTORY_ROWS_WHEEL_TEST,), compiled_row_lines, False, "Native registry extension is incomplete"),
             ((*SOURCE_COLUMN_WHEEL_TESTS, *GRAPH_FRAGMENT_WHEEL_TESTS, CATALOG_OBSERVATION_WHEEL_TEST),
              valid_source + compiled_fragments + compiled_observation, True, ""),
             ((CATALOG_OBSERVATION_WHEEL_TEST,), "", False, "Native registry extension is incomplete"),
