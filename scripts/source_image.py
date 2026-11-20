@@ -484,8 +484,11 @@ class NoRegistryRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def registry_read(image, reference, *, blob=False):
+    reviewed_tag = image == IMAGES[github.HEALTHCARE] and re.fullmatch(
+        r"reviewed-[0-9a-f]{8}-[1-9][0-9]{0,18}-[1-9][0-9]{0,8}", reference,
+    )
     if image not in IMAGES.values() or not (DIGEST.fullmatch(reference)
-            or not blob and re.fullmatch(r"dev-main-[0-9a-f]{8}-[0-9]{14}", reference)):
+            or not blob and (re.fullmatch(r"dev-main-[0-9a-f]{8}-[0-9]{14}", reference) or reviewed_tag)):
         raise ValueError("registry read is outside the fixed DEV image scope")
     scope = image.removeprefix("ghcr.io/")
     opener = urllib.request.build_opener(NoRegistryRedirect)

@@ -1,13 +1,16 @@
 """Exercise the protected publisher with synthetic GitHub and approval metadata."""
 
+import io
 import json
+import os
 import sys
 import tempfile
 import unittest
+import urllib.error
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import yaml
 
@@ -196,6 +199,44 @@ class ReviewedPublisherTests(unittest.TestCase):
         with patch.object(publisher.transfer, "registry_read", return_value=b"another image"), \
                 self.assertRaisesRegex(ValueError, "digest differs from its tested image"):
             publisher.transfer.registry_publication(intent)
+
+    def test_staging_and_cleanup_read_the_same_reviewed_registry_tag(self):
+        transfer = publisher.transfer
+        expected = self.authority.admit()
+        scratch = self.authority.image.parent
+        url = expected["image"].replace("ghcr.io/", "https://ghcr.io/v2/", 1).replace(":reviewed-", "/manifests/reviewed-")
+        authentication = MagicMock()
+        authentication.__enter__.return_value.status = 200
+        authentication.__enter__.return_value.read.return_value = b'{"token":"synthetic-read-token"}'
+
+        def missing_tag():
+            return urllib.error.HTTPError(url, 404, "missing", {}, io.BytesIO(b'{"errors":[{"code":"MANIFEST_UNKNOWN"}]}'))
+
+        with (patch.dict(os.environ, {"GITHUB_ACTOR": "synthetic", "GH_TOKEN": "synthetic", "RUNNER_TEMP": str(scratch)}),
+              patch.object(self.authority, "transfer_record", return_value=(self.staged, set())),
+              patch.object(transfer, "package_id", return_value=121),
+              patch.object(transfer, "package_versions", return_value=[]),
+              patch.object(transfer.urllib.request, "build_opener") as build_opener):
+            opener = build_opener.return_value
+            opener.open.side_effect = [authentication, missing_tag(), authentication, missing_tag()]
+            transfer.stage(expected, self.authority.image, authority=self.authority)
+            intent = json.loads((scratch / "public-image-intent/intent.json").read_text())
+            self.assertIsNone(transfer.registry_publication(intent))
+            self.assertEqual([call.args[0].full_url for call in opener.open.call_args_list[1::2]], [url, url])
+
+    def test_reviewed_registry_tags_are_only_core_manifests(self):
+        transfer = publisher.transfer
+        registry = transfer.IMAGES[publisher.REPOSITORY]
+        with patch.object(transfer.urllib.request, "build_opener") as build_opener:
+            for image, tag, blob in (
+                (transfer.IMAGES["EndurantDevs/drug-api"], "reviewed-aaaaaaaa-123-1", False),
+                (registry, "reviewed-aaaaaaaa-123-1", True),
+                (registry, "reviewed-aaaaaaaa-123-01", False),
+                (registry, "reviewed-aaaaaaaa-123-1/other", False),
+            ):
+                with self.subTest(image=image, tag=tag, blob=blob), self.assertRaisesRegex(ValueError, "fixed DEV image"):
+                    transfer.registry_read(image, tag, blob=blob)
+            build_opener.assert_not_called()
 
 
 class ReviewedPublisherWorkflowTests(unittest.TestCase):
