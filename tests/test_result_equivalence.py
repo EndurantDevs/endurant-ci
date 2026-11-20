@@ -235,6 +235,37 @@ class ResultEquivalenceTests(unittest.TestCase):
                 self.verify()
             self.setUp()
 
+    def test_rounding_boundary_requires_the_exact_upload_step_log(self):
+        self.artifact["created_at"] = (self.now + timedelta(seconds=1)).isoformat()
+        records = [
+            f"##[group]Run {equivalence.UPLOAD_ACTION}",
+            f"SHA256 digest of uploaded artifact is {'2' * 64}",
+            "Artifact common-20-2-30 successfully finalized. Artifact ID 50",
+            "Artifact download URL: https://github.com/example/project/actions/runs/20/artifacts/50",
+        ]
+
+        def log_reader(lines):
+            def read(repository, job_id, step):
+                self.assertEqual((repository, job_id, step), ("example/project", 30, 3))
+                return "\ufeff" + "\n".join(f"2026-01-01T00:00:00.1234567Z {line}" for line in lines)
+
+            return read
+
+        self.assertEqual(self.verify(read_upload_log=log_reader(records))["artifact_id"], 50)
+        for bad_log in (
+            [],
+            records[:-1],
+            records + [records[2]],
+            [records[0].replace("043fb", "dead0"), *records[1:]],
+            [records[0], records[1].replace("2", "3"), *records[2:]],
+            [*records[:2], records[2].replace("ID 50", "ID 51"), records[3]],
+        ):
+            with self.subTest(bad_log=bad_log), self.assertRaises(ValueError):
+                self.verify(read_upload_log=log_reader(bad_log))
+        self.artifact["created_at"] = (self.now + timedelta(seconds=2)).isoformat()
+        with self.assertRaises(ValueError):
+            self.verify(read_upload_log=log_reader(records))
+
 
 class DerivedInputTests(unittest.TestCase):
     def setUp(self):
