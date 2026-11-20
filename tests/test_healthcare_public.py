@@ -5214,6 +5214,14 @@ run_wheel_tests() {
         source_export = "custom_import_source_columns_v1"
         fragment_export = "custom_import_graph_document_fragments_v1"
         observation_export = "encode_catalog_observation_page"
+        provider_rows_test = "tests/test_provider_directory_rows_native.py"
+        provider_rows_exports = (
+            "provider_directory_rows_version", "prepare_provider_directory_rows_v1",
+            "prepare_provider_directory_row_lines_v1",
+        )
+        compiled_provider_rows = "".join(
+            f"compiled_fixture.{name} = {name} = compiled_function\n" for name in provider_rows_exports
+        )
         compiled_source = f"compiled_fixture.{source_export} = {source_export} = compiled_function\n"
         compiled_fragments = f"compiled_fixture.{fragment_export} = {fragment_export} = compiled_function\n"
         compiled_observation = f"compiled_fixture.{observation_export} = {observation_export} = compiled_function\n"
@@ -5225,6 +5233,9 @@ run_wheel_tests() {
             (GRAPH_FRAGMENT_WHEEL_TESTS[:1], compiled_fragments, True, ""),
             (GRAPH_FRAGMENT_WHEEL_TESTS[1:], no_import, True, ""),
             ((CATALOG_OBSERVATION_WHEEL_TEST,), compiled_observation, True, ""),
+            ((provider_rows_test,), compiled_provider_rows, True, ""),
+            ((provider_rows_test,), compiled_provider_rows + f"{provider_rows_exports[-1]} = len\n", False,
+             "Native registry extension is incomplete"),
             ((*SOURCE_COLUMN_WHEEL_TESTS, *GRAPH_FRAGMENT_WHEEL_TESTS, CATALOG_OBSERVATION_WHEEL_TEST),
              valid_source + compiled_fragments + compiled_observation, True, ""),
             ((CATALOG_OBSERVATION_WHEEL_TEST,), "", False, "Native registry extension is incomplete"),
