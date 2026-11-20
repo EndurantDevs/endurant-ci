@@ -222,6 +222,9 @@ class RenderWorkflowChecks(unittest.TestCase):
                     rendered = RENDERER.render_workflow(kind, "1" * 40, caller)
                     workflow = yaml.safe_load(rendered)
                     if kind == "healthcare":
+                        self.assertNotIn("REVIEWED_SOURCE_", rendered)
+                        self.assertNotIn("inputs.reviewed_", rendered)
+                        canonical = RENDERER.ordinary_healthcare_workflow(canonical)
                         self.assertFalse(workflow["jobs"]["python-tests"]["strategy"]["fail-fast"])
                         self.assertEqual(sum(len(job.get("strategy", {}).get("matrix", {}).get("include", [None]))
                                              for job in workflow["jobs"].values()), 82)

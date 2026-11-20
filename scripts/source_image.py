@@ -302,15 +302,31 @@ def producer_identity(expected):
 def export_image(image):
     if not DIGEST.fullmatch(image):
         raise ValueError("export requires the immutable image ID captured before testing")
-    identity, run = context(producer=True)
-    if run["event"] != "push" or identity["source_branch"] != "dev":
-        raise ValueError("image export is restricted to DEV pushes")
     source = Path(os.environ["SOURCE_ROOT"])
+    reviewed = github.reviewed_source(os.environ)
+    if reviewed is None:
+        identity, run = context(producer=True)
+        if run["event"] != "push" or identity["source_branch"] != "dev":
+            raise ValueError("image export is restricted to DEV pushes")
+        schema = "public-source-image-staging-v1"
+        workflow_blob_field = "caller_workflow_blob_sha"
+    else:
+        revision = os.environ["CI_REVISION"]
+        if (not github.exact_sha(revision)
+                or command("git", "-C", str(ROOT), "rev-parse", "HEAD").decode().strip() != revision):
+            raise ValueError("reviewed export requires its exact trusted public CI checkout")
+        github.verify_reviewed_checkout(source, reviewed)
+        producer = github.reviewed_producer(os.environ)
+        identity = {key: reviewed[key] for key in IDENTITY_FIELDS}
+        identity.update(source_tree=reviewed["source_tree"], producer=producer, ci_revision=revision,
+                        run_id=producer["run_id"], run_attempt=producer["run_attempt"])
+        schema = "reviewed-source-image-staging-v1"
+        workflow_blob_field = "source_workflow_blob_sha"
     if command("git", "-C", str(source), "rev-parse", "HEAD").decode().strip() != identity["source_sha"]:
         raise ValueError("tested image source checkout changed")
     caller = command("git", "-C", str(source), "rev-parse", "HEAD:.github/workflows/ci.yml").decode().strip()
     if not github.SHA.fullmatch(caller):
-        raise ValueError("image export requires the exact caller workflow blob")
+        raise ValueError("image export requires the exact source workflow blob")
     inspected = image_identity(image)
     if inspected["Id"] != image:
         raise ValueError("the tested immutable image identity changed")
@@ -328,8 +344,8 @@ def export_image(image):
     config_digest, identifiers = archive_identity(archive, identity, require_provenance=True)
     if image not in identifiers:
         raise ValueError("exported archive differs from the tested immutable image")
-    record = {"schema": "public-source-image-staging-v1", **identity,
-              "caller_workflow_blob_sha": caller, "image_id": image,
+    record = {"schema": schema, **identity,
+              workflow_blob_field: caller, "image_id": image,
               "platform": "linux/amd64", "config_digest": config_digest, "archive_sha256": file_digest(archive)}
     (destination / "producer.json").write_text(json.dumps(record, sort_keys=True) + "\n")
 
@@ -587,8 +603,8 @@ def active_publisher(expected):
     return run, own[0]
 
 
-def proof_name(identity, intent=False, *, recovery=False):
-    prefix = "recovery-" if recovery else ""
+def proof_name(identity, intent=False, *, recovery=False, reviewed=False):
+    prefix = "reviewed-" if reviewed else "recovery-" if recovery else ""
     return f"{artifacts.KINDS[identity['repository']]}-public-image-{prefix}{'intent-' if intent else ''}{identity['run_id']}-{identity['run_attempt']}"
 
 
@@ -619,7 +635,7 @@ def upload_snapshot(expected, run, job, *, intent=False):
     identity = expected.get("publisher", expected["identity"])
     repository = identity["repository"]
     max_bytes = INTENT_MAX_BYTES if intent else 65536
-    name = proof_name(identity, intent, recovery="publisher" in expected)
+    name = proof_name(identity, intent, recovery="publisher" in expected, reviewed="reviewed_approval" in expected)
     items = [item for item in github.pages(repository, f"actions/runs/{run['id']}/artifacts", "artifacts") if item.get("name") == name]
     steps = [step for step in job.get("steps", []) if step.get("name") == (INTENT_UPLOAD if intent else RECEIPT_UPLOAD)]
     if not intent and len(steps) == 1 and steps[0].get("status") == "completed":
@@ -662,14 +678,14 @@ def artifact_payload(repository, item, filename, max_bytes):
         return json.loads(archive.read(entries[0]))
 
 
-def transfer_record(expected, directory):
+def transfer_record(expected, directory, *, schema="public-source-image-staging-v1"):
     if set(path.name for path in directory.iterdir()) != {"producer.json", "image.tar.gz"} or any(
             not path.is_file() or path.is_symlink() for path in directory.iterdir()):
         raise ValueError("unexpected files in the image transfer artifact")
     record = read_json(directory / "producer.json")
     if "prior_producer" in expected and expected["prior_producer"] != record:
         raise ValueError("retained image differs from its original publication intent")
-    metadata = {"schema": "public-source-image-staging-v1", **producer_identity(expected), "platform": "linux/amd64"}
+    metadata = {"schema": schema, **producer_identity(expected), "platform": "linux/amd64"}
     if (set(record) != set(metadata) | {"image_id", "config_digest", "archive_sha256"}
             or any(record.get(key) != value for key, value in metadata.items())
             or not DIGEST.fullmatch(record.get("config_digest", ""))
@@ -695,12 +711,15 @@ class PublicationAuthority:
     def publication_receipt(self, expected, record, digest):
         return publication_receipt(expected, record, digest)
 
+    def transfer_record(self, expected, directory):
+        return transfer_record(expected, directory)
+
 
 def stage(expected, directory, *, authority=None):
     authority = authority or PublicationAuthority()
     if authority.admit() != expected:
         raise ValueError("publication authority changed before durable intent")
-    record, _ = transfer_record(expected, directory)
+    record, _ = authority.transfer_record(expected, directory)
     created = datetime.now(timezone.utc)
     image = IMAGES[expected["identity"]["repository"]]
     identifier = package_id(image)
@@ -752,7 +771,7 @@ def publish(expected, directory, *, authority=None):
     authority = authority or PublicationAuthority()
     if authority.admit() != expected:
         raise ValueError("publication authority changed after download authorization")
-    record, identifiers = transfer_record(expected, directory)
+    record, identifiers = authority.transfer_record(expected, directory)
     intent, _, _ = authenticated_intent(expected, authority=authority)
     if intent["producer"] != record:
         raise ValueError("tested image differs from its durable pre-push intent")
@@ -820,6 +839,8 @@ def registry_publication(intent):
     if raw is None:
         return None
     digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    if "reviewed_approval" in expected and digest != intent["producer"]["image_id"]:
+        raise ValueError("reviewed publication registry digest differs from its tested image")
     graph = [digest]
     manifest = json.loads(raw)
     if "manifests" in manifest:

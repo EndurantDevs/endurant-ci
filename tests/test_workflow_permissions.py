@@ -291,7 +291,11 @@ class PublicWorkflowPermissions(unittest.TestCase):
         self.assertEqual(restore["with"]["path"], "${{ runner.temp }}/buildx-cache")
         self.assertEqual(saver["with"]["path"], "${{ runner.temp }}/buildx-cache")
         self.assertEqual(saver["if"], "success() && github.event_name == 'push' && github.ref == 'refs/heads/dev'")
-        self.assertEqual(prepare["if"], "github.event_name == 'push' && github.ref == 'refs/heads/dev'")
+        expected_export = "env.REVIEWED_SOURCE_SHA != '' || github.event_name == 'push' && github.ref == 'refs/heads/dev'"
+        self.assertEqual(prepare["if"], expected_export)
+        self.assertEqual(steps["Upload tested DEV image"]["if"], expected_export)
+        self.assertEqual(stage["env"]["PUBLIC_CI_EXPORT_IMAGE"], "${{ (" + expected_export + ") && '1' || '0' }}")
+        self.assertEqual(stage["env"]["GH_TOKEN"], "${{ env.REVIEWED_SOURCE_SHA == '' && github.token || '' }}")
         self.assertEqual(stage["env"]["PUBLIC_CI_BUILDX_CACHE"], "1")
         self.assertEqual(stage["env"]["PUBLIC_CI_BUILDX_CACHE_DIR"], "${{ runner.temp }}/buildx-cache")
         self.assertEqual(

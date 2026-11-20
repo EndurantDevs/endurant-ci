@@ -1,9 +1,11 @@
 """Queued aggregate status requires the exact executing image-transfer job."""
 
 from copy import deepcopy
+import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -11,6 +13,120 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import source_image as transfer
+
+
+def reviewed_environment():
+    repo = transfer.github.HEALTHCARE
+    return {
+        "GITHUB_REPOSITORY": repo, "GITHUB_EVENT_NAME": "workflow_dispatch",
+        "GITHUB_REF": "refs/heads/dev", "GITHUB_REF_PROTECTED": "true",
+        "GITHUB_SHA": "d" * 40, "GITHUB_WORKFLOW_SHA": "d" * 40,
+        "GITHUB_WORKFLOW_REF": f"{repo}/.github/workflows/reviewed-source.yml@refs/heads/dev",
+        "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
+        "REVIEWED_SOURCE_SHA": "a" * 40, "REVIEWED_BASE_SHA": "b" * 40, "REVIEWED_SOURCE_TREE": "c" * 40,
+    }
+
+
+class ReviewedContextChecks(unittest.TestCase):
+    def test_source_tuple_requires_protected_core_dispatch_and_all_exact_members(self):
+        resolve = transfer.github.reviewed_source
+        environment = reviewed_environment()
+        self.assertIsNone(resolve({}))
+        identity = resolve(environment)
+        self.assertEqual(identity["source_sha"], "a" * 40)
+        self.assertEqual(identity["base_sha"], "b" * 40)
+        self.assertEqual(identity["source_tree"], "c" * 40)
+        for change in ({"GITHUB_REPOSITORY": "Example/service"}, {"GITHUB_EVENT_NAME": "pull_request"},
+                       {"GITHUB_EVENT_NAME": "push"}, {"GITHUB_REF": "refs/tags/dev"},
+                       {"GITHUB_REF_PROTECTED": "false"}, {"REVIEWED_BASE_SHA": ""},
+                       {"REVIEWED_SOURCE_SHA": "0" * 40}, {"REVIEWED_SOURCE_TREE": "C" * 40}):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "protected Healthcare dispatch"):
+                resolve({**environment, **change})
+
+    def test_producer_dispatch_coordinates_are_separate_from_measured_checkout(self):
+        environment = reviewed_environment()
+        producer = transfer.github.reviewed_producer(environment)
+        self.assertEqual(producer["run_id"], "123")
+        self.assertEqual(producer["run_attempt"], 2)
+        self.assertEqual(producer["head_sha"], "d" * 40)
+        self.assertEqual(producer["workflow_ref"], environment["GITHUB_WORKFLOW_REF"])
+        for change in ({"GITHUB_WORKFLOW_REF": environment["GITHUB_WORKFLOW_REF"].replace("/dev", "/main")},
+                       {"GITHUB_WORKFLOW_SHA": "0" * 40}, {"GITHUB_RUN_ATTEMPT": "-1"}):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "caller workflow and run"):
+                transfer.github.reviewed_producer({**environment, **change})
+
+    def test_checkout_requires_an_exact_tree_and_sole_parent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            def git(*args):
+                return subprocess.check_output(
+                    ["git", "-C", temporary, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                     *args], text=True,
+                ).strip()
+
+            git("init", "--quiet")
+            tree = git("write-tree")
+            base = git("commit-tree", tree, "-m", "Base")
+            head = git("commit-tree", tree, "-p", base, "-m", "Reviewed source")
+            git("update-ref", "HEAD", head)
+            verify = transfer.github.verify_reviewed_checkout
+            identity = {"source_sha": head, "source_tree": tree, "base_sha": base}
+            verify(temporary, identity)
+            for change in ({"source_sha": base}, {"base_sha": head}, {"source_tree": "0" * 40}):
+                with self.subTest(change=change), self.assertRaisesRegex(ValueError, "exact commit, tree or sole parent"):
+                    verify(temporary, {**identity, **change})
+
+            merged = git("commit-tree", tree, "-p", base, "-p", head, "-m", "Merge")
+            git("update-ref", "HEAD", merged)
+            with self.assertRaisesRegex(ValueError, "sole parent"):
+                verify(temporary, {**identity, "source_sha": merged})
+
+    def test_reviewed_export_does_not_enable_existing_publication_context(self):
+        environment = {**reviewed_environment(), "CI_REVISION": "e" * 40, "GITHUB_EVENT_PATH": "/unused"}
+        with patch.dict(os.environ, environment, clear=True), \
+                patch.object(transfer, "command", return_value=b"e" * 40), patch.object(transfer.github, "api") as api:
+            self.assertIsNotNone(transfer.github.reviewed_source(os.environ))
+            payload = json.dumps({"repository": {"full_name": environment["GITHUB_REPOSITORY"], "private": False}})
+            with patch.object(transfer.Path, "read_text", return_value=payload), \
+                    self.assertRaisesRegex(ValueError, "accepts only pull_request, push"):
+                transfer.context()
+            api.assert_not_called()
+
+    def test_reviewed_export_binds_same_tested_image_to_separate_source_and_run(self):
+        tested_image = "sha256:" + "a" * 64
+        config = "sha256:" + "b" * 64
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = {**reviewed_environment(), "CI_REVISION": "e" * 40, "RUNNER_TEMP": temporary,
+                           "SOURCE_ROOT": temporary}
+            label = {"org.endurantdevs.public-ci.repository": environment["GITHUB_REPOSITORY"],
+                     "org.endurantdevs.public-ci.run": "123-2"}
+            with patch.dict(os.environ, environment, clear=True), \
+                    patch.object(transfer, "context") as normal_context, \
+                    patch.object(transfer.github, "verify_reviewed_checkout") as verify, \
+                    patch.object(transfer, "command", side_effect=[b"e" * 40, b"a" * 40, b"f" * 40]), \
+                    patch.object(transfer, "image_identity", return_value={"Id": tested_image, "Config": {"Labels": label}}), \
+                    patch.object(transfer.subprocess, "Popen") as save, \
+                    patch.object(transfer, "archive_identity", return_value=(config, {tested_image})) as archive:
+                process = save.return_value.__enter__.return_value
+                process.stdout = io.BytesIO(b"test archive bytes")
+                process.wait.return_value = 0
+                transfer.export_image(tested_image)
+            directory = Path(temporary) / "healthcare-public-image-staging-123-2"
+            record = json.loads((directory / "producer.json").read_text())
+            self.assertEqual(record["schema"], "reviewed-source-image-staging-v1")
+            self.assertEqual(record["image_id"], tested_image)
+            self.assertEqual(record["config_digest"], config)
+            self.assertEqual(record["archive_sha256"], transfer.file_digest(directory / "image.tar.gz"))
+            self.assertEqual(record["source_sha"], "a" * 40)
+            self.assertEqual(record["base_sha"], "b" * 40)
+            self.assertEqual(record["source_tree"], "c" * 40)
+            self.assertEqual(record["source_workflow_blob_sha"], "f" * 40)
+            self.assertEqual(record["producer"], transfer.github.reviewed_producer(environment))
+            self.assertNotIn("caller_workflow_blob_sha", record)
+            normal_context.assert_not_called()
+            verify.assert_called_once_with(Path(temporary), transfer.github.reviewed_source(environment))
+            save.assert_called_once_with(["docker", "image", "save", tested_image], stdout=subprocess.PIPE)
+            archive.assert_called_once()
+            self.assertTrue(archive.call_args.kwargs["require_provenance"])
 
 
 class QueuedContextChecks(unittest.TestCase):

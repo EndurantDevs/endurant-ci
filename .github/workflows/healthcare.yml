@@ -6,6 +6,22 @@ name: Healthcare public source validation
         description: Exact reviewed Endurance CI commit matching the caller pin
         type: string
         required: true
+      reviewed_source_sha:
+        description: Exact reviewed Healthcare source commit
+        type: string
+      reviewed_base_sha:
+        description: Exact sole parent of the reviewed source commit
+        type: string
+      reviewed_source_tree:
+        description: Exact Git tree of the reviewed source commit
+        type: string
+    outputs:
+      image_artifact_id:
+        value: ${{ jobs.container-package.outputs.image_artifact_id }}
+      measurement_artifact_id:
+        value: ${{ jobs.measurement.outputs.measurement_artifact_id }}
+      native_artifact_id:
+        value: ${{ jobs.public-hygiene.outputs.rust_artifact_id }}
 permissions:
   contents: read
   pull-requests: read
@@ -14,6 +30,9 @@ env:
   CI_ROOT: ${{ github.workspace }}/ci
   CI_REVISION: ${{ inputs.ci_revision }}
   SOURCE_ROOT: ${{ github.workspace }}/source
+  REVIEWED_SOURCE_SHA: ${{ inputs.reviewed_source_sha }}
+  REVIEWED_BASE_SHA: ${{ inputs.reviewed_base_sha }}
+  REVIEWED_SOURCE_TREE: ${{ inputs.reviewed_source_tree }}
   CARGO_TERM_COLOR: always
   PYTHONDONTWRITEBYTECODE: '1'
 jobs:
@@ -164,6 +183,7 @@ jobs:
         digest-mismatch: error
         path: rust-debug-binaries
     - name: Prepare read-only common-test evidence
+      if: env.REVIEWED_SOURCE_SHA == ''
       env:
         GH_TOKEN: ${{ github.token }}
       working-directory: ${{ github.workspace }}
@@ -235,7 +255,7 @@ jobs:
           label: Python tests (6/6)
           output: artifact_5
     env:
-      COMMON_TEST_EQUIVALENCE: 'true'
+      COMMON_TEST_EQUIVALENCE: ${{ inputs.reviewed_source_sha == '' }}
       COMMON_TEST_STEP: 'Run complete validation stage'
       CI_SHARD: ${{ matrix.shard }}
   capacity-evidence:
@@ -255,7 +275,7 @@ jobs:
         shell: bash
         working-directory: source
     env:
-      COMMON_TEST_EQUIVALENCE: 'true'
+      COMMON_TEST_EQUIVALENCE: ${{ inputs.reviewed_source_sha == '' }}
       COMMON_TEST_STEP: 'Run complete validation stage'
     steps:
     - name: Check out pinned public CI
@@ -268,6 +288,7 @@ jobs:
     - name: Prepare source and toolchain
       uses: ./ci/scripts/healthcare/setup
     - name: Prepare read-only common-test evidence
+      if: env.REVIEWED_SOURCE_SHA == ''
       env:
         GH_TOKEN: ${{ github.token }}
       working-directory: ${{ github.workspace }}
@@ -314,7 +335,7 @@ jobs:
     - python-quality
     - readability-preflight
     env:
-      COMMON_TEST_EQUIVALENCE: 'true'
+      COMMON_TEST_EQUIVALENCE: ${{ inputs.reviewed_source_sha == '' }}
       COMMON_TEST_STEP: 'Run complete validation stage'
     defaults:
       run:
@@ -331,6 +352,7 @@ jobs:
     - name: Prepare source and toolchain
       uses: ./ci/scripts/healthcare/setup
     - name: Prepare read-only common-test evidence
+      if: env.REVIEWED_SOURCE_SHA == ''
       env:
         GH_TOKEN: ${{ github.token }}
       working-directory: ${{ github.workspace }}
@@ -364,7 +386,7 @@ jobs:
     - python-quality
     - readability-preflight
     env:
-      COMMON_TEST_EQUIVALENCE: 'true'
+      COMMON_TEST_EQUIVALENCE: ${{ inputs.reviewed_source_sha == '' }}
       COMMON_TEST_STEP: 'Run complete validation stage'
     defaults:
       run:
@@ -389,6 +411,7 @@ jobs:
         python "$CI_ROOT/scripts/healthcare/install_rust_tools.py" "$tools_directory"
         printf '%s\n' "$tools_directory" >> "$GITHUB_PATH"
     - name: Prepare read-only common-test evidence
+      if: env.REVIEWED_SOURCE_SHA == ''
       env:
         GH_TOKEN: ${{ github.token }}
       working-directory: ${{ github.workspace }}
@@ -448,15 +471,15 @@ jobs:
         restore-keys: |
           healthcare-buildx-v1-
     - name: Prepare Docker engine for attested export
-      if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+      if: env.REVIEWED_SOURCE_SHA != '' || github.event_name == 'push' && github.ref == 'refs/heads/dev'
       run: python3 "$CI_ROOT/scripts/source_image.py" prepare-engine
     - name: Run complete validation stage
       env:
-        PUBLIC_CI_EXPORT_IMAGE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && '1' || '0' }}
+        PUBLIC_CI_EXPORT_IMAGE: ${{ (env.REVIEWED_SOURCE_SHA != '' || github.event_name == 'push' && github.ref == 'refs/heads/dev') && '1' || '0' }}
         PUBLIC_CI_BUILDX_CACHE: '1'
         PUBLIC_CI_BUILDX_CACHE_DIR: ${{ runner.temp }}/buildx-cache
         PUBLIC_CI_BUILDX_CACHE_WRITE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && '1' || '0' }}
-        GH_TOKEN: ${{ github.token }}
+        GH_TOKEN: ${{ env.REVIEWED_SOURCE_SHA == '' && github.token || '' }}
       run: 'bash "$CI_ROOT/scripts/healthcare/check" container-package
 
         git diff --exit-code
@@ -472,7 +495,7 @@ jobs:
         key: healthcare-buildx-v1-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
     - name: Upload tested DEV image
       id: image-artifact
-      if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+      if: env.REVIEWED_SOURCE_SHA != '' || github.event_name == 'push' && github.ref == 'refs/heads/dev'
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: healthcare-public-image-staging-${{ github.run_id }}-${{ github.run_attempt }}
@@ -530,7 +553,7 @@ jobs:
         - 6379:6379
         options: --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 5
     env:
-      COMMON_TEST_EQUIVALENCE: 'true'
+      COMMON_TEST_EQUIVALENCE: ${{ inputs.reviewed_source_sha == '' }}
       COMMON_TEST_STEP: 'Run complete validation stage'
     defaults:
       run:
@@ -547,6 +570,7 @@ jobs:
     - name: Prepare source and toolchain
       uses: ./ci/scripts/healthcare/setup
     - name: Prepare read-only common-test evidence
+      if: env.REVIEWED_SOURCE_SHA == ''
       env:
         GH_TOKEN: ${{ github.token }}
       working-directory: ${{ github.workspace }}
@@ -593,7 +617,7 @@ jobs:
         options: --health-cmd "pg_isready -U postgres -d ptg2_v3_lifecycle_test_ci_runner" --health-interval 2s --health-timeout
           5s --health-retries 25
     env:
-      COMMON_TEST_EQUIVALENCE: 'true'
+      COMMON_TEST_EQUIVALENCE: ${{ inputs.reviewed_source_sha == '' }}
       COMMON_TEST_STEP: 'Run complete validation stage'
       PYTEST_ADDOPTS: --cov-config=test-coverage.ini --cov=api --cov=db --cov=process --cov=public_evidence --cov=service
         --cov=main --cov-branch --cov-report= --cov-append
@@ -654,6 +678,7 @@ jobs:
         digest-mismatch: error
         path: rust-debug-binaries
     - name: Prepare read-only common-test evidence
+      if: env.REVIEWED_SOURCE_SHA == ''
       env:
         GH_TOKEN: ${{ github.token }}
       working-directory: ${{ github.workspace }}
@@ -976,7 +1001,7 @@ jobs:
         options: --health-cmd "pg_isready -U postgres -d ptg2_v3_lifecycle_test_ci_runner" --health-interval 2s --health-timeout
           5s --health-retries 25
     env:
-      COMMON_TEST_EQUIVALENCE: 'true'
+      COMMON_TEST_EQUIVALENCE: ${{ inputs.reviewed_source_sha == '' }}
       COMMON_TEST_STEP: 'Run complete validation stage'
       PYTEST_ADDOPTS: ''
       HLTHPRT_DB_DRIVER: asyncpg
@@ -1045,7 +1070,7 @@ jobs:
         GH_TOKEN: ${{ github.token }}
       working-directory: ${{ github.workspace }}
       run: python3 "$CI_ROOT/scripts/common_test_broker.py" --source-root "$SOURCE_ROOT" --source-repository "$SOURCE_REPOSITORY" --step "$COMMON_TEST_STEP" --scope same-tree-healthcare-postgres-fhir-catalog-integration --directory "$RUNNER_TEMP/common-test-evidence"
-      if: steps.catalog-capability.outputs.present == 'true'
+      if: steps.catalog-capability.outputs.present == 'true' && env.REVIEWED_SOURCE_SHA == ''
     - name: Run complete validation stage
       env:
         HLTHPRT_DB_HOST: 127.0.0.1
@@ -1127,6 +1152,7 @@ jobs:
       run: python3 ci/scripts/source_identity.py
       working-directory: ${{ github.workspace }}
     - name: Refresh current and original native test provenance
+      if: env.REVIEWED_SOURCE_SHA == ''
       env:
         GH_TOKEN: ${{ github.token }}
       run: >-
