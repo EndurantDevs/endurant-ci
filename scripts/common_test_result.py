@@ -466,6 +466,26 @@ def download(repository, identifier):
     return data
 
 
+def read_upload_log(repository, job_id, step_number, *, token=None):
+    equivalent.require(
+        REPOSITORY.fullmatch(repository)
+        and type(job_id) is int and job_id > 0
+        and type(step_number) is int and step_number > 0,
+        "Invalid upload step log target",
+    )
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{repository}/actions/jobs/{job_id}/steps/{step_number}/logs",
+        headers={
+            "Authorization": "Bearer " + (token if token is not None else os.environ["GH_TOKEN"]),
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2026-03-10",
+        },
+    )
+    with urllib.request.build_opener(ArtifactRedirect()).open(request, timeout=30) as response:
+        equivalent.require(response.url.startswith("https://"), "Upload step log is not HTTPS")
+        return _read_bounded_response(response, 64 * 1024, "Upload step log exceeds its limit").decode("utf-8")
+
+
 def tracked(root):
     return [
         name
@@ -1281,6 +1301,7 @@ def verify_original(current, original, run, artifact, data, repository):
         artifact_name=artifact_name(original["producer"]),
         upload_step=UPLOAD_STEP,
         retained_verified=retained_verified,
+        read_upload_log=read_upload_log,
     )
     latest = api(repository, f"actions/runs/{run['id']}")
     equivalent.require(
@@ -1326,6 +1347,7 @@ def refresh_document(
         allowed_events=producer_events(current),
         artifact_name=artifact_name(producer),
         upload_step=UPLOAD_STEP,
+        read_upload_log=read_upload_log,
     )
     identity = current["inputs"]["recipe_checkout"]
     if identity["repository"] == repository:

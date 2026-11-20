@@ -16,6 +16,7 @@ SHA = re.compile(r"[0-9a-f]{40}\Z")
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 SCHEMA = "test-result-equivalence-v1"
 APP_ID = 15368
+UPLOAD_ACTION = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 
 
 def file_inventory(root, paths):
@@ -476,6 +477,33 @@ def measurement(source, inputs, scope, producer, *, executed):
     }
 
 
+def _matches_upload_step(log, repository, run_id, artifact, archive_sha256):
+    """Bind the archive to the pinned action in a GitHub-provided exact-step log."""
+    messages = []
+    for line in log.removeprefix("\ufeff").splitlines():
+        timestamp, _, message = line.partition(" ")
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", timestamp):
+            messages.append(message)
+    prefixes = (
+        "##[group]Run actions/upload-artifact@",
+        "SHA256 digest of uploaded artifact is ",
+        "Artifact download URL: ",
+    )
+    observed = [
+        message for message in messages
+        if message.startswith(prefixes) or (
+            message.startswith("Artifact ") and " successfully finalized. Artifact ID " in message
+        )
+    ]
+    artifact_id = artifact["id"]
+    return observed == [
+        f"##[group]Run {UPLOAD_ACTION}",
+        f"SHA256 digest of uploaded artifact is {archive_sha256}",
+        f"Artifact {artifact['name']} successfully finalized. Artifact ID {artifact_id}",
+        f"Artifact download URL: https://github.com/{repository}/actions/runs/{run_id}/artifacts/{artifact_id}",
+    ]
+
+
 def authenticate_job_artifact(
     producer,
     run,
@@ -488,6 +516,7 @@ def authenticate_job_artifact(
     artifact_name,
     upload_step,
     retained_verified=False,
+    read_upload_log=None,
 ):
     """Authenticate a successful native job and its immutable upload, independently of run completion."""
     require(
@@ -576,8 +605,22 @@ def authenticate_job_artifact(
         )
     ]
     require(
-        all(value.tzinfo is not None for value in timestamps)
-        and timestamps[0] <= timestamps[1] <= timestamps[2],
+        all(value.tzinfo is not None for value in timestamps) and timestamps[0] <= timestamps[2],
+        "The authenticated upload step has invalid timestamps",
+    )
+    if timestamps[0] <= timestamps[1] <= timestamps[2]:
+        return
+    # Independent GitHub clocks round uploads and artifact creation differently.
+    step_number = uploads[0].get("number")
+    require(
+        read_upload_log is not None
+        and timestamps[2] < timestamps[1] <= timestamps[2] + timedelta(seconds=1)
+        and type(step_number) is int
+        and step_number > 0
+        and _matches_upload_step(
+            read_upload_log(repository, job["id"], step_number),
+            repository, run["id"], artifact, archive_sha256,
+        ),
         "The artifact was not created by the authenticated upload step",
     )
 
@@ -597,6 +640,7 @@ def verify(
     upload_step,
     now=None,
     retained_verified=False,
+    read_upload_log=None,
 ):
     """Authenticate an original execution; callers retain authority and fresh gates."""
     require(
@@ -675,6 +719,7 @@ def verify(
         artifact_name=artifact_name,
         upload_step=upload_step,
         retained_verified=retained_verified,
+        read_upload_log=read_upload_log,
     )
     return {
         "source": copy.deepcopy(current["source"]),
