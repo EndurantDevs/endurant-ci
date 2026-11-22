@@ -1435,6 +1435,7 @@ run_python_main() {
     fi
   done
   for test_path in \
+    tests/test_provider_directory_network_first_store_postgres.py \
     tests/test_provider_directory_published_replacement_postgres.py \
     tests/test_provider_directory_published_replacement_recovery_postgres.py \
     tests/test_provider_directory_published_replacement_inputs_postgres.py \
@@ -4343,6 +4344,10 @@ run_provider_directory_postgres() {
     tests/test_provider_directory_artifact_eligibility_refresh_db.py \
     tests/test_provider_directory_artifact_proof_scope_db.py \
     tests/test_provider_directory_artifact_scope_bulk_load_db.py
+  if [ -f "$repository_root/tests/test_provider_directory_network_first_store_postgres.py" ]; then
+    env "${common_env[@]}" timeout --foreground 420s python -m pytest -q \
+      tests/test_provider_directory_network_first_store_postgres.py
+  fi
   fi
 
   if [[ "$lane" = directory-address || "$lane" = all ]]; then
