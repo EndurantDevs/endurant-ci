@@ -6086,6 +6086,8 @@ exit "$status"
             "tests/test_custom_import_build_output_postgres.py",
             "tests/test_custom_import_segmented_runner_postgres.py",
         )
+        build_family_paths = (build_test_paths[0], build_test_paths[2])
+        build_source_paths = (build_test_paths[1], build_test_paths[3])
         operator_test_paths = (
             "tests/test_custom_import_operator_postgres.py",
             "tests/test_custom_import_registration_authority_postgres.py",
@@ -6099,14 +6101,15 @@ exit "$status"
         rejection_test_paths = (CUSTOM_IMPORT_REJECTION_CAPABILITY[-1],)
         bulk_test_paths = CUSTOM_IMPORT_BULK_NATIVE_TESTS
         test_groups = (lifecycle_test_paths, materialization_test_paths, capture_test_paths,
-                       build_test_paths[:4], operator_test_paths[:4], operator_test_paths[4:],
+                       build_family_paths, build_source_paths, operator_test_paths[:4], operator_test_paths[4:],
                        build_test_paths[4:], (installed_test_path, acquisition_test_path), family_test_paths,
                        snapshot_test_paths, rejection_test_paths, bulk_test_paths[:3], bulk_test_paths[3:])
-        groups_by_lane = {"core-imports": test_groups[:2], "registry-8": test_groups[3:4],
-                          "core-imports-2": test_groups[4:5], "registry-11": test_groups[5:6],
+        groups_by_lane = {"core-imports": test_groups[:2], "registry-8": (build_family_paths, build_source_paths),
+                          "core-imports-2": (operator_test_paths[:4],), "registry-11": (operator_test_paths[4:],),
                           "core-services": (), "registry-31": (capture_test_paths,),
-                          "core-snapshots": test_groups[6:7], "registry-41": test_groups[7:8], "registry-9": test_groups[8:9],
-                          "registry-4": test_groups[9:10], "core-snapshots-2": test_groups[10:],
+                          "core-snapshots": (build_test_paths[4:],), "registry-41": ((installed_test_path, acquisition_test_path),),
+                          "registry-9": (family_test_paths,), "registry-4": (snapshot_test_paths,),
+                          "core-snapshots-2": (rejection_test_paths, bulk_test_paths[:3], bulk_test_paths[3:]),
                           "core-ptg": (), "all": test_groups, "legacy": test_groups}
         required_by_lane = {"core-imports": (), "core-imports-2": (), "core-services": (), "registry-31": required_test_paths[:1],
                             "core-snapshots": (), "registry-9": family_test_paths, "core-snapshots-2": (), "core-ptg": (),
@@ -6272,7 +6275,13 @@ fi
                             failed_group = next(i for i, group in enumerate(expected_groups) if failure_path in group)
                             expected_groups = expected_groups[:failed_group + 1]
                         self.assertEqual(executions, [])
-                        expected_route_count = sum(2 if group == list(family_test_paths) else 1 for group in expected_groups)
+                        expected_route_count = sum(
+                            1 + int(
+                                group == list(family_test_paths)
+                                or (set(group).issubset(build_source_paths) and failure_path not in group)
+                            )
+                            for group in expected_groups
+                        )
                         self.assertEqual(len(routes), expected_route_count)
                         if not failure_path and all(path in present_paths for path in test_paths):
                             complete_counts = {"core-snapshots": 1, "registry-41": 1, "registry-9": 2, "registry-4": 1, "core-snapshots-2": 3}
@@ -6296,6 +6305,17 @@ fi
                                 route_index += 2
                                 continue
                             expected_arguments = list(expected_paths)
+                            if set(expected_paths).issubset(build_source_paths):
+                                for shard in range(1 if failure_path in expected_paths else 2):
+                                    self.assertEqual(
+                                        routes[route_index].split()[3:],
+                                        expected_arguments + [
+                                            "-p", "scripts.ci.shard_pytest_nodeids",
+                                            "--ci-shard-count", "2", "--ci-shard-index", str(shard),
+                                        ],
+                                    )
+                                    route_index += 1
+                                continue
                             if expected_paths[0] == installed_test_path:
                                 expected_arguments += ["-n", "2", "--dist", "worksteal", "--durations=9", "-vv"]
                             self.assertEqual(routes[route_index].split()[3:], expected_arguments)
@@ -6325,8 +6345,11 @@ fi
                     + imports_2[:1] + complete_routes_by_lane["registry-11"] + imports_2[1:])
         self.assertEqual(combined, complete_routes_by_lane["all"])
         self.assertEqual(combined, complete_routes_by_lane["legacy"])
-        self.assertEqual(len(combined), 11)
-        paths = [path for group in combined for path in group]
+        self.assertEqual(len(combined), 13)
+        paths = [path for group in combined for path in group if path.startswith("tests/")]
+        for path in build_source_paths:
+            self.assertEqual(paths.count(path), 2)
+            paths.remove(path)
         self.assertEqual(len(paths), len(set(paths)))
 
     def test_import_family_pair_isolates_inputs_and_joins_before_combining(self):
