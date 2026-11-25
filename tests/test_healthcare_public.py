@@ -83,6 +83,21 @@ CUSTOM_IMPORT_SNAPSHOT_READ_TESTS = (
     "tests/test_custom_import_retained_homes_postgres.py",
     "tests/test_custom_import_revision_home_postgres.py",
 )
+
+
+def write_snapshot_sharder(source):
+    path = source / "scripts/ci/shard_pytest_nodeids.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        'def collect_nodeids(paths):\n'
+        '    return sorted(path + "::test_native" for path in paths)\n'
+        'def select_nodeids(nodeids, *, shard_count, shard_index):\n'
+        '    return nodeids[shard_index::shard_count]\n'
+        'def write_nodeids(output, nodeids):\n'
+        '    output.write_text("".join(nodeid + "\\n" for nodeid in nodeids))\n'
+    )
+
+
 CUSTOM_IMPORT_BULK_NATIVE_TESTS = (
     "tests/test_custom_import_bulk_snapshot_writers_postgres.py",
     "tests/test_custom_import_legacy_snapshot_writers_postgres.py",
@@ -5789,20 +5804,22 @@ git() {
     def test_custom_import_rejection_runs_separately_from_snapshot_readers_and_checks_both_reports(self):
         self._check_reported_custom_import_routes(
             (CUSTOM_IMPORT_REJECTION_CAPABILITY,), CUSTOM_IMPORT_SNAPSHOT_READ_TESTS,
-            native_lane="core-snapshots-2", reader_lane="registry-4")
+            native_lane="core-snapshots-2", reader_lanes=("registry-4", "registry-47"))
 
-    def _check_reported_custom_import_routes(self, capabilities, reader_paths=(), *, native_lane, reader_lane=None):
+    def _check_reported_custom_import_routes(self, capabilities, reader_paths=(), *, native_lane, reader_lanes=()):
         native_paths = tuple(capability[-1] for capability in capabilities)
-        group_lanes = [(native_lane, native_paths[-1])] + ([(reader_lane, reader_paths[0])] if reader_paths else [])
+        reader_groups = {lane: sorted(reader_paths)[index::2] for index, lane in enumerate(reader_lanes)}
+        group_lanes = [(native_lane, native_paths[-1])] + [(lane, group[0]) for lane, group in reader_groups.items()]
         cases = [(lane, len(capabilities), "", native_paths[-1]) for lane in
                  ("core-services", "core-services-2", "core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", "core-ptg",
                   *(lane for lane, _ in group_lanes), "all", "legacy")]
         cases += [(native_lane, count, "", native_paths[-1]) for count in range(len(capabilities))]
         cases += [(lane, len(capabilities), stage, failure_path) for lane, failure_path in group_lanes for stage in ("create", "setup")]
-        report_failures = [(native_lane, path) for path in native_paths] + ([(reader_lane, reader_paths[0])] if reader_paths else [])
+        report_failures = [(native_lane, path) for path in native_paths] + group_lanes[1:]
         cases += [(lane, len(capabilities), stage, failure_path)
                   for lane, failure_path in report_failures
                   for stage in ("pytest", "missing-report", "empty", "skipped", "error", "failure", "duplicate", "wrong-family", "missing-family")]
+        cases += [(lane, len(capabilities), "wrong-node", group[0]) for lane, group in reader_groups.items()]
         for lane, count, stage, failure_path in cases:
             with self.subTest(lane=lane, count=count, stage=stage, failure=failure_path), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -5814,6 +5831,8 @@ git() {
                     path = source / name
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.touch()
+                if reader_paths and count:
+                    write_snapshot_sharder(source)
                 environment = {
                     **os.environ, "SOURCE_ROOT": str(source), "CI_ROOT": str(ROOT),
                     "CI_DEPS_READY": "1", "COVERAGE_BASE_SHA": "a" * 40,
@@ -5852,7 +5871,11 @@ python() {
     shift 3
     local test_paths=()
     while [ "$#" -gt 0 ] && [ "$1" != --junitxml ]; do
-      test_paths+=("$1")
+      if [[ "$1" = @* ]]; then
+        while IFS= read -r nodeid; do test_paths+=("${nodeid%%::*}"); done < "${1#@}"
+      else
+        test_paths+=("$1")
+      fi
       shift
     done
     [ "$#" = 2 ] || return 97
@@ -5877,7 +5900,8 @@ if stage != "empty":
         if failure == "missing-family":
             continue
         classname = "tests.unrelated" if failure == "wrong-family" else test_path.removesuffix(".py").replace("/", ".")
-        case = ET.SubElement(suite, "testcase", classname=classname, name="test_native")
+        name = "test_unselected" if failure == "wrong-node" else "test_native"
+        case = ET.SubElement(suite, "testcase", classname=classname, name=name)
         if failure in {"skipped", "error", "failure"}:
             ET.SubElement(case, failure)
         if failure == "duplicate":
@@ -5912,8 +5936,10 @@ printf 'complete\n' >> "$CALL_LOG"
                         self.assertNotIn("--ignore " + capability[1] + " ", call + " ")
                 native = [call.split("\t") for call in calls if call.startswith("native\t")]
                 expected_groups = []
-                if count and reader_paths and lane in {reader_lane, "all", "legacy"}:
-                    expected_groups.append(list(reader_paths))
+                if count and lane in reader_groups:
+                    expected_groups.append(reader_groups[lane])
+                if count and lane in {"all", "legacy"}:
+                    expected_groups.extend(reader_groups.values())
                 if count and lane in {native_lane, "all", "legacy"}:
                     expected_groups.extend([path] for path in native_paths[:count])
                 expected_calls = expected_groups
@@ -5926,7 +5952,7 @@ printf 'complete\n' >> "$CALL_LOG"
                 created = [call.removeprefix("create\t") for call in calls if call.startswith("create\t")]
                 dropped = [call.removeprefix("drop\t") for call in calls if call.startswith("drop\t")]
                 self.assertEqual(dropped, created)
-                if lane in {native_lane, reader_lane}:
+                if lane == native_lane or lane in reader_groups:
                     self.assertEqual(len(created), 1 if stage in {"create", "setup"} else len(expected_calls))
                 self.assertEqual(calls.count("complete"), int(not stage))
                 self.assertEqual(len({call[2] for call in native}), len(native))
@@ -6109,6 +6135,7 @@ exit "$status"
                           "core-services": (), "registry-31": (capture_test_paths,),
                           "core-snapshots": (build_test_paths[4:],), "registry-41": ((installed_test_path, acquisition_test_path),),
                           "registry-9": (family_test_paths,), "registry-4": (snapshot_test_paths,),
+                          "registry-47": (snapshot_test_paths,),
                           "core-snapshots-2": (rejection_test_paths, bulk_test_paths[:3], bulk_test_paths[3:]),
                           "core-ptg": (), "all": test_groups, "legacy": test_groups}
         required_by_lane = {"core-imports": (), "core-imports-2": (), "core-services": (), "registry-31": required_test_paths[:1],
@@ -6136,8 +6163,13 @@ exit "$status"
         cases = [(lane, (*required_by_lane.get(lane, ()), *paths), "", "") for lane in home_lanes for paths in present_path_sets
                  if not lane.startswith("registry-") or not paths
                  or any(path in paths for group in groups_by_lane[lane] for path in group)]
-        cases += [(lane, test_paths, group[0], "")
-                  for lane, groups in groups_by_lane.items() for group in groups]
+        snapshot_lane_indexes = {"registry-4": 0, "registry-47": 1}
+        for lane, groups in groups_by_lane.items():
+            for group in groups:
+                failure_path = group[0]
+                if group == snapshot_test_paths and lane in snapshot_lane_indexes:
+                    failure_path = sorted(group)[snapshot_lane_indexes[lane]]
+                cases.append((lane, test_paths, failure_path, ""))
         cases += [(lane, test_paths, family_test_paths[1], "") for lane in ("registry-9", "all")]
         cases += [(lane, test_paths, build_test_paths[-1], "") for lane in ("core-snapshots", "all")]
         cases += [(lane, test_paths, build_test_paths[3], "") for lane in ("registry-8", "all")]
@@ -6168,6 +6200,8 @@ exit "$status"
                         (source / test_path).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
                     if missing_path in acquisition_dependencies:
                         (source / missing_path).unlink()
+                    if rejection_test_paths[0] in present_paths:
+                        write_snapshot_sharder(source)
                     for test_path in historical_tail_paths[:3]:
                         (source / test_path).write_text("# synthetic PostgreSQL test\n", encoding="utf-8")
                     call_log = root / "calls"
@@ -6195,6 +6229,11 @@ install_address_canon_wheel() { :; }
 create_test_database() { :; }
 drop_test_database() { :; }
 run_scoped_archive_postgres() {
+  if [[ "${4:-}" = @* ]]; then
+    local selection_paths=() nodeid
+    while IFS= read -r nodeid; do selection_paths+=("${nodeid%%::*}"); done < "${4#@}"
+    set -- "$1" "$2" "$3" "${selection_paths[@]}" "${@:5}"
+  fi
   printf '%s\n' "$*" >> "$CALL_LOG"
   for test_path in "$@"; do
     if [ "$test_path" = "$FAILURE_PATH" ]; then return 17; fi
@@ -6271,6 +6310,16 @@ fi
                             [path for path in group if path in present_paths]
                             for group in groups_by_lane.get(lane, ()) if any(path in present_paths for path in group)
                         ]
+                        for index, group in enumerate(expected_groups):
+                            if not set(group).issubset(snapshot_test_paths):
+                                continue
+                            if rejection_test_paths[0] in present_paths:
+                                first, second = sorted(group)[::2], sorted(group)[1::2]
+                                selected = {"registry-4": [first], "registry-47": [second]}.get(lane, [first, second])
+                                expected_groups[index:index + 1] = [part for part in selected if part]
+                            elif lane == "registry-47":
+                                expected_groups.pop(index)
+                            break
                         if failure_path:
                             failed_group = next(i for i, group in enumerate(expected_groups) if failure_path in group)
                             expected_groups = expected_groups[:failed_group + 1]
@@ -6284,7 +6333,8 @@ fi
                         )
                         self.assertEqual(len(routes), expected_route_count)
                         if not failure_path and all(path in present_paths for path in test_paths):
-                            complete_counts = {"core-snapshots": 1, "registry-41": 1, "registry-9": 2, "registry-4": 1, "core-snapshots-2": 3}
+                            complete_counts = {"core-snapshots": 1, "registry-41": 1, "registry-9": 2, "registry-4": 1,
+                                               "registry-47": 1, "core-snapshots-2": 3}
                             if lane in complete_counts:
                                 self.assertEqual(len(routes), complete_counts[lane])
                         databases = [route.split()[0] for route in routes]
@@ -6830,7 +6880,8 @@ install_address_canon_wheel
             "core-services", "core-imports", "core-imports-2", "core-snapshots", "core-snapshots-2", "core-ptg",
             "directory-source", "directory-storage", "directory-address", "profile-storage", "profile-publication"}
         self.assertTrue(set(placements.values()) <= lanes, placements)
-        homes = {"cms-npd-candidates": "directory-source-2", "custom-import-snapshot-storage": "core-snapshots-2",
+        homes = {"cms-npd-candidates": "directory-source-2", "custom-import-snapshot-storage-0": "core-snapshots-2",
+                 "custom-import-snapshot-storage-1": "core-snapshots-2",
                  "control-imports": "profile-storage", "custom-import-provider-query": "core-imports-2",
                  "uhc-flex-rooted-graph": "directory-source-2", "profile-publication-suites": "profile-publication",
                  "custom-import-verification": "core-snapshots-2", "custom-import-family": "core-snapshots",
