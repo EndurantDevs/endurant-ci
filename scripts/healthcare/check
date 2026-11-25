@@ -31,7 +31,8 @@ artifact_path() {
 postgres_block_lane() {
   case "$1" in
     cms-npd-candidates) printf 'registry-12\n' ;;
-    custom-import-snapshot-storage) printf 'registry-4\n' ;;
+    custom-import-snapshot-storage-0) printf 'registry-4\n' ;;
+    custom-import-snapshot-storage-1) printf 'registry-47\n' ;;
     control-imports) printf 'registry-3\n' ;;
     custom-import-provider-query) printf 'registry-11\n' ;;
     uhc-flex-rooted-graph) printf 'registry-10\n' ;;
@@ -2563,7 +2564,7 @@ run_custom_import_verification_postgres() (
 )
 
 run_reported_custom_import_postgres() (
-  local archive_url=$1 report
+  local archive_url=$1 report selection=
   shift
   [ "$#" -gt 0 ] || exit 2
   verification_report_directory=
@@ -2578,11 +2579,32 @@ run_reported_custom_import_postgres() (
   trap cleanup_verification_reports EXIT
   verification_report_directory=$(mktemp -d "${RUNNER_TEMP:-/tmp}/healthcare-import-verification.XXXXXX") || exit 1
   report="$verification_report_directory/native.xml"
+  if [[ "$1" = --shard-index ]]; then
+    local shard=$2
+    shift 2
+    selection="$verification_report_directory/nodeids"
+    require_native_source_files scripts/ci/shard_pytest_nodeids.py || exit "$?"
+    PYTEST_ADDOPTS='' python - "$selection" "$shard" "$@" <<'PY' || exit "$?"
+from pathlib import Path
+import sys
+
+from scripts.ci.shard_pytest_nodeids import collect_nodeids, select_nodeids, write_nodeids
+
+output, shard, *paths = sys.argv[1:]
+nodeids = collect_nodeids(paths)
+assert {nodeid.split("::", 1)[0] for nodeid in nodeids} == set(paths), "Native import collection omits a required family"
+groups = [select_nodeids(nodeids, shard_count=2, shard_index=index) for index in range(2)]
+assert sorted(groups[0] + groups[1]) == nodeids, "Native import shards must cover the collection exactly once"
+write_nodeids(Path(output), groups[int(shard)])
+PY
+    [ -s "$selection" ] || exit 0
+    set -- "@$selection"
+  fi
   run_scoped_archive_postgres \
     "hc_custom_import_test_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')" \
     HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN "$archive_url" \
     "$@" --junitxml "$report" || exit "$?"
-  validate_registry_native_report "$report" "" "$@" || exit "$?"
+  validate_registry_native_report "$report" "$selection" "$@" || exit "$?"
 )
 
 validate_registry_native_report() {
@@ -3654,29 +3676,33 @@ run_core_postgres() {
   local rejection_test
   local custom_import_postgres_tests=()
   local custom_import_test_path
-  if postgres_block_runs "$lane" core-snapshots-2 custom-import-snapshot-storage; then
-  rejection_test=$(custom_import_rejection_native_test_path) || return 1
-  for custom_import_test_path in \
-    tests/test_custom_import_snapshot_storage_postgres.py \
-    tests/test_custom_import_snapshot_reads_postgres.py \
-    tests/test_custom_import_source_homes_postgres.py \
-    tests/test_custom_import_retained_homes_postgres.py \
-    tests/test_custom_import_revision_home_postgres.py; do
-    if [ -f "$repository_root/$custom_import_test_path" ]; then
-      custom_import_postgres_tests+=("$custom_import_test_path")
-    fi
-  done
-  if [ "${#custom_import_postgres_tests[@]}" -gt 0 ]; then
+  local snapshot_shard
+  for snapshot_shard in 0 1; do
+    postgres_block_runs "$lane" core-snapshots-2 "custom-import-snapshot-storage-$snapshot_shard" || continue
+    rejection_test=$(custom_import_rejection_native_test_path) || return 1
+    if [[ -z "$rejection_test" && "$snapshot_shard" = 1 ]]; then continue; fi
+    custom_import_postgres_tests=()
+    for custom_import_test_path in \
+      tests/test_custom_import_snapshot_storage_postgres.py \
+      tests/test_custom_import_snapshot_reads_postgres.py \
+      tests/test_custom_import_source_homes_postgres.py \
+      tests/test_custom_import_retained_homes_postgres.py \
+      tests/test_custom_import_revision_home_postgres.py; do
+      if [ -f "$repository_root/$custom_import_test_path" ]; then
+        custom_import_postgres_tests+=("$custom_import_test_path")
+      fi
+    done
+    [ "${#custom_import_postgres_tests[@]}" -gt 0 ] || continue
     if [ -n "$rejection_test" ]; then
-      run_reported_custom_import_postgres "$archive_url" "${custom_import_postgres_tests[@]}" || return "$?"
+      run_reported_custom_import_postgres "$archive_url" --shard-index "$snapshot_shard" \
+        "${custom_import_postgres_tests[@]}" || return "$?"
     else
       run_scoped_archive_postgres \
         "hc_custom_import_test_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')" \
         HLTHPRT_CUSTOM_IMPORT_POSTGRES_DSN "$archive_url" \
         "${custom_import_postgres_tests[@]}"
     fi
-  fi
-  fi
+  done
 
   if [[ "$lane" = core-snapshots-2 || "$lane" = all ]]; then
   rejection_test=$(custom_import_rejection_native_test_path) || return 1
